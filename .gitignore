@@ -1,0 +1,63 @@
+# ── Build ──
+build/
+cmake-build-*/
+out/
+dist/
+*.zip
+*.tar.gz
+
+# ── vcpkg ──
+vcpkg_installed/
+
+# ── IDE / Editor ──
+.idea/
+.vscode/
+*.user
+*.suo
+*.ncb
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+.cache/
+compile_commands.json
+
+# ── Compiled objects ──
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.obj
+*.o
+
+# ── Logs ──
+*.log
+build_log.txt
+
+# ── User / runtime config ──
+app_config.json
+config.json
+stripchat_mouflon_keys.json
+imgui_layout.ini
+
+# ── Downloads / data ──
+downloads/
+
+# ── OS junk ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Temp ──
+*.tmp
+*.temp
+*~
+
+# ── Node (web-dashboard) ──
+web-dashboard/node_modules/
+web-dashboard/.next/
