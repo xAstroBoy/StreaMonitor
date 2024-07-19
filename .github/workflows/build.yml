@@ -1,0 +1,131 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ═══════════════════════════════════════════
+  # Windows — vcpkg + MSVC (static, standalone)
+  # ═══════════════════════════════════════════
+  build-windows:
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static-md
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '01f602195983451bc83e72f4214af2cbc495aa94'  # 2024.05.24
+
+      - name: Configure
+        run: |
+          cmake -S . -B build `
+            -DSM_STATIC_LINK=ON `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
+            -DVCPKG_HOST_TRIPLET=x64-windows-static-md `
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`$<`$<CONFIG:Debug>:Debug>DLL"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel $env:NUMBER_OF_PROCESSORS
+
+      - name: Package
+        run: python build.py --package-only
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreaMonitor-Windows-x64
+          path: dist/
+
+      - name: Upload zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreaMonitor-Windows-x64-zip
+          path: '*.zip'
+
+  # ═══════════════════════════════════════════
+  # Linux — system libraries + GCC
+  # ═══════════════════════════════════════════
+  build-linux:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            libcurl4-openssl-dev libssl-dev \
+            nlohmann-json3-dev libspdlog-dev libfmt-dev \
+            libavcodec-dev libavformat-dev libavfilter-dev \
+            libswresample-dev libswscale-dev \
+            libglfw3-dev libgl1-mesa-dev \
+            libx264-dev libx265-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libxkbcommon-dev libwayland-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSM_USE_SYSTEM_LIBS=ON \
+            -DSM_USE_SYSTEM_FFMPEG=ON
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Package
+        run: python3 build.py --package-only --system-libs
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreaMonitor-Linux-x64
+          path: dist/
+
+      - name: Upload tarball
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreaMonitor-Linux-x64-tar
+          path: '*.tar.gz'
+
+  # ═══════════════════════════════════════════
+  # Create GitHub Release on tag push
+  # ═══════════════════════════════════════════
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: StreaMonitor-Windows-x64-zip
+          path: release/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: StreaMonitor-Linux-x64-tar
+          path: release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release/*

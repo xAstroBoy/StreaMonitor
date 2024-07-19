@@ -1,0 +1,38 @@
+{
+    "name": "streamonitor",
+    "version-string": "2.0.0",
+    "description": "Stream monitoring and recording application with native FFmpeg, ImGui GUI",
+    "dependencies": [
+        {
+            "name": "curl",
+            "features": [
+                "ssl",
+                "sspi"
+            ]
+        },
+        "openssl",
+        "nlohmann-json",
+        {
+            "name": "spdlog",
+            "features": [
+                "wchar"
+            ]
+        },
+        "fmt",
+        {
+            "name": "ffmpeg",
+            "default-features": false,
+            "features": [
+                "avformat",
+                "avcodec",
+                "avfilter",
+                "swscale",
+                "swresample",
+                "nvcodec",
+                "x264",
+                "x265",
+                "gpl"
+            ]
+        }
+    ]
+}

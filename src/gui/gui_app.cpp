@@ -1,0 +1,3589 @@
+// ─────────────────────────────────────────────────────────────────
+// StreaMonitor C++ — ImGui GUI Implementation (Full Feature)
+// Dashboard with settings, disk usage, cross-register,
+// animations, FFmpeg monitor, bot detail panel
+// ─────────────────────────────────────────────────────────────────
+
+#include "gui/gui_app.h"
+#include "net/proxy_pool.h"
+
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
+#include <GLFW/glfw3.h>
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <sstream>
+#include <iomanip>
+#include <filesystem>
+#include <thread>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <Windows.h>
+#include <shellapi.h>
+#else
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#endif
+
+namespace sm
+{
+
+    // ─────────────────────────────────────────────────────────────────
+    // Color palette
+    // ─────────────────────────────────────────────────────────────────
+    static ImVec4 COL_BG_DARK = {0.06f, 0.06f, 0.08f, 1.0f};
+    static ImVec4 COL_BG_PANEL = {0.10f, 0.10f, 0.12f, 1.0f};
+    static ImVec4 COL_ACCENT = {0.35f, 0.55f, 1.00f, 1.0f};
+    static ImVec4 COL_ACCENT_HOVER = {0.45f, 0.65f, 1.00f, 1.0f};
+    static ImVec4 COL_ACCENT_DIM = {0.20f, 0.35f, 0.70f, 1.0f};
+    static ImVec4 COL_TEXT = {0.92f, 0.92f, 0.94f, 1.0f};
+    static ImVec4 COL_TEXT_DIM = {0.50f, 0.50f, 0.55f, 1.0f};
+    static ImVec4 COL_GREEN = {0.25f, 0.85f, 0.35f, 1.0f};
+    static ImVec4 COL_RED = {0.95f, 0.25f, 0.25f, 1.0f};
+    static ImVec4 COL_YELLOW = {0.95f, 0.80f, 0.15f, 1.0f};
+    static ImVec4 COL_ORANGE = {0.95f, 0.55f, 0.15f, 1.0f};
+    static ImVec4 COL_MAGENTA = {0.85f, 0.35f, 0.85f, 1.0f};
+    static ImVec4 COL_CYAN = {0.30f, 0.85f, 0.85f, 1.0f};
+    static ImVec4 COL_RECORDING = {1.00f, 0.15f, 0.15f, 1.0f};
+
+    // ─────────────────────────────────────────────────────────────────
+    // Platform helpers
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Open a folder in the native file manager
+    static void openFolderInExplorer(const std::filesystem::path &folder)
+    {
+        if (!std::filesystem::exists(folder))
+        {
+            spdlog::warn("Folder does not exist: {}", folder.string());
+            return;
+        }
+#ifdef _WIN32
+        ShellExecuteA(nullptr, "explore", folder.string().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+        std::string cmd = "open \"" + folder.string() + "\"";
+        system(cmd.c_str());
+#else
+        std::string cmd = "xdg-open \"" + folder.string() + "\"";
+        system(cmd.c_str());
+#endif
+    }
+
+    /// Open a URL in the default browser
+    static void openUrlInBrowser(const std::string &url)
+    {
+        if (url.empty())
+            return;
+#ifdef _WIN32
+        ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+        std::string cmd = "open \"" + url + "\"";
+        system(cmd.c_str());
+#else
+        std::string cmd = "xdg-open \"" + url + "\"";
+        system(cmd.c_str());
+#endif
+    }
+
+    /// Copy text to clipboard via ImGui
+    static void copyToClipboard(const std::string &text)
+    {
+        ImGui::SetClipboardText(text.c_str());
+    }
+
+    /// Strip whitespace from a string
+    static std::string stripWhitespace(const std::string &str)
+    {
+        std::string result;
+        result.reserve(str.size());
+        for (char c : str)
+            if (!std::isspace(static_cast<unsigned char>(c)))
+                result += c;
+        return result;
+    }
+
+    /// Try to parse a site URL and extract (siteName, username).
+    /// Returns true on success, filling outSite and outUsername.
+    /// Supports URLs like:
+    ///   https://stripchat.com/username
+    ///   https://chaturbate.com/username/
+    ///   https://www.camsoda.com/username
+    ///   etc.
+    static bool parseSiteUrl(const std::string &input, std::string &outSite, std::string &outUsername)
+    {
+        // Must start with http:// or https://
+        std::string url = input;
+        // Trim whitespace
+        while (!url.empty() && std::isspace(static_cast<unsigned char>(url.front())))
+            url.erase(url.begin());
+        while (!url.empty() && std::isspace(static_cast<unsigned char>(url.back())))
+            url.pop_back();
+
+        if (url.size() < 10)
+            return false;
+
+        // Strip protocol
+        std::string lower = url;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+        size_t protoEnd = lower.find("://");
+        if (protoEnd == std::string::npos)
+            return false;
+        std::string rest = url.substr(protoEnd + 3); // after ://
+
+        // Split host/path
+        auto slashPos = rest.find('/');
+        if (slashPos == std::string::npos || slashPos == rest.size() - 1)
+            return false;
+        std::string host = rest.substr(0, slashPos);
+        std::string path = rest.substr(slashPos + 1);
+
+        // Remove trailing slash
+        while (!path.empty() && path.back() == '/')
+            path.pop_back();
+        if (path.empty())
+            return false;
+
+        // Remove www. prefix from host
+        std::string hostLower = host;
+        std::transform(hostLower.begin(), hostLower.end(), hostLower.begin(), ::tolower);
+        if (hostLower.substr(0, 4) == "www.")
+            hostLower = hostLower.substr(4);
+
+        // Map domains to site names
+        // Extract the last path segment as username (handle paths like /cam/username or /live/username)
+        auto lastSlash = path.rfind('/');
+        std::string username = (lastSlash != std::string::npos) ? path.substr(lastSlash + 1) : path;
+        // Remove query string if present
+        auto qpos = username.find('?');
+        if (qpos != std::string::npos)
+            username = username.substr(0, qpos);
+        auto hpos = username.find('#');
+        if (hpos != std::string::npos)
+            username = username.substr(0, hpos);
+
+        if (username.empty())
+            return false;
+
+        // Domain → Site name mapping
+        struct DomainMap
+        {
+            const char *domain;
+            const char *site;
+        };
+        static const DomainMap domains[] = {
+            {"stripchat.com", "StripChat"},
+            {"vr.stripchat.com", "StripChatVR"},
+            {"chaturbate.com", "Chaturbate"},
+            {"en.chaturbate.com", "Chaturbate"},
+            {"de.chaturbate.com", "Chaturbate"},
+            {"bongacams.com", "BongaCams"},
+            {"de.bongacams.net", "BongaCams"},
+            {"bongacams.net", "BongaCams"},
+            {"camsoda.com", "CamSoda"},
+            {"cam4.com", "Cam4"},
+            {"hu.cam4.com", "Cam4"},
+            {"cams.com", "Cams.com"},
+            {"cherry.tv", "CherryTV"},
+            {"dreamcamtrue.com", "DreamCam"},
+            {"fansly.com", "FanslyLive"},
+            {"flirt4free.com", "Flirt4Free"},
+            {"manyvids.com", "ManyVids"},
+            {"myfreecams.com", "MyFreeCams"},
+            {"sexchat.hu", "SexChatHU"},
+            {"streamate.com", "StreaMate"},
+            {"pornhublive.com", "StreaMate"},
+            {"xlovecam.com", "XLoveCam"},
+            {"amateur.tv", "AmateurTV"},
+        };
+
+        // Check vr.stripchat.com first (before generic stripchat.com)
+        for (const auto &dm : domains)
+        {
+            if (hostLower == dm.domain)
+            {
+                outSite = dm.site;
+                outUsername = username;
+                return true;
+            }
+        }
+
+        // Also try suffix match (e.g. "de.bongacams.net" matches "bongacams.net")
+        for (const auto &dm : domains)
+        {
+            std::string suffix = std::string(".") + dm.domain;
+            if (hostLower.size() > suffix.size() &&
+                hostLower.substr(hostLower.size() - suffix.size()) == suffix)
+            {
+                outSite = dm.site;
+                outUsername = username;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Detect LAN IP address for intranet access
+    static std::string detectLanIP()
+    {
+#ifdef _WIN32
+        ULONG bufLen = 15000;
+        std::vector<BYTE> buf(bufLen);
+        auto pAddr = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
+        DWORD ret = GetAdaptersAddresses(AF_INET,
+                                         GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+                                         nullptr, pAddr, &bufLen);
+        if (ret == ERROR_BUFFER_OVERFLOW)
+        {
+            buf.resize(bufLen);
+            pAddr = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
+            ret = GetAdaptersAddresses(AF_INET,
+                                       GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+                                       nullptr, pAddr, &bufLen);
+        }
+        if (ret == NO_ERROR)
+        {
+            for (auto a = pAddr; a; a = a->Next)
+            {
+                if (a->OperStatus != IfOperStatusUp)
+                    continue;
+                if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+                    continue;
+                for (auto u = a->FirstUnicastAddress; u; u = u->Next)
+                {
+                    auto sa = reinterpret_cast<sockaddr_in *>(u->Address.lpSockaddr);
+                    char ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+                    std::string s(ip);
+                    if (s != "127.0.0.1" && s.substr(0, 4) != "169.")
+                        return s;
+                }
+            }
+        }
+#else
+        struct ifaddrs *ifaddr;
+        if (getifaddrs(&ifaddr) == 0)
+        {
+            for (auto ifa = ifaddr; ifa; ifa = ifa->ifa_next)
+            {
+                if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+                    continue;
+                auto sa = reinterpret_cast<sockaddr_in *>(ifa->ifa_addr);
+                char ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+                std::string s(ip);
+                if (s != "127.0.0.1" && s.substr(0, 4) != "169.")
+                {
+                    freeifaddrs(ifaddr);
+                    return s;
+                }
+            }
+            freeifaddrs(ifaddr);
+        }
+#endif
+        return "127.0.0.1";
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Constructor / Destructor
+    // ─────────────────────────────────────────────────────────────────
+    GuiApp::GuiApp(AppConfig &config, ModelConfigStore &configStore, BotManager &manager,
+                   std::shared_ptr<ImGuiLogSink> logSink)
+        : config_(config), configStore_(configStore), manager_(manager), logSink_(std::move(logSink))
+    {
+        // Detect LAN URL once at startup
+        cachedLanUrl_ = "http://" + detectLanIP() + ":" + std::to_string(config.webPort);
+
+        // Clear preview cache on startup to avoid stale thumbnails
+        {
+            auto cachePath = std::filesystem::current_path() / ".cache" / "previews";
+            std::error_code ec;
+            if (std::filesystem::exists(cachePath, ec))
+            {
+                std::filesystem::remove_all(cachePath, ec);
+                spdlog::info("Cleared preview cache: {}", cachePath.string());
+            }
+            std::filesystem::create_directories(cachePath, ec);
+        }
+
+        // Initialize settings edit state from config
+        std::strncpy(editDownloadDir_, config.downloadsDir.string().c_str(), sizeof(editDownloadDir_) - 1);
+        editResolution_ = config.wantedResolution;
+        editPort_ = config.webPort;
+        if (!config.ffmpegPath.empty())
+            std::strncpy(editFfmpegPath_, config.ffmpegPath.string().c_str(), sizeof(editFfmpegPath_) - 1);
+
+        switch (config.container)
+        {
+        case ContainerFormat::MKV:
+            editContainerFmt_ = 0;
+            break;
+        case ContainerFormat::MP4:
+            editContainerFmt_ = 1;
+            break;
+        case ContainerFormat::TS:
+            editContainerFmt_ = 2;
+            break;
+        }
+
+        // Initialize proxy edit state (use first proxy if available)
+        editProxyEnabled_ = config.proxyEnabled;
+        if (!config.proxies.empty())
+        {
+            const auto &firstProxy = config.proxies[0];
+            std::strncpy(editProxyUrl_, firstProxy.url.c_str(), sizeof(editProxyUrl_) - 1);
+
+            switch (firstProxy.type)
+            {
+            case ProxyType::HTTP:
+                editProxyType_ = 0;
+                break;
+            case ProxyType::HTTPS:
+                editProxyType_ = 1;
+                break;
+            case ProxyType::SOCKS4:
+                editProxyType_ = 2;
+                break;
+            case ProxyType::SOCKS4A:
+                editProxyType_ = 3;
+                break;
+            case ProxyType::SOCKS5:
+                editProxyType_ = 4;
+                break;
+            case ProxyType::SOCKS5H:
+                editProxyType_ = 5;
+                break;
+            default:
+                editProxyType_ = 0;
+                break;
+            }
+        }
+
+        // Initialize encoding config edit state from config
+        editEnableCuda_ = config.encoding.enableCuda;
+        editCrf_ = config.encoding.crf;
+        editAudioBitrate_ = config.encoding.audioBitrate;
+        editCopyAudio_ = config.encoding.copyAudio;
+        editMaxWidth_ = config.encoding.maxWidth;
+        editMaxHeight_ = config.encoding.maxHeight;
+        editEncoderThreads_ = config.encoding.threads;
+
+        // Map encoder type enum to combo index
+        switch (config.encoding.encoder)
+        {
+        case EncoderType::Copy:
+            editEncoderType_ = 0;
+            break;
+        case EncoderType::X265:
+            editEncoderType_ = 1;
+            break;
+        case EncoderType::X264:
+            editEncoderType_ = 2;
+            break;
+        case EncoderType::NVENC_HEVC:
+            editEncoderType_ = 3;
+            break;
+        case EncoderType::NVENC_H264:
+            editEncoderType_ = 4;
+            break;
+        default:
+            editEncoderType_ = 1;
+            break;
+        }
+
+        // Map preset string to combo index
+        const char *presets[] = {"ultrafast", "superfast", "veryfast", "faster", "fast",
+                                 "medium", "slow", "slower", "veryslow", "placebo"};
+        editPresetIdx_ = 5; // default to "medium"
+        for (int i = 0; i < 10; ++i)
+        {
+            if (config.encoding.preset == presets[i])
+            {
+                editPresetIdx_ = i;
+                break;
+            }
+        }
+
+        // Initialize FFmpeg tuning edit state from config
+        editFfmpegLiveLastSegments_ = config.ffmpeg.liveLastSegments;
+        editFfmpegRwTimeoutSec_ = config.ffmpeg.rwTimeoutSec;
+        editFfmpegSocketTimeoutSec_ = config.ffmpeg.socketTimeoutSec;
+        editFfmpegReconnectDelayMax_ = config.ffmpeg.reconnectDelayMax;
+        editFfmpegMaxRestarts_ = config.ffmpeg.maxRestarts;
+        editFfmpegGracefulQuitTimeoutSec_ = config.ffmpeg.gracefulQuitTimeoutSec;
+        editFfmpegStartupGraceSec_ = config.ffmpeg.startupGraceSec;
+        editFfmpegSuspectStallSec_ = config.ffmpeg.suspectStallSec;
+        editFfmpegStallSameTimeSec_ = config.ffmpeg.stallSameTimeSec;
+        editFfmpegSpeedLowThreshold_ = config.ffmpeg.speedLowThreshold;
+        editFfmpegSpeedLowSustainSec_ = config.ffmpeg.speedLowSustainSec;
+        editFfmpegMaxSingleLagSec_ = config.ffmpeg.maxSingleLagSec;
+        editFfmpegMaxConsecSkipLines_ = config.ffmpeg.maxConsecSkipLines;
+        editFfmpegFallbackNoStderrSec_ = config.ffmpeg.fallbackNoStderrSec;
+        editFfmpegFallbackNoOutputSec_ = config.ffmpeg.fallbackNoOutputSec;
+        editFfmpegCooldownAfterStalls_ = config.ffmpeg.cooldownAfterStalls;
+        editFfmpegCooldownSleepSec_ = config.ffmpeg.cooldownSleepSec;
+        editFfmpegPlaylistProbeIntervalSec_ = config.ffmpeg.playlistProbeIntervalSec;
+        std::strncpy(editFfmpegProbeSize_, config.ffmpeg.probeSize.c_str(), sizeof(editFfmpegProbeSize_) - 1);
+        std::strncpy(editFfmpegAnalyzeDuration_, config.ffmpeg.analyzeDuration.c_str(), sizeof(editFfmpegAnalyzeDuration_) - 1);
+    }
+
+    GuiApp::~GuiApp()
+    {
+        cleanup();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Window initialization
+    // ─────────────────────────────────────────────────────────────────
+    bool GuiApp::initWindow()
+    {
+        if (!glfwInit())
+        {
+            spdlog::error("Failed to initialize GLFW");
+            return false;
+        }
+
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+        glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+
+        window_ = glfwCreateWindow(1600, 900,
+                                   "StreaMonitor v2.0 - Stream Monitor & Recorder",
+                                   nullptr, nullptr);
+        if (!window_)
+        {
+            spdlog::error("Failed to create window");
+            glfwTerminate();
+            return false;
+        }
+
+        glfwMakeContextCurrent(window_);
+        glfwSwapInterval(1); // VSync
+        return true;
+    }
+
+    void GuiApp::initImGui()
+    {
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+
+        ImGuiIO &io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.IniFilename = "imgui_layout.ini";
+
+        // ── DPI-aware font scaling ──
+        float xscale = 1.0f, yscale = 1.0f;
+        GLFWmonitor *monitor = glfwGetPrimaryMonitor();
+        if (monitor)
+            glfwGetMonitorContentScale(monitor, &xscale, &yscale);
+        dpiScale_ = std::max(xscale, yscale);
+        if (dpiScale_ < 1.0f)
+            dpiScale_ = 1.0f;
+
+        // Fallback: if DPI reports 1.0 but monitor is high-res, auto-scale
+        if (dpiScale_ <= 1.05f && monitor)
+        {
+            const GLFWvidmode *mode = glfwGetVideoMode(monitor);
+            if (mode && mode->width >= 2560)
+                dpiScale_ = std::max(dpiScale_, (float)mode->width / 1920.0f);
+        }
+
+        // Scale font size for the monitor DPI
+        float fontSize = 16.0f * dpiScale_;
+        ImFontConfig fontCfg;
+        fontCfg.SizePixels = fontSize;
+        fontCfg.OversampleH = 2;
+        fontCfg.OversampleV = 1;
+        io.Fonts->AddFontDefault(&fontCfg);
+        io.FontGlobalScale = 1.0f; // already scaled via SizePixels
+
+        ImGui_ImplGlfw_InitForOpenGL(window_, true);
+        ImGui_ImplOpenGL3_Init("#version 330");
+
+        applyTheme();
+    }
+
+    void GuiApp::applyTheme()
+    {
+        ImGuiStyle &style = ImGui::GetStyle();
+        ImVec4 *colors = style.Colors;
+
+        colors[ImGuiCol_WindowBg] = COL_BG_DARK;
+        colors[ImGuiCol_ChildBg] = COL_BG_PANEL;
+        colors[ImGuiCol_PopupBg] = {0.08f, 0.08f, 0.10f, 0.96f};
+        colors[ImGuiCol_Border] = {0.18f, 0.18f, 0.20f, 0.50f};
+        colors[ImGuiCol_FrameBg] = {0.14f, 0.14f, 0.16f, 1.0f};
+        colors[ImGuiCol_FrameBgHovered] = {0.20f, 0.20f, 0.24f, 1.0f};
+        colors[ImGuiCol_FrameBgActive] = {0.26f, 0.26f, 0.30f, 1.0f};
+        colors[ImGuiCol_TitleBg] = {0.08f, 0.08f, 0.10f, 1.0f};
+        colors[ImGuiCol_TitleBgActive] = {0.12f, 0.12f, 0.14f, 1.0f};
+        colors[ImGuiCol_MenuBarBg] = {0.08f, 0.08f, 0.10f, 1.0f};
+        colors[ImGuiCol_Header] = {0.18f, 0.18f, 0.22f, 1.0f};
+        colors[ImGuiCol_HeaderHovered] = COL_ACCENT;
+        colors[ImGuiCol_HeaderActive] = COL_ACCENT_HOVER;
+        colors[ImGuiCol_Button] = {0.18f, 0.18f, 0.22f, 1.0f};
+        colors[ImGuiCol_ButtonHovered] = COL_ACCENT;
+        colors[ImGuiCol_ButtonActive] = COL_ACCENT_HOVER;
+        colors[ImGuiCol_Tab] = {0.12f, 0.12f, 0.14f, 1.0f};
+        colors[ImGuiCol_TabHovered] = COL_ACCENT;
+        colors[ImGuiCol_TabSelected] = {0.22f, 0.35f, 0.60f, 1.0f};
+        colors[ImGuiCol_ScrollbarBg] = {0.06f, 0.06f, 0.08f, 0.5f};
+        colors[ImGuiCol_ScrollbarGrab] = {0.28f, 0.28f, 0.32f, 1.0f};
+        colors[ImGuiCol_TableHeaderBg] = {0.12f, 0.12f, 0.14f, 1.0f};
+        colors[ImGuiCol_TableBorderStrong] = {0.18f, 0.18f, 0.20f, 1.0f};
+        colors[ImGuiCol_TableBorderLight] = {0.14f, 0.14f, 0.16f, 1.0f};
+        colors[ImGuiCol_TableRowBg] = {0.00f, 0.00f, 0.00f, 0.00f};
+        colors[ImGuiCol_TableRowBgAlt] = {0.08f, 0.08f, 0.10f, 0.40f};
+        colors[ImGuiCol_Text] = COL_TEXT;
+        colors[ImGuiCol_TextDisabled] = COL_TEXT_DIM;
+        colors[ImGuiCol_SeparatorHovered] = COL_ACCENT;
+        colors[ImGuiCol_SeparatorActive] = COL_ACCENT_HOVER;
+        colors[ImGuiCol_ResizeGrip] = {0.20f, 0.20f, 0.24f, 0.5f};
+        colors[ImGuiCol_ResizeGripHovered] = COL_ACCENT;
+        colors[ImGuiCol_ResizeGripActive] = COL_ACCENT_HOVER;
+
+        float s = dpiScale_;
+        style.WindowRounding = 6.0f * s;
+        style.FrameRounding = 4.0f * s;
+        style.GrabRounding = 4.0f * s;
+        style.TabRounding = 4.0f * s;
+        style.ScrollbarRounding = 4.0f * s;
+        style.ChildRounding = 4.0f * s;
+        style.PopupRounding = 4.0f * s;
+        style.WindowPadding = {10 * s, 10 * s};
+        style.FramePadding = {8 * s, 5 * s};
+        style.ItemSpacing = {8 * s, 6 * s};
+        style.ScrollbarSize = 14.0f * s;
+        style.GrabMinSize = 12.0f * s;
+        style.WindowBorderSize = 1.0f;
+        style.ChildBorderSize = 0.0f;
+        style.TabBorderSize = 0.0f;
+        style.ScaleAllSizes(1.0f); // apply internally
+    }
+
+    void GuiApp::cleanup()
+    {
+        if (window_)
+        {
+            ImGui_ImplOpenGL3_Shutdown();
+            ImGui_ImplGlfw_Shutdown();
+            ImGui::DestroyContext();
+            glfwDestroyWindow(window_);
+            glfwTerminate();
+            window_ = nullptr;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Main run loop
+    // ─────────────────────────────────────────────────────────────────
+    int GuiApp::run()
+    {
+        if (!initWindow())
+            return 1;
+        initImGui();
+
+        while (!glfwWindowShouldClose(window_))
+        {
+            glfwPollEvents();
+
+            auto now = Clock::now();
+            animTime_ = std::chrono::duration<float>(now.time_since_epoch()).count();
+
+            // Refresh bot states every 500ms
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - lastRefresh_)
+                    .count() > 500)
+            {
+                refreshBotStates();
+                lastRefresh_ = now;
+            }
+
+            // Refresh disk usage every 10 seconds
+            if (std::chrono::duration_cast<std::chrono::seconds>(
+                    now - lastDiskRefresh_)
+                    .count() > 10)
+            {
+                cachedDiskUsage_ = manager_.getDiskUsage();
+                lastDiskRefresh_ = now;
+            }
+
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
+            renderFrame();
+
+            ImGui::Render();
+            int displayW, displayH;
+            glfwGetFramebufferSize(window_, &displayW, &displayH);
+            glViewport(0, 0, displayW, displayH);
+            glClearColor(COL_BG_DARK.x, COL_BG_DARK.y, COL_BG_DARK.z, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+            glfwSwapBuffers(window_);
+        }
+
+        return 0;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Frame rendering
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderFrame()
+    {
+        // Upload any decoded preview images to GL textures
+        imageCache_.uploadPending();
+
+        ImGuiViewport *viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+        ImGui::SetNextWindowViewport(viewport->ID);
+
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                 ImGuiWindowFlags_MenuBar;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::Begin("##MainWindow", nullptr, flags);
+        ImGui::PopStyleVar(2);
+
+        renderMenuBar();
+        renderToolbar();
+
+        // Main content area split: top = table, bottom = log
+        float availH = ImGui::GetContentRegionAvail().y - 28.0f * dpiScale_; // Reserve for status bar
+        float tableH = showLogPanel_ ? availH * splitRatio_ : availH;
+
+        if (ImGui::BeginChild("##ModelTable", {0, tableH}, ImGuiChildFlags_None))
+            renderModelTable();
+        ImGui::EndChild();
+
+        if (showLogPanel_)
+        {
+            // Splitter bar
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.15f, 0.18f, 1.0f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
+            ImGui::Button("##Splitter", {-1, 4});
+            if (ImGui::IsItemActive())
+            {
+                splitRatio_ += ImGui::GetIO().MouseDelta.y / availH;
+                splitRatio_ = std::clamp(splitRatio_, 0.2f, 0.9f);
+            }
+            ImGui::PopStyleColor(2);
+
+            float logH = ImGui::GetContentRegionAvail().y - 28.0f * dpiScale_;
+            if (logH < 40.0f)
+                logH = 40.0f;
+            if (ImGui::BeginChild("##LogPanel", {0, logH}, ImGuiChildFlags_None))
+                renderLogPanel();
+            ImGui::EndChild();
+        }
+
+        ImGui::End(); // MainWindow
+
+        // Status bar at bottom
+        renderStatusBar();
+
+        // Modal / popup windows
+        if (showSettings_)
+            renderSettingsWindow();
+        if (showAddModel_)
+            renderAddModelDialog();
+        if (showAbout_)
+            renderAboutWindow();
+        if (showFFmpegMon_)
+            renderFFmpegMonitor();
+        if (showDiskUsage_)
+            renderDiskUsagePanel();
+        if (showCrossRegister_)
+            renderCrossRegisterWindow();
+        if (showBotDetail_ && selectedBot_ >= 0 && selectedBot_ < (int)cachedStates_.size())
+            renderBotDetailPanel();
+        if (showEditModel_)
+            renderEditModelDialog();
+
+        // ── Async move / resync operations ─────────────────────────
+        if (pendingMoveBot_.has_value())
+        {
+            auto [user, site] = *pendingMoveBot_;
+            pendingMoveBot_.reset();
+            std::thread([this, user, site]()
+                        {
+                auto result = manager_.moveFilesToUnprocessed(user, site);
+                {
+                    std::lock_guard lk(asyncResultMutex_);
+                    moveResyncResult_ = "[" + site + "] " + user + ": " + result.message;
+                }
+                moveResyncDone_.store(true); })
+                .detach();
+        }
+
+        if (pendingResyncBot_.has_value())
+        {
+            auto [user, site] = *pendingResyncBot_;
+            pendingResyncBot_.reset();
+            std::thread([this, user, site]()
+                        {
+                auto result = manager_.resyncBot(user, site);
+                {
+                    std::lock_guard lk(asyncResultMutex_);
+                    moveResyncResult_ = "[" + site + "] " + user + ": " + result;
+                }
+                moveResyncDone_.store(true); })
+                .detach();
+        }
+
+        // Show result toast
+        if (moveResyncDone_.load())
+        {
+            moveResyncDone_.store(false);
+            std::string msg;
+            {
+                std::lock_guard lk(asyncResultMutex_);
+                msg = moveResyncResult_;
+            }
+            addLog("info", "system", msg);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Menu bar
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderMenuBar()
+    {
+        if (!ImGui::BeginMenuBar())
+            return;
+
+        if (ImGui::BeginMenu("File"))
+        {
+            if (ImGui::MenuItem("Add Model...", "Ctrl+N"))
+                showAddModel_ = true;
+            ImGui::Separator();
+            if (ImGui::MenuItem("Save Config", "Ctrl+S"))
+                manager_.saveConfig();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Exit", "Alt+F4"))
+                glfwSetWindowShouldClose(window_, GLFW_TRUE);
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("View"))
+        {
+            ImGui::MenuItem("Log Panel", "Ctrl+L", &showLogPanel_);
+            ImGui::MenuItem("Disk Usage", "Ctrl+D", &showDiskUsage_);
+            ImGui::MenuItem("FFmpeg Monitor", nullptr, &showFFmpegMon_);
+            ImGui::MenuItem("Cross-Register", nullptr, &showCrossRegister_);
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Control"))
+        {
+            if (ImGui::MenuItem("Start All"))
+            {
+                manager_.startAll();
+                manager_.startAllGroups();
+            }
+            if (ImGui::MenuItem("Stop All"))
+            {
+                manager_.stopAll();
+                manager_.stopAllGroups();
+            }
+            if (ImGui::MenuItem("Resync All"))
+            {
+                std::thread([this]()
+                            {
+                    auto result = manager_.resyncAll();
+                    addLog("info", "system", result); })
+                    .detach();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Settings...", "Ctrl+,"))
+                showSettings_ = true;
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Help"))
+        {
+            if (ImGui::MenuItem("About StreaMonitor"))
+                showAbout_ = true;
+            ImGui::EndMenu();
+        }
+
+        // Right-aligned live stats
+        float textWidth = ImGui::CalcTextSize("REC: 00 | Online: 00 | Total: 000").x;
+        ImGui::SameLine(ImGui::GetWindowWidth() - textWidth - 20);
+
+        size_t recCount = manager_.recordingCount();
+        size_t onCount = manager_.onlineCount();
+        size_t totalCount = manager_.botCount();
+
+        if (recCount > 0)
+        {
+            // Pulsating red for recording indicator
+            float pulse = (std::sin(animTime_ * 3.0f) + 1.0f) * 0.5f;
+            ImVec4 recCol = {1.0f, 0.1f + pulse * 0.2f, 0.1f + pulse * 0.2f, 1.0f};
+            ImGui::TextColored(recCol, "REC: %zu", recCount);
+        }
+        else
+        {
+            ImGui::TextColored(COL_TEXT_DIM, "REC: 0");
+        }
+
+        ImGui::SameLine();
+        ImGui::TextColored(COL_GREEN, "| Online: %zu", onCount);
+        ImGui::SameLine();
+        ImGui::TextColored(COL_TEXT_DIM, "| Total: %zu", totalCount);
+
+        ImGui::EndMenuBar();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Toolbar
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderToolbar()
+    {
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {12 * dpiScale_, 6 * dpiScale_});
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {6 * dpiScale_, 6 * dpiScale_});
+
+        ImGui::Spacing();
+
+        // Add button (green)
+        ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.45f, 0.15f, 1.0f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.20f, 0.55f, 0.20f, 1.0f});
+        if (ImGui::Button(" + Add Model "))
+            showAddModel_ = true;
+        ImGui::PopStyleColor(2);
+
+        ImGui::SameLine();
+        if (ImGui::Button(" Start All "))
+        {
+            manager_.startAll();
+            manager_.startAllGroups();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(" Stop All "))
+        {
+            manager_.stopAll();
+            manager_.stopAllGroups();
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(COL_TEXT_DIM, "(auto-saved)");
+
+        // Right side: search bar + filter
+        ImGui::SameLine(ImGui::GetWindowWidth() - 420 * dpiScale_);
+        ImGui::SetNextItemWidth(200 * dpiScale_);
+        ImGui::InputTextWithHint("##Search", "Search models...", searchBuf_, sizeof(searchBuf_));
+
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(150 * dpiScale_);
+        const char *statusFilters[] = {"All Status", "Public", "Recording", "Private",
+                                       "Offline", "Error", "Not Running"};
+        ImGui::Combo("##StatusFilter", &filterStatus_, statusFilters,
+                     IM_ARRAYSIZE(statusFilters));
+
+        ImGui::PopStyleVar(2);
+        ImGui::Separator();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Model table — grouped by username, with multi-select & bulk actions
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderModelTable()
+    {
+        float s = dpiScale_;
+
+        // ── Build grouped rows by username ─────────────────────────
+        struct GroupedRow
+        {
+            std::string username;
+            std::string key; // lowercase
+            std::vector<int> indices;
+            std::string sitesStr;
+            std::string groupName; // cross-register group name (if any)
+            Status bestStatus = Status::NotRunning;
+            bool anyRecording = false;
+            bool anyRunning = false;
+            bool anyMobile = false;
+            uint64_t combinedSize = 0;
+            double maxSpeed = 0.0;
+            TimePoint earliestStart{};
+            std::string primaryUrl;
+            int primaryIdx = -1;
+        };
+
+        auto statusPrio = [](Status st) -> int
+        {
+            switch (st)
+            {
+            case Status::Public:
+            case Status::Online:
+                return 6;
+            case Status::Private:
+            case Status::Restricted:
+                return 5;
+            case Status::Offline:
+                return 3;
+            case Status::LongOffline:
+                return 2;
+            case Status::Error:
+            case Status::RateLimit:
+            case Status::Cloudflare:
+                return 1;
+            case Status::NotExist:
+            case Status::Deleted:
+                return 0;
+            default:
+                return -1;
+            }
+        };
+
+        // ── Pre-compute cross-register group lookup ────────────────
+        // Map (siteName, username) → group name for fast lookup
+        std::unordered_map<std::string, std::string> botToGroup;
+        {
+            auto crGroups = manager_.getCrossRegisterGroups();
+            for (const auto &cg : crGroups)
+            {
+                for (const auto &[site, user] : cg.members)
+                {
+                    std::string bkey = user + "\t" + site;
+                    botToGroup[bkey] = cg.groupName;
+                }
+            }
+        }
+
+        std::unordered_map<std::string, GroupedRow> groupMap;
+        for (int i = 0; i < (int)cachedStates_.size(); i++)
+        {
+            const auto &bot = cachedStates_[i];
+
+            // Determine grouping key: cross-register group name, or lowercase username
+            std::string crGroupName;
+            {
+                std::string bkey = bot.username + "\t" + bot.siteName;
+                auto it = botToGroup.find(bkey);
+                if (it != botToGroup.end())
+                    crGroupName = it->second;
+            }
+
+            std::string key;
+            if (!crGroupName.empty())
+            {
+                // Cross-register: group by group name (prefix to avoid collision with usernames)
+                key = "\x01_crg_" + crGroupName;
+            }
+            else
+            {
+                key = bot.username;
+                std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            }
+
+            auto &grp = groupMap[key];
+            if (grp.indices.empty())
+            {
+                grp.username = crGroupName.empty() ? bot.username : crGroupName;
+                grp.key = key;
+                grp.bestStatus = bot.status;
+                grp.primaryUrl = bot.websiteUrl;
+                grp.primaryIdx = i;
+                grp.earliestStart = bot.startTime;
+                grp.groupName = crGroupName;
+            }
+            grp.indices.push_back(i);
+            if (!grp.sitesStr.empty())
+                grp.sitesStr += ", ";
+            // For cross-register groups, show username [Site] per member
+            if (!crGroupName.empty())
+                grp.sitesStr += bot.username + " [" + bot.siteName + "]";
+            else
+                grp.sitesStr += bot.siteName;
+            grp.combinedSize += bot.totalBytes + bot.recordingStats.bytesWritten;
+            if (bot.recording)
+            {
+                grp.anyRecording = true;
+                grp.maxSpeed = std::max(grp.maxSpeed, bot.recordingStats.currentSpeed);
+            }
+            if (bot.running)
+                grp.anyRunning = true;
+            if (bot.mobile)
+                grp.anyMobile = true;
+            if (statusPrio(bot.status) > statusPrio(grp.bestStatus))
+                grp.bestStatus = bot.status;
+            if (bot.running && bot.startTime.time_since_epoch().count() > 0)
+            {
+                if (grp.earliestStart.time_since_epoch().count() == 0 ||
+                    bot.startTime < grp.earliestStart)
+                    grp.earliestStart = bot.startTime;
+            }
+            if (bot.recording && !cachedStates_[grp.primaryIdx].recording)
+                grp.primaryIdx = i;
+            if (grp.primaryUrl.empty() && !bot.websiteUrl.empty())
+                grp.primaryUrl = bot.websiteUrl;
+        }
+
+        // ── Overlay ModelGroupState onto cross-register rows ──
+        // Individual bots in a cross-register group are NOT started as
+        // individual bots — the ModelGroup cycling engine manages them.
+        // So we pull running/status/recording from the group state.
+        {
+            auto groupStates = manager_.getAllGroupStates();
+            for (auto &[key, grp] : groupMap)
+            {
+                if (grp.groupName.empty())
+                    continue;
+                for (const auto &gs : groupStates)
+                {
+                    if (gs.groupName != grp.groupName)
+                        continue;
+                    grp.anyRunning = gs.running;
+                    grp.anyRecording = gs.recording;
+                    if (gs.running)
+                    {
+                        grp.bestStatus = gs.activeStatus;
+                        grp.anyMobile = gs.activeMobile;
+                        // Use best per-pairing status if group is cycling
+                        for (const auto &ps : gs.pairings)
+                        {
+                            if (statusPrio(ps.lastStatus) > statusPrio(grp.bestStatus))
+                                grp.bestStatus = ps.lastStatus;
+                            if (ps.mobile)
+                                grp.anyMobile = true;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        std::vector<GroupedRow> rows;
+        rows.reserve(groupMap.size());
+        for (auto &[_, grp] : groupMap)
+            rows.push_back(std::move(grp));
+        std::sort(rows.begin(), rows.end(),
+                  [](const GroupedRow &a, const GroupedRow &b)
+                  { return a.username < b.username; });
+
+        std::string searchStr(searchBuf_);
+        std::transform(searchStr.begin(), searchStr.end(), searchStr.begin(), ::tolower);
+
+        // ── Filter rows ────────────────────────────────────────────
+        std::vector<GroupedRow *> visibleRows;
+        for (auto &grp : rows)
+        {
+            if (!searchStr.empty())
+            {
+                std::string lowerName = grp.key;
+                std::string lowerSites = grp.sitesStr;
+                std::transform(lowerSites.begin(), lowerSites.end(), lowerSites.begin(), ::tolower);
+                std::string lowerGroup = grp.groupName;
+                std::transform(lowerGroup.begin(), lowerGroup.end(), lowerGroup.begin(), ::tolower);
+                if (lowerName.find(searchStr) == std::string::npos &&
+                    lowerSites.find(searchStr) == std::string::npos &&
+                    lowerGroup.find(searchStr) == std::string::npos)
+                    continue;
+            }
+            if (filterStatus_ > 0)
+            {
+                bool match = false;
+                for (int idx : grp.indices)
+                {
+                    const auto &b = cachedStates_[idx];
+                    switch (filterStatus_)
+                    {
+                    case 1:
+                        match |= (b.status == Status::Public);
+                        break;
+                    case 2:
+                        match |= b.recording;
+                        break;
+                    case 3:
+                        match |= (b.status == Status::Private);
+                        break;
+                    case 4:
+                        match |= (b.status == Status::Offline || b.status == Status::LongOffline);
+                        break;
+                    case 5:
+                        match |= (b.status == Status::Error);
+                        break;
+                    case 6:
+                        match |= (b.status == Status::NotRunning);
+                        break;
+                    }
+                }
+                if (!match)
+                    continue;
+            }
+            visibleRows.push_back(&grp);
+        }
+
+        // ── Bulk action bar (shown when anything is selected) ──────
+        if (!selectedRows_.empty())
+        {
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {10 * s, 5 * s});
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.12f, 0.12f, 0.16f, 1.0f});
+            ImGui::BeginChild("##BulkBar", {0, 38 * s}, ImGuiChildFlags_None);
+
+            ImGui::TextColored(COL_ACCENT, "%d selected", (int)selectedRows_.size());
+            ImGui::SameLine(0, 16 * s);
+
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.15f, 0.40f, 0.15f, 1.0f});
+            if (ImGui::Button("Start Selected"))
+            {
+                for (auto &grp : rows)
+                {
+                    if (!selectedRows_.count(grp.key))
+                        continue;
+                    if (!grp.groupName.empty())
+                        manager_.startGroup(grp.groupName);
+                    else
+                        for (int idx : grp.indices)
+                            manager_.startBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                }
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine(0, 4 * s);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.50f, 0.15f, 0.15f, 1.0f});
+            if (ImGui::Button("Stop Selected"))
+            {
+                for (auto &grp : rows)
+                {
+                    if (!selectedRows_.count(grp.key))
+                        continue;
+                    if (!grp.groupName.empty())
+                        manager_.stopGroup(grp.groupName);
+                    else
+                        for (int idx : grp.indices)
+                            manager_.stopBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                }
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine(0, 4 * s);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.35f, 0.35f, 0.15f, 1.0f});
+            if (ImGui::Button("Restart Selected"))
+            {
+                // Collect targets and offload to background thread to avoid freezing UI
+                // (each stopBot acquires mutex + does disk I/O via configStore_.save)
+                std::vector<std::string> groupNames;
+                std::vector<std::pair<std::string, std::string>> bots;
+                for (auto &grp : rows)
+                {
+                    if (!selectedRows_.count(grp.key))
+                        continue;
+                    if (!grp.groupName.empty())
+                        groupNames.push_back(grp.groupName);
+                    else
+                        for (int idx : grp.indices)
+                            bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                }
+                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
+                            {
+                    for (auto &gn : groupNames)
+                    {
+                        manager_.stopGroup(gn);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        manager_.startGroup(gn);
+                    }
+                    for (auto &[user, site] : bots)
+                        manager_.restartBot(user, site); })
+                    .detach();
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine(0, 4 * s);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.10f, 0.45f, 0.55f, 1.0f});
+            if (ImGui::Button("Resync Selected"))
+            {
+                // Force resync all selected bots (immediate status check)
+                std::vector<std::pair<std::string, std::string>> targets;
+                for (auto &grp : rows)
+                {
+                    if (!selectedRows_.count(grp.key))
+                        continue;
+                    for (int idx : grp.indices)
+                        targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteSlug);
+                }
+                if (!targets.empty())
+                {
+                    std::thread([this, targets = std::move(targets)]()
+                                {
+                        int ok = 0, fail = 0;
+                        for (auto &[user, site] : targets)
+                        {
+                            auto result = manager_.resyncBot(user, site);
+                            if (result.find("Resynced") != std::string::npos)
+                                ++ok;
+                            else
+                                ++fail;
+                        }
+                        std::string msg = "Resync: " + std::to_string(ok) + " resynced";
+                        if (fail > 0)
+                            msg += ", " + std::to_string(fail) + " failed";
+                        {
+                            std::lock_guard lk(asyncResultMutex_);
+                            moveResyncResult_ = std::move(msg);
+                        }
+                        moveResyncDone_.store(true); })
+                        .detach();
+                }
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine(0, 12 * s);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.55f, 0.10f, 0.10f, 1.0f});
+            if (ImGui::Button("Remove Selected"))
+            {
+                for (auto &grp : rows)
+                    if (selectedRows_.count(grp.key))
+                        for (int idx : grp.indices)
+                            manager_.removeBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                selectedRows_.clear();
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine(0, 4 * s);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.45f, 0.30f, 0.10f, 1.0f});
+            if (ImGui::Button("Move to Unprocessed"))
+            {
+                // Collect selected bots and move their files on a background thread
+                std::vector<std::pair<std::string, std::string>> targets;
+                for (auto &grp : rows)
+                {
+                    if (!selectedRows_.count(grp.key))
+                        continue;
+                    for (int idx : grp.indices)
+                        targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteSlug);
+                }
+                if (!targets.empty())
+                {
+                    std::thread([this, targets = std::move(targets)]()
+                                {
+                        std::string summary;
+                        int ok = 0, fail = 0;
+                        for (auto &[user, site] : targets)
+                        {
+                            auto result = manager_.moveFilesToUnprocessed(user, site);
+                            if (result.success)
+                                ++ok;
+                            else
+                                ++fail;
+                        }
+                        std::string msg = "Bulk move: " + std::to_string(ok) + " moved";
+                        if (fail > 0)
+                            msg += ", " + std::to_string(fail) + " had no files";
+                        {
+                            std::lock_guard lk(asyncResultMutex_);
+                            moveResyncResult_ = std::move(msg);
+                        }
+                        moveResyncDone_.store(true); })
+                        .detach();
+                }
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine(0, 12 * s);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.20f, 0.25f, 0.45f, 1.0f});
+            if (ImGui::Button("Create Group"))
+                ImGui::OpenPopup("CreateGroupFromSelection");
+            ImGui::PopStyleColor();
+
+            // Popup for group name input
+            if (ImGui::BeginPopup("CreateGroupFromSelection"))
+            {
+                ImGui::Text("Group Name:");
+                ImGui::SetNextItemWidth(200 * s);
+                bool enter = ImGui::InputText("##NewGrpName", bulkGroupName_, sizeof(bulkGroupName_),
+                                              ImGuiInputTextFlags_EnterReturnsTrue);
+                ImGui::SameLine();
+                if ((ImGui::Button("OK") || enter) && std::strlen(bulkGroupName_) > 0)
+                {
+                    // Collect selected members
+                    std::vector<std::pair<std::string, std::string>> members;
+                    for (auto &grp : rows)
+                    {
+                        if (!selectedRows_.count(grp.key))
+                            continue;
+                        for (int idx : grp.indices)
+                        {
+                            const auto &b = cachedStates_[idx];
+                            members.emplace_back(b.siteName, b.username);
+                        }
+                    }
+                    manager_.createCrossRegisterGroup(bulkGroupName_, members);
+                    std::memset(bulkGroupName_, 0, sizeof(bulkGroupName_));
+                    selectedRows_.clear();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+            ImGui::SameLine(0, 12 * s);
+            if (ImGui::Button("Clear Selection"))
+                selectedRows_.clear();
+
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar();
+        }
+
+        // ── Table ──────────────────────────────────────────────────
+        ImGuiTableFlags tableFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                                     ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersInnerV |
+                                     ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp;
+
+        if (!ImGui::BeginTable("##Models", 11, tableFlags))
+            return;
+
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("##Chk", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 28.0f * s);
+        ImGui::TableSetupColumn("##Icon", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 55.0f * s);
+        ImGui::TableSetupColumn("Username", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_NoHide, 3.5f);
+        ImGui::TableSetupColumn("Sites", 0, 2.0f);
+        ImGui::TableSetupColumn("Group", 0, 2.0f);
+        ImGui::TableSetupColumn("URL", 0, 4.0f);
+        ImGui::TableSetupColumn("Status", 0, 1.5f);
+        ImGui::TableSetupColumn("Recording", 0, 1.0f);
+        ImGui::TableSetupColumn("Size", 0, 1.2f);
+        ImGui::TableSetupColumn("Speed", 0, 1.0f);
+        ImGui::TableSetupColumn("Uptime", 0, 1.0f);
+
+        // Header row — with Select All checkbox
+        ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+        // Checkbox header — select/deselect all
+        ImGui::TableSetColumnIndex(0);
+        {
+            bool allSelected = !visibleRows.empty();
+            bool anySelected = false;
+            for (auto *rp : visibleRows)
+            {
+                if (selectedRows_.count(rp->key))
+                    anySelected = true;
+                else
+                    allSelected = false;
+            }
+            bool mixed = anySelected && !allSelected;
+            if (mixed)
+            {
+                // Show as checked; clicking will deselect all
+                bool tmp = true;
+                if (ImGui::Checkbox("##SelectAll", &tmp))
+                    selectedRows_.clear();
+            }
+            else
+            {
+                if (ImGui::Checkbox("##SelectAll", &allSelected))
+                {
+                    if (allSelected)
+                        for (auto *rp : visibleRows)
+                            selectedRows_.insert(rp->key);
+                    else
+                        selectedRows_.clear();
+                }
+            }
+        }
+        // Rest of headers
+        for (int col = 1; col < 11; col++)
+        {
+            ImGui::TableSetColumnIndex(col);
+            ImGui::TableHeader(ImGui::TableGetColumnName(col));
+        }
+
+        for (auto *rp : visibleRows)
+        {
+            auto &grp = *rp;
+            bool isMultiSite = grp.indices.size() > 1;
+            ImGui::TableNextRow();
+            ImGui::PushID(grp.primaryIdx);
+
+            // ── Checkbox ────────────────────────────────────────────
+            ImGui::TableNextColumn();
+            {
+                bool checked = selectedRows_.count(grp.key) > 0;
+                if (ImGui::Checkbox("##sel", &checked))
+                {
+                    if (checked)
+                        selectedRows_.insert(grp.key);
+                    else
+                        selectedRows_.erase(grp.key);
+                }
+            }
+
+            // ── Icon ────────────────────────────────────────────────
+            ImGui::TableNextColumn();
+            {
+                ImVec4 col = statusColor(grp.bestStatus);
+                if (grp.anyRecording)
+                {
+                    float pulse = (std::sin(animTime_ * 4.0f) + 1.0f) * 0.5f;
+                    col = {1.0f, 0.1f + pulse * 0.3f, 0.1f + pulse * 0.1f, 1.0f};
+                }
+                ImGui::TextColored(col, "%s", statusIcon(grp.bestStatus));
+            }
+
+            // ── Username (TreeNode for multi-site, Selectable for single) ──
+            ImGui::TableNextColumn();
+            bool treeOpen = false;
+            {
+                bool selected = false;
+                for (int idx : grp.indices)
+                    if (selectedBot_ == idx)
+                    {
+                        selected = true;
+                        break;
+                    }
+
+                if (isMultiSite)
+                {
+                    ImGuiTreeNodeFlags nodeFlags = ImGuiTreeNodeFlags_DefaultOpen |
+                                                   ImGuiTreeNodeFlags_SpanAvailWidth |
+                                                   ImGuiTreeNodeFlags_OpenOnArrow;
+                    if (selected)
+                        nodeFlags |= ImGuiTreeNodeFlags_Selected;
+                    treeOpen = ImGui::TreeNodeEx(grp.username.c_str(), nodeFlags);
+                    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+                    {
+                        selectedBot_ = grp.primaryIdx;
+                        if (ImGui::IsMouseDoubleClicked(0))
+                            showBotDetail_ = true;
+                    }
+                }
+                else
+                {
+                    if (ImGui::Selectable(grp.username.c_str(), selected,
+                                          ImGuiSelectableFlags_AllowDoubleClick))
+                    {
+                        selectedBot_ = grp.primaryIdx;
+                        if (ImGui::IsMouseDoubleClicked(0))
+                            showBotDetail_ = true;
+                    }
+                }
+            }
+
+            // ── Right-click context menu (with per-site actions) ────
+            if (ImGui::BeginPopupContextItem("##BotCtx"))
+            {
+                selectedBot_ = grp.primaryIdx;
+
+                ImGui::TextColored(COL_ACCENT, "%s", grp.username.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(COL_TEXT_DIM, "(%s)", grp.sitesStr.c_str());
+                ImGui::Separator();
+
+                // ── Start / Stop / Restart ──────────────────────────
+                if (!grp.groupName.empty())
+                {
+                    // Cross-register group — use group start/stop (cycling engine)
+                    if (grp.anyRunning)
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
+                        if (ImGui::MenuItem("Stop Group"))
+                            manager_.stopGroup(grp.groupName);
+                        ImGui::PopStyleColor();
+                    }
+                    else
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_GREEN);
+                        if (ImGui::MenuItem("Start Group"))
+                            manager_.startGroup(grp.groupName);
+                        ImGui::PopStyleColor();
+                    }
+                }
+                else if (grp.indices.size() == 1)
+                {
+                    int idx = grp.indices[0];
+                    const auto &b = cachedStates_[idx];
+                    if (b.running)
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
+                        if (ImGui::MenuItem("Stop"))
+                            manager_.stopBot(b.username, b.siteName);
+                        ImGui::PopStyleColor();
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
+                        if (ImGui::MenuItem("Restart"))
+                            manager_.restartBot(b.username, b.siteName);
+                        ImGui::PopStyleColor();
+                    }
+                    else
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_GREEN);
+                        if (ImGui::MenuItem("Start"))
+                            manager_.startBot(b.username, b.siteName);
+                        ImGui::PopStyleColor();
+                    }
+                }
+                else
+                {
+                    // Multi-site: per-site entries + All options
+                    for (int idx : grp.indices)
+                    {
+                        const auto &b = cachedStates_[idx];
+                        if (b.running)
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
+                            if (ImGui::MenuItem(("Stop  [" + b.siteName + "]").c_str()))
+                                manager_.stopBot(b.username, b.siteName);
+                            ImGui::PopStyleColor();
+                        }
+                        else
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Text, COL_GREEN);
+                            if (ImGui::MenuItem(("Start [" + b.siteName + "]").c_str()))
+                                manager_.startBot(b.username, b.siteName);
+                            ImGui::PopStyleColor();
+                        }
+                    }
+                    ImGui::Separator();
+                    if (grp.anyRunning)
+                    {
+                        if (ImGui::MenuItem("Stop All"))
+                            for (int idx : grp.indices)
+                                manager_.stopBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                        if (ImGui::MenuItem("Restart All"))
+                            for (int idx : grp.indices)
+                                manager_.restartBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                    }
+                    else
+                    {
+                        if (ImGui::MenuItem("Start All"))
+                            for (int idx : grp.indices)
+                                manager_.startBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                    }
+                }
+
+                ImGui::Separator();
+
+                if (ImGui::MenuItem("Open in Browser") && !grp.primaryUrl.empty())
+                    openUrlInBrowser(grp.primaryUrl);
+
+                if (ImGui::MenuItem("Copy URL") && !grp.primaryUrl.empty())
+                    copyToClipboard(grp.primaryUrl);
+
+                ImGui::Separator();
+
+                if (ImGui::MenuItem("Open Downloads Folder"))
+                {
+                    auto &b = cachedStates_[grp.primaryIdx];
+                    auto folder = config_.downloadsDir / (b.username + " [" + b.siteSlug + "]");
+                    if (std::filesystem::exists(folder))
+                        openFolderInExplorer(folder);
+                    else
+                        openFolderInExplorer(config_.downloadsDir);
+                }
+
+                if (ImGui::MenuItem("Details..."))
+                    showBotDetail_ = true;
+
+                ImGui::Separator();
+
+                if (ImGui::MenuItem("Move to Unprocessed"))
+                    pendingMoveBot_ = {cachedStates_[grp.primaryIdx].username,
+                                       cachedStates_[grp.primaryIdx].siteSlug};
+
+                if (ImGui::MenuItem("Resync Status"))
+                    pendingResyncBot_ = {cachedStates_[grp.primaryIdx].username,
+                                         cachedStates_[grp.primaryIdx].siteSlug};
+
+                ImGui::Separator();
+
+                // ── Cross-Register Group ────────────────────────────
+                if (!grp.groupName.empty())
+                {
+                    if (ImGui::MenuItem("Edit Group..."))
+                    {
+                        focusCrossRegisterGroup_ = grp.groupName;
+                        showCrossRegister_ = true;
+                    }
+                }
+                else
+                {
+                    if (ImGui::MenuItem("Add to Group..."))
+                    {
+                        showCrossRegister_ = true;
+                    }
+                }
+
+                ImGui::Separator();
+
+                // ── Edit model entry ────────────────────────────────
+                if (grp.indices.size() == 1)
+                {
+                    if (ImGui::MenuItem("Edit..."))
+                    {
+                        const auto &b = cachedStates_[grp.indices[0]];
+                        editModelOrigUser_ = b.username;
+                        editModelOrigSite_ = b.siteName;
+                        std::strncpy(editModelUsername_, b.username.c_str(), sizeof(editModelUsername_) - 1);
+                        editModelUsername_[sizeof(editModelUsername_) - 1] = '\0';
+                        // Find site index
+                        auto allSites = manager_.availableSites();
+                        editModelSiteIdx_ = 0;
+                        for (int si = 0; si < (int)allSites.size(); si++)
+                        {
+                            if (allSites[si] == b.siteName)
+                            {
+                                editModelSiteIdx_ = si;
+                                break;
+                            }
+                        }
+                        showEditModel_ = true;
+                    }
+                }
+                else
+                {
+                    if (ImGui::BeginMenu("Edit..."))
+                    {
+                        for (int idx : grp.indices)
+                        {
+                            const auto &b = cachedStates_[idx];
+                            if (ImGui::MenuItem((b.username + " [" + b.siteName + "]").c_str()))
+                            {
+                                editModelOrigUser_ = b.username;
+                                editModelOrigSite_ = b.siteName;
+                                std::strncpy(editModelUsername_, b.username.c_str(), sizeof(editModelUsername_) - 1);
+                                editModelUsername_[sizeof(editModelUsername_) - 1] = '\0';
+                                auto allSites = manager_.availableSites();
+                                editModelSiteIdx_ = 0;
+                                for (int si = 0; si < (int)allSites.size(); si++)
+                                {
+                                    if (allSites[si] == b.siteName)
+                                    {
+                                        editModelSiteIdx_ = si;
+                                        break;
+                                    }
+                                }
+                                showEditModel_ = true;
+                            }
+                        }
+                        ImGui::EndMenu();
+                    }
+                }
+
+                ImGui::Separator();
+
+                // ── Remove (per-site or direct) ────────────────────
+                if (grp.indices.size() == 1)
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
+                    if (ImGui::MenuItem("Remove"))
+                        manager_.removeBot(cachedStates_[grp.indices[0]].username,
+                                           cachedStates_[grp.indices[0]].siteName);
+                    ImGui::PopStyleColor();
+                }
+                else
+                {
+                    if (ImGui::BeginMenu("Remove..."))
+                    {
+                        for (int idx : grp.indices)
+                        {
+                            const auto &b = cachedStates_[idx];
+                            if (ImGui::MenuItem((b.siteName + " (" + b.siteSlug + ")").c_str()))
+                                manager_.removeBot(b.username, b.siteName);
+                        }
+                        ImGui::Separator();
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
+                        if (ImGui::MenuItem("Remove All"))
+                            for (int idx : grp.indices)
+                                manager_.removeBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                        ImGui::PopStyleColor();
+                        ImGui::EndMenu();
+                    }
+                }
+
+                ImGui::EndPopup();
+            }
+
+            // ── Sites ───────────────────────────────────────────────
+            ImGui::TableNextColumn();
+            ImGui::TextColored(COL_ACCENT, "%s", grp.sitesStr.c_str());
+
+            // ── Group (cross-register group name) ───────────────────
+            ImGui::TableNextColumn();
+            if (!grp.groupName.empty())
+                ImGui::TextColored(COL_YELLOW, "%s", grp.groupName.c_str());
+            else
+                ImGui::TextColored(COL_TEXT_DIM, "--");
+
+            // ── URL (model website — clickable, right-click to copy) ──
+            ImGui::TableNextColumn();
+            if (!grp.primaryUrl.empty())
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT_DIM);
+                // Truncate display to fit column, but full URL in tooltip
+                ImGui::TextUnformatted(grp.primaryUrl.c_str());
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    ImGui::SetTooltip("%s\nClick = open  |  Right-click = copy", grp.primaryUrl.c_str());
+                }
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+                    openUrlInBrowser(grp.primaryUrl);
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                {
+                    copyToClipboard(grp.primaryUrl);
+                    addLog("info", "system", "Copied URL: " + grp.primaryUrl);
+                }
+            }
+            else
+                ImGui::TextColored(COL_TEXT_DIM, "--");
+
+            // ── Status ──────────────────────────────────────────────
+            ImGui::TableNextColumn();
+            {
+                ImVec4 col = statusColor(grp.bestStatus);
+                ImGui::TextColored(col, "%s", statusToString(grp.bestStatus));
+                if (grp.anyMobile)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextColored(COL_ORANGE, "(M)");
+                }
+            }
+
+            // ── Recording ───────────────────────────────────────────
+            ImGui::TableNextColumn();
+            if (grp.anyRecording)
+            {
+                float pulse = (std::sin(animTime_ * 3.0f) + 1.0f) * 0.5f;
+                ImVec4 recCol = {1.0f, 0.2f + pulse * 0.2f, 0.2f, 1.0f};
+                ImGui::TextColored(recCol, "REC");
+            }
+            else
+            {
+                ImGui::TextColored(COL_TEXT_DIM, "--");
+            }
+
+            // ── Size ────────────────────────────────────────────────
+            ImGui::TableNextColumn();
+            if (grp.combinedSize > 0)
+                ImGui::Text("%s", formatBytesHuman(grp.combinedSize).c_str());
+            else
+                ImGui::TextColored(COL_TEXT_DIM, "--");
+
+            // ── Speed ───────────────────────────────────────────────
+            ImGui::TableNextColumn();
+            if (grp.anyRecording && grp.maxSpeed > 0)
+                ImGui::Text("%.1fx", grp.maxSpeed);
+            else
+                ImGui::TextColored(COL_TEXT_DIM, "--");
+
+            // ── Uptime ──────────────────────────────────────────────
+            ImGui::TableNextColumn();
+            if (grp.anyRunning && grp.earliestStart.time_since_epoch().count() > 0)
+                ImGui::Text("%s", formatTimeAgo(grp.earliestStart).c_str());
+            else
+                ImGui::TextColored(COL_TEXT_DIM, "--");
+
+            // ── Expandable sub-rows for multi-site groups ───────────
+            if (isMultiSite && treeOpen)
+            {
+                for (int idx : grp.indices)
+                {
+                    const auto &b = cachedStates_[idx];
+                    ImGui::TableNextRow();
+                    ImGui::PushID(idx + 100000);
+
+                    // Checkbox (empty for sub-rows)
+                    ImGui::TableNextColumn();
+
+                    // Icon
+                    ImGui::TableNextColumn();
+                    {
+                        ImVec4 col = statusColor(b.status);
+                        if (b.recording)
+                        {
+                            float pulse = (std::sin(animTime_ * 4.0f) + 1.0f) * 0.5f;
+                            col = {1.0f, 0.1f + pulse * 0.3f, 0.1f + pulse * 0.1f, 1.0f};
+                        }
+                        ImGui::TextColored(col, "%s", statusIcon(b.status));
+                    }
+
+                    // Username (indented, shows site tag)
+                    ImGui::TableNextColumn();
+                    {
+                        ImGui::TreePush("sub");
+                        bool subSel = (selectedBot_ == idx);
+                        std::string label = b.username + "  [" + b.siteSlug + "]";
+                        if (ImGui::Selectable(label.c_str(), subSel, ImGuiSelectableFlags_AllowDoubleClick))
+                        {
+                            selectedBot_ = idx;
+                            if (ImGui::IsMouseDoubleClicked(0))
+                                showBotDetail_ = true;
+                        }
+                        ImGui::TreePop();
+                    }
+
+                    // Context menu for sub-row
+                    if (ImGui::BeginPopupContextItem(("ctx_sub_" + b.username + "_" + b.siteName).c_str()))
+                    {
+                        if (b.running)
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
+                            if (ImGui::MenuItem("Stop"))
+                                manager_.stopBot(b.username, b.siteName);
+                            ImGui::PopStyleColor();
+                            ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
+                            if (ImGui::MenuItem("Restart"))
+                                manager_.restartBot(b.username, b.siteName);
+                            ImGui::PopStyleColor();
+                        }
+                        else
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Text, COL_GREEN);
+                            if (ImGui::MenuItem("Start"))
+                                manager_.startBot(b.username, b.siteName);
+                            ImGui::PopStyleColor();
+                        }
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Details..."))
+                        {
+                            selectedBot_ = idx;
+                            showBotDetail_ = true;
+                        }
+                        if (ImGui::MenuItem("Edit..."))
+                        {
+                            editModelOrigUser_ = b.username;
+                            editModelOrigSite_ = b.siteName;
+                            std::strncpy(editModelUsername_, b.username.c_str(), sizeof(editModelUsername_) - 1);
+                            editModelUsername_[sizeof(editModelUsername_) - 1] = '\0';
+                            auto allSites = manager_.availableSites();
+                            editModelSiteIdx_ = 0;
+                            for (int si = 0; si < (int)allSites.size(); si++)
+                                if (allSites[si] == b.siteName)
+                                {
+                                    editModelSiteIdx_ = si;
+                                    break;
+                                }
+                            showEditModel_ = true;
+                        }
+                        ImGui::Separator();
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
+                        if (ImGui::MenuItem("Remove"))
+                            manager_.removeBot(b.username, b.siteName);
+                        ImGui::PopStyleColor();
+                        ImGui::EndPopup();
+                    }
+
+                    // Site
+                    ImGui::TableNextColumn();
+                    ImGui::TextColored(COL_ACCENT, "%s", b.siteName.c_str());
+
+                    // Group
+                    ImGui::TableNextColumn();
+                    ImGui::TextColored(COL_TEXT_DIM, "--");
+
+                    // URL
+                    ImGui::TableNextColumn();
+                    if (!b.websiteUrl.empty())
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT_DIM);
+                        ImGui::TextUnformatted(b.websiteUrl.c_str());
+                        ImGui::PopStyleColor();
+                        if (ImGui::IsItemHovered())
+                        {
+                            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                            ImGui::SetTooltip("%s", b.websiteUrl.c_str());
+                        }
+                        if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+                            openUrlInBrowser(b.websiteUrl);
+                    }
+                    else
+                        ImGui::TextColored(COL_TEXT_DIM, "--");
+
+                    // Status
+                    ImGui::TableNextColumn();
+                    {
+                        ImVec4 col = statusColor(b.status);
+                        ImGui::TextColored(col, "%s", statusToString(b.status));
+                        if (b.mobile)
+                        {
+                            ImGui::SameLine();
+                            ImGui::TextColored(COL_ORANGE, "(M)");
+                        }
+                    }
+
+                    // Recording
+                    ImGui::TableNextColumn();
+                    if (b.recording)
+                    {
+                        float pulse = (std::sin(animTime_ * 3.0f) + 1.0f) * 0.5f;
+                        ImVec4 recCol = {1.0f, 0.2f + pulse * 0.2f, 0.2f, 1.0f};
+                        ImGui::TextColored(recCol, "REC");
+                    }
+                    else
+                        ImGui::TextColored(COL_TEXT_DIM, "--");
+
+                    // Size
+                    ImGui::TableNextColumn();
+                    if (b.totalBytes > 0)
+                        ImGui::Text("%s", formatBytesHuman(b.totalBytes).c_str());
+                    else
+                        ImGui::TextColored(COL_TEXT_DIM, "--");
+
+                    // Speed
+                    ImGui::TableNextColumn();
+                    if (b.recording && b.recordingStats.currentSpeed > 0)
+                        ImGui::Text("%.1fx", b.recordingStats.currentSpeed);
+                    else
+                        ImGui::TextColored(COL_TEXT_DIM, "--");
+
+                    // Uptime
+                    ImGui::TableNextColumn();
+                    if (b.running && b.startTime.time_since_epoch().count() > 0)
+                        ImGui::Text("%s", formatTimeAgo(b.startTime).c_str());
+                    else
+                        ImGui::TextColored(COL_TEXT_DIM, "--");
+
+                    ImGui::PopID();
+                }
+                ImGui::TreePop(); // close the parent TreeNode
+            }
+
+            ImGui::PopID();
+        }
+
+        ImGui::EndTable();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Log panel
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderLogPanel()
+    {
+        // Drain spdlog sink into our log entries each frame
+        if (logSink_)
+        {
+            auto entries = logSink_->drain();
+            if (!entries.empty())
+            {
+                std::lock_guard lock(logMutex_);
+                for (auto &e : entries)
+                {
+                    logEntries_.push_back({std::move(e.message), std::move(e.level),
+                                           std::move(e.source), e.time});
+                    if (logEntries_.size() > kMaxLogEntries)
+                        logEntries_.pop_front();
+                }
+            }
+        }
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {12 * dpiScale_, 6 * dpiScale_});
+
+        // Header with controls - use proper right-alignment
+        ImGui::Text("Log");
+
+        // Calculate positions for right-aligned controls
+        float clearBtnWidth = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 4;
+        float checkboxWidth = ImGui::CalcTextSize("Auto-scroll").x + ImGui::GetStyle().FramePadding.x * 2 + ImGui::GetFrameHeight();
+        float spacing = ImGui::GetStyle().ItemSpacing.x;
+        float rightEdge = ImGui::GetContentRegionAvail().x;
+        float controlsStartX = ImGui::GetCursorPosX() + rightEdge - clearBtnWidth - checkboxWidth - spacing;
+
+        ImGui::SameLine(controlsStartX);
+        ImGui::Checkbox("Auto-scroll", &autoScroll_);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear"))
+        {
+            std::lock_guard lock(logMutex_);
+            logEntries_.clear();
+        }
+
+        ImGui::Separator();
+
+        // Log content
+        if (ImGui::BeginChild("##LogContent", {0, 0}, ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar))
+        {
+            std::lock_guard lock(logMutex_);
+
+            // Check if we're at the bottom BEFORE rendering new content
+            float scrollY = ImGui::GetScrollY();
+            float scrollMax = ImGui::GetScrollMaxY();
+            bool wasAtBottom = (scrollMax <= 0.0f) || (scrollY >= scrollMax - 4.0f);
+
+            ImGuiListClipper clipper;
+            clipper.Begin((int)logEntries_.size());
+
+            while (clipper.Step())
+            {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                {
+                    const auto &entry = logEntries_[i];
+
+                    // Level color
+                    ImVec4 col = COL_TEXT;
+                    if (entry.level == "error")
+                        col = COL_RED;
+                    else if (entry.level == "warn")
+                        col = COL_YELLOW;
+                    else if (entry.level == "debug")
+                        col = COL_TEXT_DIM;
+                    else if (entry.level == "info")
+                        col = COL_GREEN;
+
+                    // Timestamp
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                       entry.time.time_since_epoch())
+                                       .count();
+                    int hours = (int)(elapsed / 3600) % 24;
+                    int mins = (int)(elapsed / 60) % 60;
+                    int secs = (int)elapsed % 60;
+
+                    ImGui::TextColored(COL_TEXT_DIM, "[%02d:%02d:%02d]", hours, mins, secs);
+                    ImGui::SameLine();
+                    ImGui::TextColored(COL_ACCENT_DIM, "[%s]", entry.source.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextColored(col, "%s", entry.message.c_str());
+                }
+            }
+
+            // Auto-scroll: if enabled and we were at the bottom, stay at bottom
+            if (autoScroll_ && wasAtBottom)
+                ImGui::SetScrollHereY(1.0f);
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Status bar
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderStatusBar()
+    {
+        ImGuiViewport *viewport = ImGui::GetMainViewport();
+        float statusH = 28.0f * dpiScale_;
+        ImGui::SetNextWindowPos({viewport->WorkPos.x,
+                                 viewport->WorkPos.y + viewport->WorkSize.y - statusH});
+        ImGui::SetNextWindowSize({viewport->WorkSize.x, statusH});
+
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                                 ImGuiWindowFlags_NoDocking;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {10, 4});
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.06f, 0.06f, 0.08f, 1.0f});
+        ImGui::Begin("##StatusBar", nullptr, flags);
+
+        // Left: disk usage summary
+        ImGui::TextColored(COL_TEXT_DIM, "Disk: %s free | Downloads: %s (%d files)",
+                           formatBytesHuman(cachedDiskUsage_.freeBytes).c_str(),
+                           formatBytesHuman(cachedDiskUsage_.downloadDirBytes).c_str(),
+                           cachedDiskUsage_.fileCount);
+
+        // Center: local web dashboard URL (clickable to copy)
+        {
+            const std::string &localUrl = cachedLanUrl_;
+            std::string label = "Web: " + localUrl;
+            float labelW = ImGui::CalcTextSize(label.c_str()).x;
+            float centerX = (ImGui::GetWindowWidth() - labelW) * 0.5f;
+            // Ensure it doesn't overlap with disk info or version
+            ImGui::SameLine(centerX);
+            ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
+            if (ImGui::SmallButton(label.c_str()))
+            {
+                copyToClipboard(localUrl);
+                addLog("info", "system", "Copied web URL: " + localUrl);
+            }
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Click to copy web dashboard URL");
+        }
+
+        // Right: version
+        float versionWidth = ImGui::CalcTextSize("StreaMonitor v2.0 C++").x;
+        ImGui::SameLine(ImGui::GetWindowWidth() - versionWidth - 20);
+        ImGui::TextColored(COL_TEXT_DIM, "StreaMonitor v2.0 C++");
+
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Settings window
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderSettingsWindow()
+    {
+        ImGui::SetNextWindowSize({600 * dpiScale_, 500 * dpiScale_}, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Settings", &showSettings_))
+        {
+            ImGui::End();
+            return;
+        }
+
+        // Tab bar for settings categories
+        if (ImGui::BeginTabBar("##SettingsTabs"))
+        {
+            if (ImGui::BeginTabItem("General"))
+            {
+                renderSettingsGeneral();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Recording"))
+            {
+                renderSettingsRecording();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("FFmpeg"))
+            {
+                renderSettingsFFmpeg();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Network"))
+            {
+                renderSettingsNetwork();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Sites"))
+            {
+                renderSettingsSites();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Advanced"))
+            {
+                renderSettingsAdvanced();
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Apply / Cancel buttons
+        if (ImGui::Button("Apply & Save", {140, 0}))
+        {
+            // Apply settings to config
+            config_.downloadsDir = editDownloadDir_;
+            config_.wantedResolution = editResolution_;
+            config_.webPort = editPort_;
+            config_.ffmpegPath = editFfmpegPath_;
+
+            switch (editContainerFmt_)
+            {
+            case 0:
+                config_.container = ContainerFormat::MKV;
+                break;
+            case 1:
+                config_.container = ContainerFormat::MP4;
+                break;
+            case 2:
+                config_.container = ContainerFormat::TS;
+                break;
+            }
+
+            // Proxy settings
+            config_.proxyEnabled = editProxyEnabled_;
+
+            // Map proxy type index to ProxyType enum
+            const ProxyType types[] = {ProxyType::HTTP, ProxyType::HTTPS, ProxyType::SOCKS4,
+                                       ProxyType::SOCKS4A, ProxyType::SOCKS5, ProxyType::SOCKS5H};
+            ProxyType selectedType = (editProxyType_ >= 0 && editProxyType_ < 6)
+                                         ? types[editProxyType_]
+                                         : ProxyType::None;
+
+            // Update or create proxy entry
+            std::string proxyUrlStr(editProxyUrl_);
+            if (!proxyUrlStr.empty())
+            {
+                if (config_.proxies.empty())
+                {
+                    // Create new proxy entry
+                    ProxyEntry entry;
+                    entry.url = proxyUrlStr;
+                    entry.type = selectedType;
+                    entry.enabled = true;
+                    entry.rolling = false;
+                    config_.proxies.push_back(entry);
+                }
+                else
+                {
+                    // Update first proxy entry
+                    config_.proxies[0].url = proxyUrlStr;
+                    config_.proxies[0].type = selectedType;
+                }
+            }
+
+            // Encoding config
+            const EncoderType encoderTypes[] = {EncoderType::Copy, EncoderType::X265, EncoderType::X264,
+                                                EncoderType::NVENC_HEVC, EncoderType::NVENC_H264};
+            config_.encoding.encoder = (editEncoderType_ >= 0 && editEncoderType_ < 5)
+                                           ? encoderTypes[editEncoderType_]
+                                           : EncoderType::X265;
+            config_.encoding.enableCuda = editEnableCuda_;
+            config_.encoding.crf = editCrf_;
+            const char *presets[] = {"ultrafast", "superfast", "veryfast", "faster", "fast",
+                                     "medium", "slow", "slower", "veryslow", "placebo"};
+            config_.encoding.preset = (editPresetIdx_ >= 0 && editPresetIdx_ < 10)
+                                          ? presets[editPresetIdx_]
+                                          : "medium";
+            config_.encoding.audioBitrate = editAudioBitrate_;
+            config_.encoding.copyAudio = editCopyAudio_;
+            config_.encoding.maxWidth = editMaxWidth_;
+            config_.encoding.maxHeight = editMaxHeight_;
+            config_.encoding.threads = editEncoderThreads_;
+
+            // FFmpeg tuning settings
+            config_.ffmpeg.liveLastSegments = editFfmpegLiveLastSegments_;
+            config_.ffmpeg.rwTimeoutSec = editFfmpegRwTimeoutSec_;
+            config_.ffmpeg.socketTimeoutSec = editFfmpegSocketTimeoutSec_;
+            config_.ffmpeg.reconnectDelayMax = editFfmpegReconnectDelayMax_;
+            config_.ffmpeg.maxRestarts = editFfmpegMaxRestarts_;
+            config_.ffmpeg.gracefulQuitTimeoutSec = editFfmpegGracefulQuitTimeoutSec_;
+            config_.ffmpeg.startupGraceSec = editFfmpegStartupGraceSec_;
+            config_.ffmpeg.suspectStallSec = editFfmpegSuspectStallSec_;
+            config_.ffmpeg.stallSameTimeSec = editFfmpegStallSameTimeSec_;
+            config_.ffmpeg.speedLowThreshold = editFfmpegSpeedLowThreshold_;
+            config_.ffmpeg.speedLowSustainSec = editFfmpegSpeedLowSustainSec_;
+            config_.ffmpeg.maxSingleLagSec = editFfmpegMaxSingleLagSec_;
+            config_.ffmpeg.maxConsecSkipLines = editFfmpegMaxConsecSkipLines_;
+            config_.ffmpeg.fallbackNoStderrSec = editFfmpegFallbackNoStderrSec_;
+            config_.ffmpeg.fallbackNoOutputSec = editFfmpegFallbackNoOutputSec_;
+            config_.ffmpeg.cooldownAfterStalls = editFfmpegCooldownAfterStalls_;
+            config_.ffmpeg.cooldownSleepSec = editFfmpegCooldownSleepSec_;
+            config_.ffmpeg.playlistProbeIntervalSec = editFfmpegPlaylistProbeIntervalSec_;
+            config_.ffmpeg.probeSize = editFfmpegProbeSize_;
+            config_.ffmpeg.analyzeDuration = editFfmpegAnalyzeDuration_;
+
+            // Auto-save to disk
+            config_.saveToFile("app_config.json");
+            manager_.saveConfig();
+            editDirtyFlag_ = false;
+            addLog("info", "system", "Settings applied & saved to disk");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", {100, 0}))
+            showSettings_ = false;
+
+        ImGui::End();
+    }
+
+    void GuiApp::renderSettingsGeneral()
+    {
+        ImGui::Spacing();
+        ImGui::Text("Download Directory");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##DownloadDir", editDownloadDir_, sizeof(editDownloadDir_)))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "Environment: STRMNTR_DOWNLOAD_DIR");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Container Format");
+        const char *formats[] = {"MKV (Matroska)", "MP4 (MPEG-4)", "TS (MPEG-TS)"};
+        if (ImGui::Combo("##ContainerFmt", &editContainerFmt_, formats, IM_ARRAYSIZE(formats)))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "MKV is recommended for reliability (default)");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Web Interface Port");
+        if (ImGui::InputInt("##Port", &editPort_))
+        {
+            editPort_ = std::clamp(editPort_, 1024, 65535);
+            editDirtyFlag_ = true;
+        }
+        ImGui::TextColored(COL_TEXT_DIM, "Environment: STRMNTR_HTTP_PORT (default: 5000)");
+    }
+
+    void GuiApp::renderSettingsRecording()
+    {
+        ImGui::Spacing();
+        ImGui::Text("Target Resolution");
+        if (ImGui::InputInt("##Resolution", &editResolution_))
+        {
+            editResolution_ = std::clamp(editResolution_, 144, 99999);
+            editDirtyFlag_ = true;
+        }
+        ImGui::TextColored(COL_TEXT_DIM, "99999 = highest available (default)");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Sleep Timers (seconds)");
+        static int sleepOnline = 5, sleepOffline = 15, sleepPrivate = 5,
+                   sleepError = 30, sleepRateLimit = 120;
+        ImGui::SliderInt("After Online Check", &sleepOnline, 1, 60);
+        ImGui::SliderInt("After Offline", &sleepOffline, 5, 120);
+        ImGui::SliderInt("After Private", &sleepPrivate, 5, 60);
+        ImGui::SliderInt("After Error", &sleepError, 10, 300);
+        ImGui::SliderInt("After Rate Limit", &sleepRateLimit, 30, 600);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Error Handling");
+        static int maxErrors = 20;
+        ImGui::SliderInt("Max Consecutive Errors", &maxErrors, 5, 500);
+        ImGui::TextColored(COL_TEXT_DIM, "Bot stops after this many consecutive errors");
+    }
+
+    void GuiApp::renderSettingsFFmpeg()
+    {
+        ImGui::Spacing();
+        ImGui::Text("FFmpeg Binary Path");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##FfmpegPath", editFfmpegPath_, sizeof(editFfmpegPath_)))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "Leave empty to use system FFmpeg (libav* API)");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // ── Encoding Settings ──────────────────────────────────────────
+        ImGui::TextColored(COL_ACCENT, "Encoding Settings");
+        ImGui::Spacing();
+
+        ImGui::Text("Video Encoder");
+        const char *encoderNames[] = {"Copy (No Re-encode)", "x265 (HEVC Software)", "x264 (H.264 Software)",
+                                      "NVENC HEVC (NVIDIA GPU)", "NVENC H.264 (NVIDIA GPU)"};
+        if (ImGui::Combo("##Encoder", &editEncoderType_, encoderNames, IM_ARRAYSIZE(encoderNames)))
+            editDirtyFlag_ = true;
+
+        // Show encoding options only if not stream copy
+        if (editEncoderType_ != 0)
+        {
+            ImGui::Spacing();
+            ImGui::Text("Quality (CRF)");
+            if (ImGui::SliderInt("##CRF", &editCrf_, 0, 51, "%d"))
+                editDirtyFlag_ = true;
+            ImGui::TextColored(COL_TEXT_DIM, "Lower = better quality, larger file (18-28 typical)");
+
+            ImGui::Spacing();
+            ImGui::Text("Encoding Preset");
+            const char *presetNames[] = {"ultrafast", "superfast", "veryfast", "faster", "fast",
+                                         "medium", "slow", "slower", "veryslow", "placebo"};
+            if (ImGui::Combo("##Preset", &editPresetIdx_, presetNames, IM_ARRAYSIZE(presetNames)))
+                editDirtyFlag_ = true;
+            ImGui::TextColored(COL_TEXT_DIM, "Slower = better compression, longer encode time");
+
+            ImGui::Spacing();
+            ImGui::Text("Encoder Threads");
+            if (ImGui::SliderInt("##Threads", &editEncoderThreads_, 0, 32, editEncoderThreads_ == 0 ? "Auto" : "%d"))
+                editDirtyFlag_ = true;
+
+            ImGui::Spacing();
+            if (ImGui::Checkbox("Enable CUDA Acceleration", &editEnableCuda_))
+                editDirtyFlag_ = true;
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // ── Audio Settings ──────────────────────────────────────────────
+        ImGui::TextColored(COL_ACCENT, "Audio Settings");
+        ImGui::Spacing();
+
+        if (ImGui::Checkbox("Copy Audio (No Re-encode)", &editCopyAudio_))
+            editDirtyFlag_ = true;
+
+        if (!editCopyAudio_)
+        {
+            ImGui::Spacing();
+            ImGui::Text("Audio Bitrate (kbps)");
+            if (ImGui::SliderInt("##AudioBitrate", &editAudioBitrate_, 64, 320, "%d kbps"))
+                editDirtyFlag_ = true;
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // ── Resolution Limits ──────────────────────────────────────────────
+        ImGui::TextColored(COL_ACCENT, "Output Resolution Limits");
+        ImGui::Spacing();
+
+        ImGui::Text("Max Width");
+        if (ImGui::InputInt("##MaxWidth", &editMaxWidth_))
+        {
+            editMaxWidth_ = std::max(0, editMaxWidth_);
+            editDirtyFlag_ = true;
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(COL_TEXT_DIM, "0 = keep original");
+
+        ImGui::Text("Max Height");
+        if (ImGui::InputInt("##MaxHeight", &editMaxHeight_))
+        {
+            editMaxHeight_ = std::max(0, editMaxHeight_);
+            editDirtyFlag_ = true;
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(COL_TEXT_DIM, "0 = keep original");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // ── FFmpeg Tuning (Advanced) ──────────────────────────────────
+        if (ImGui::CollapsingHeader("Advanced FFmpeg Tuning", ImGuiTreeNodeFlags_None))
+        {
+            ImGui::Indent();
+            ImGui::Spacing();
+
+            ImGui::TextColored(COL_ACCENT, "Probe & Analysis");
+            ImGui::Text("Probe Size");
+            ImGui::SetNextItemWidth(120);
+            if (ImGui::InputText("##ProbeSize", editFfmpegProbeSize_, sizeof(editFfmpegProbeSize_)))
+                editDirtyFlag_ = true;
+            ImGui::SameLine();
+            ImGui::TextColored(COL_TEXT_DIM, "e.g. 4M, 8M");
+
+            ImGui::Text("Analyze Duration");
+            ImGui::SetNextItemWidth(120);
+            if (ImGui::InputText("##AnalyzeDuration", editFfmpegAnalyzeDuration_, sizeof(editFfmpegAnalyzeDuration_)))
+                editDirtyFlag_ = true;
+            ImGui::SameLine();
+            ImGui::TextColored(COL_TEXT_DIM, "microseconds (10000000 = 10s)");
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextColored(COL_ACCENT, "HLS Settings");
+            if (ImGui::SliderInt("Live Last Segments", &editFfmpegLiveLastSegments_, 1, 10))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Playlist Probe Interval (sec)", &editFfmpegPlaylistProbeIntervalSec_, 1, 30))
+                editDirtyFlag_ = true;
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextColored(COL_ACCENT, "Timeouts");
+            if (ImGui::SliderInt("R/W Timeout (sec)", &editFfmpegRwTimeoutSec_, 1, 30))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Socket Timeout (sec)", &editFfmpegSocketTimeoutSec_, 1, 30))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Reconnect Delay Max (sec)", &editFfmpegReconnectDelayMax_, 1, 60))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Graceful Quit Timeout (sec)", &editFfmpegGracefulQuitTimeoutSec_, 1, 30))
+                editDirtyFlag_ = true;
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextColored(COL_ACCENT, "Stall Detection");
+            if (ImGui::SliderInt("Startup Grace (sec)", &editFfmpegStartupGraceSec_, 1, 60))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Suspect Stall (sec)", &editFfmpegSuspectStallSec_, 5, 120))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Stall Same Time (sec)", &editFfmpegStallSameTimeSec_, 5, 120))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderFloat("Speed Low Threshold", &editFfmpegSpeedLowThreshold_, 0.1f, 1.0f, "%.2f"))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Speed Low Sustain (sec)", &editFfmpegSpeedLowSustainSec_, 5, 120))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Max Single Lag (sec)", &editFfmpegMaxSingleLagSec_, 1, 60))
+                editDirtyFlag_ = true;
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextColored(COL_ACCENT, "Recovery & Restarts");
+            if (ImGui::SliderInt("Max Restarts", &editFfmpegMaxRestarts_, 1, 50))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Max Consecutive Skip Lines", &editFfmpegMaxConsecSkipLines_, 1, 20))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Fallback No Stderr (sec)", &editFfmpegFallbackNoStderrSec_, 10, 120))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Fallback No Output (sec)", &editFfmpegFallbackNoOutputSec_, 10, 120))
+                editDirtyFlag_ = true;
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextColored(COL_ACCENT, "Cooldown");
+            if (ImGui::SliderInt("Cooldown After Stalls", &editFfmpegCooldownAfterStalls_, 1, 20))
+                editDirtyFlag_ = true;
+            if (ImGui::SliderInt("Cooldown Sleep (sec)", &editFfmpegCooldownSleepSec_, 5, 120))
+                editDirtyFlag_ = true;
+
+            ImGui::Unindent();
+        }
+    }
+
+    void GuiApp::renderSettingsNetwork()
+    {
+        ImGui::Spacing();
+        ImGui::Text("HTTP Client Settings");
+
+        static int requestTimeout = 30;
+        ImGui::SliderInt("Request Timeout (sec)", &requestTimeout, 5, 120);
+
+        static int maxRetries = 3;
+        ImGui::SliderInt("Max Retries", &maxRetries, 0, 10);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Rate Limiting");
+        static float rateLimit = 10.0f;
+        ImGui::SliderFloat("Requests/second", &rateLimit, 1.0f, 50.0f, "%.1f");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("User Agent");
+        static char userAgent[512] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputText("##UserAgent", userAgent, sizeof(userAgent));
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // ── Proxy ──────────────────────────────────────────────────
+        ImGui::TextColored(COL_ACCENT, "Proxy Settings");
+        ImGui::Spacing();
+
+        if (ImGui::Checkbox("Enable Proxy", &editProxyEnabled_))
+            editDirtyFlag_ = true;
+
+        if (editProxyEnabled_)
+        {
+            ImGui::Text("Proxy Type");
+            const char *proxyTypes[] = {"HTTP", "HTTPS", "SOCKS4", "SOCKS4A", "SOCKS5", "SOCKS5H (remote DNS)"};
+            if (ImGui::Combo("##ProxyType", &editProxyType_, proxyTypes, IM_ARRAYSIZE(proxyTypes)))
+                editDirtyFlag_ = true;
+
+            ImGui::Text("Proxy URL");
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::InputText("##ProxyUrl", editProxyUrl_, sizeof(editProxyUrl_)))
+                editDirtyFlag_ = true;
+            ImGui::TextColored(COL_TEXT_DIM, "Format: host:port  or  user:pass@host:port");
+            ImGui::TextColored(COL_TEXT_DIM, "Environment: STRMNTR_PROXY (e.g. socks5://127.0.0.1:9050)");
+        }
+    }
+
+    void GuiApp::renderSettingsAdvanced()
+    {
+        ImGui::Spacing();
+        ImGui::Text("Logging");
+        static int logLevel = 1; // 0=debug, 1=info, 2=warn, 3=error
+        const char *levels[] = {"Debug", "Info", "Warning", "Error"};
+        ImGui::Combo("Log Level", &logLevel, levels, IM_ARRAYSIZE(levels));
+
+        static int maxLogEntries = 10000;
+        ImGui::SliderInt("Max Log Entries", &maxLogEntries, 1000, 100000);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Disk Space Watchdog");
+        static bool enableWatchdog = true;
+        ImGui::Checkbox("Enable Disk Space Monitoring", &enableWatchdog);
+        static int minFreeGb = 5;
+        ImGui::SliderInt("Min Free Space (GB)", &minFreeGb, 1, 100);
+        ImGui::TextColored(COL_TEXT_DIM, "Pause recordings when free space drops below threshold");
+    }
+
+    void GuiApp::renderSettingsSites()
+    {
+        ImGui::Spacing();
+        ImGui::TextColored(COL_ACCENT, "Per-Site Configuration");
+        ImGui::TextColored(COL_TEXT_DIM,
+                           "Enable/disable specific sites and configure site-specific settings");
+        ImGui::Spacing();
+
+        auto sites = manager_.availableSites();
+        for (size_t i = 0; i < sites.size(); i++)
+        {
+            ImGui::PushID((int)i);
+            bool enabled = true; // TODO: persist per-site enable
+            ImGui::Checkbox(sites[i].c_str(), &enabled);
+            ImGui::PopID();
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextColored(COL_TEXT_DIM, "Note: Disabling a site will stop all bots on that site");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Add model dialog
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderAddModelDialog()
+    {
+        ImGui::SetNextWindowSize({500 * dpiScale_, 340 * dpiScale_}, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Add Model", &showAddModel_))
+        {
+            ImGui::End();
+            return;
+        }
+
+        auto sites = manager_.availableSites();
+
+        // ── URL Paste shortcut ──────────────────────────────────────
+        ImGui::TextColored(COL_ACCENT, "Paste Site URL (auto-detect):");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##AddUrl", addUrlInput_, sizeof(addUrlInput_),
+                             ImGuiInputTextFlags_EnterReturnsTrue))
+        {
+            std::string parsedSite, parsedUser;
+            if (parseSiteUrl(addUrlInput_, parsedSite, parsedUser))
+            {
+                // Strip spaces from username
+                parsedUser = stripWhitespace(parsedUser);
+                std::strncpy(addUsername_, parsedUser.c_str(), sizeof(addUsername_) - 1);
+                addUsername_[sizeof(addUsername_) - 1] = '\0';
+                // Find site index
+                for (int i = 0; i < (int)sites.size(); i++)
+                {
+                    if (sites[i] == parsedSite)
+                    {
+                        addSiteIdx_ = i;
+                        break;
+                    }
+                }
+                // Auto-add
+                std::vector<std::string> sitesToAdd;
+                sitesToAdd.push_back(parsedSite);
+                if (parsedSite == "StripChat")
+                    sitesToAdd.push_back("StripChatVR");
+                else if (parsedSite == "StripChatVR")
+                    sitesToAdd.push_back("StripChat");
+                for (const auto &site : sitesToAdd)
+                {
+                    manager_.addBot(parsedUser, site, true);
+                    addLog("info", "system", "Added from URL: " + parsedUser + " on " + site);
+                }
+                std::memset(addUrlInput_, 0, sizeof(addUrlInput_));
+                std::memset(addUsername_, 0, sizeof(addUsername_));
+                addAlsoCounterpart_ = false;
+                showAddModel_ = false;
+            }
+            else
+            {
+                addLog("warn", "system", "Could not parse URL: " + std::string(addUrlInput_));
+            }
+        }
+        ImGui::TextColored(COL_TEXT_DIM, "e.g. https://stripchat.com/username or https://chaturbate.com/name");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextColored(COL_ACCENT, "Or enter manually:");
+        ImGui::Spacing();
+
+        ImGui::Text("Username:");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputText("##AddUser", addUsername_, sizeof(addUsername_));
+
+        ImGui::Spacing();
+        ImGui::Text("Site:");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##AddSite",
+                              addSiteIdx_ < (int)sites.size() ? sites[addSiteIdx_].c_str() : ""))
+        {
+            // Search filter at top of combo
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::IsWindowAppearing())
+            {
+                ImGui::SetKeyboardFocusHere();
+                std::memset(siteFilterBuf_, 0, sizeof(siteFilterBuf_));
+            }
+            ImGui::InputTextWithHint("##SiteFilter", "Type to filter...", siteFilterBuf_, sizeof(siteFilterBuf_));
+            ImGui::Separator();
+
+            std::string filter(siteFilterBuf_);
+            std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
+
+            for (int i = 0; i < (int)sites.size(); i++)
+            {
+                if (!filter.empty())
+                {
+                    std::string lower = sites[i];
+                    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                    if (lower.find(filter) == std::string::npos)
+                        continue;
+                }
+                bool selected = (addSiteIdx_ == i);
+                if (ImGui::Selectable(sites[i].c_str(), selected))
+                {
+                    addSiteIdx_ = i;
+                    addAlsoCounterpart_ = false;
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        // StripChat <-> StripChatVR cross-add checkbox
+        if (addSiteIdx_ < (int)sites.size())
+        {
+            std::string chosen = sites[addSiteIdx_];
+            if (chosen == "StripChat")
+            {
+                ImGui::Spacing();
+                ImGui::Checkbox("Also add StripChatVR", &addAlsoCounterpart_);
+            }
+            else if (chosen == "StripChatVR")
+            {
+                ImGui::Spacing();
+                ImGui::Checkbox("Also add StripChat", &addAlsoCounterpart_);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        bool canAdd = std::strlen(addUsername_) > 0 && addSiteIdx_ < (int)sites.size();
+        if (!canAdd)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Add & Start", {-1, 0}))
+        {
+            std::string chosenSite = sites[addSiteIdx_];
+            // Strip spaces from username (sites don't use spaces in usernames)
+            std::string cleanUsername = stripWhitespace(addUsername_);
+            if (cleanUsername.empty())
+            {
+                ImGui::End();
+                return;
+            }
+            std::vector<std::string> sitesToAdd;
+            sitesToAdd.push_back(chosenSite);
+
+            // Add counterpart if checkbox was checked
+            if (addAlsoCounterpart_)
+            {
+                if (chosenSite == "StripChat")
+                    sitesToAdd.push_back("StripChatVR");
+                else if (chosenSite == "StripChatVR")
+                    sitesToAdd.push_back("StripChat");
+            }
+
+            for (const auto &site : sitesToAdd)
+            {
+                manager_.addBot(cleanUsername, site, true);
+                addLog("info", "system", std::string("Added & saved: ") + cleanUsername + " on " + site);
+            }
+            std::memset(addUsername_, 0, sizeof(addUsername_));
+            std::memset(addUrlInput_, 0, sizeof(addUrlInput_));
+            addAlsoCounterpart_ = false;
+            showAddModel_ = false;
+        }
+        if (!canAdd)
+            ImGui::EndDisabled();
+
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // About window
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderAboutWindow()
+    {
+        ImGui::SetNextWindowSize({400, 300}, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("About StreaMonitor", &showAbout_))
+        {
+            ImGui::End();
+            return;
+        }
+
+        ImGui::TextColored(COL_ACCENT, "StreaMonitor v2.0");
+        ImGui::Text("C++ Rewrite with Native FFmpeg & ImGui");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Features:");
+        ImGui::BulletText("18 site plugins (all Python sites ported)");
+        ImGui::BulletText("Native FFmpeg API - no subprocess spawning");
+        ImGui::BulletText("ImGui GUI with dark theme");
+        ImGui::BulletText("Thread-per-model architecture (std::jthread)");
+        ImGui::BulletText("Cross-register multi-site model tracking");
+        ImGui::BulletText("Live disk usage monitoring");
+        ImGui::BulletText("VR stream support (StripChatVR, DreamCamVR)");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextColored(COL_TEXT_DIM, "Built with C++20, CMake, vcpkg");
+        ImGui::TextColored(COL_TEXT_DIM, "Libraries: libcurl, nlohmann/json, spdlog, ImGui, GLFW");
+
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // FFmpeg monitor
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderFFmpegMonitor()
+    {
+        ImGui::SetNextWindowSize({500, 400}, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("FFmpeg Monitor", &showFFmpegMon_))
+        {
+            ImGui::End();
+            return;
+        }
+
+        int activeRecordings = 0;
+        uint64_t totalBytesWritten = 0;
+        uint32_t totalSegments = 0;
+        uint32_t totalStalls = 0;
+
+        for (const auto &bot : cachedStates_)
+        {
+            if (bot.recording)
+            {
+                activeRecordings++;
+                totalBytesWritten += bot.recordingStats.bytesWritten;
+                totalSegments += bot.recordingStats.segmentsRecorded;
+                totalStalls += bot.recordingStats.stallsDetected;
+            }
+        }
+
+        ImGui::Text("Active Recordings: %d", activeRecordings);
+        ImGui::Text("Total Data Written: %s", formatBytesHuman(totalBytesWritten).c_str());
+        ImGui::Text("Total Segments: %u", totalSegments);
+        ImGui::Text("Total Stalls Detected: %u", totalStalls);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Per-recording details
+        if (ImGui::BeginTable("##RecDetails", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV))
+        {
+            ImGui::TableSetupColumn("Model");
+            ImGui::TableSetupColumn("File");
+            ImGui::TableSetupColumn("Size");
+            ImGui::TableSetupColumn("Segments");
+            ImGui::TableSetupColumn("Speed");
+            ImGui::TableHeadersRow();
+
+            for (const auto &bot : cachedStates_)
+            {
+                if (!bot.recording)
+                    continue;
+
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%s [%s]", bot.username.c_str(), bot.siteSlug.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextColored(COL_TEXT_DIM, "%s", bot.recordingStats.currentFile.c_str());
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", formatBytesHuman(bot.recordingStats.bytesWritten).c_str());
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", bot.recordingStats.segmentsRecorded);
+                ImGui::TableNextColumn();
+                ImGui::Text("%.1fx", bot.recordingStats.currentSpeed);
+            }
+
+            ImGui::EndTable();
+        }
+
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Disk usage panel
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderDiskUsagePanel()
+    {
+        ImGui::SetNextWindowSize({400, 250}, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Disk Usage", &showDiskUsage_))
+        {
+            ImGui::End();
+            return;
+        }
+
+        auto &du = cachedDiskUsage_;
+
+        // Disk space bar
+        float usedRatio = (du.totalBytes > 0)
+                              ? 1.0f - (float)du.freeBytes / (float)du.totalBytes
+                              : 0.0f;
+
+        ImGui::Text("Disk Space");
+        ImGui::ProgressBar(usedRatio, {-1, 20},
+                           (std::to_string((int)(usedRatio * 100)) + "% used").c_str());
+
+        ImGui::Spacing();
+        ImGui::Text("Total:       %s", formatBytesHuman(du.totalBytes).c_str());
+        ImGui::Text("Free:        %s", formatBytesHuman(du.freeBytes).c_str());
+        ImGui::Text("Used:        %s", formatBytesHuman(du.totalBytes - du.freeBytes).c_str());
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Downloads Directory");
+        ImGui::Text("Size:        %s", formatBytesHuman(du.downloadDirBytes).c_str());
+        ImGui::Text("Files:       %d", du.fileCount);
+        ImGui::Text("Path:        %s", config_.downloadsDir.string().c_str());
+
+        // Warning if low on space
+        if (du.freeBytes > 0 && du.freeBytes < 5ULL * 1024 * 1024 * 1024)
+        {
+            ImGui::Spacing();
+            ImGui::TextColored(COL_RED, "WARNING: Low disk space! Consider freeing up space.");
+        }
+
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Cross-register window
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderCrossRegisterWindow()
+    {
+        ImGui::SetNextWindowSize({600 * dpiScale_, 450 * dpiScale_}, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Cross-Register Groups", &showCrossRegister_))
+        {
+            ImGui::End();
+            return;
+        }
+
+        ImGui::TextColored(COL_ACCENT, "Cross-Register Groups — Cycling Engine");
+        ImGui::TextColored(COL_TEXT_DIM,
+                           "Same person, different sites/usernames. One thread cycles through");
+        ImGui::TextColored(COL_TEXT_DIM,
+                           "all pairings without delay — sleeps only when ALL are offline.");
+        ImGui::Spacing();
+
+        // Create new group
+        ImGui::Text("New Group:");
+        {
+            float createBtnW = ImGui::CalcTextSize(" Create ").x + ImGui::GetStyle().FramePadding.x * 2;
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - createBtnW - ImGui::GetStyle().ItemSpacing.x);
+        }
+        ImGui::InputText("##GroupName", crossGroupName_, sizeof(crossGroupName_));
+        ImGui::SameLine();
+        if (ImGui::Button("Create") && std::strlen(crossGroupName_) > 0)
+        {
+            manager_.createCrossRegisterGroup(crossGroupName_, {});
+            std::memset(crossGroupName_, 0, sizeof(crossGroupName_));
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // List existing groups with cycling status
+        auto groups = manager_.getCrossRegisterGroups();
+        auto groupStates = manager_.getAllGroupStates();
+        for (size_t gi = 0; gi < groups.size(); gi++)
+        {
+            auto &group = groups[gi];
+            ImGui::PushID((int)gi);
+
+            // Find matching group state
+            const ModelGroupState *gs = nullptr;
+            for (const auto &s : groupStates)
+            {
+                if (s.groupName == group.groupName)
+                {
+                    gs = &s;
+                    break;
+                }
+            }
+
+            // Header with status indicator
+            std::string headerLabel = group.groupName;
+            if (gs && gs->running)
+            {
+                if (gs->recording)
+                    headerLabel += "  [REC: " + gs->activeUsername + " on " + gs->activeSite + "]";
+                else if (gs->activePairingIdx >= 0)
+                    headerLabel += "  [Checking: " + gs->activeUsername + " on " + gs->activeSite + "]";
+                else
+                    headerLabel += "  [All Offline — Sleeping]";
+            }
+            else
+            {
+                headerLabel += "  [Stopped]";
+            }
+
+            if (ImGui::CollapsingHeader(headerLabel.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                // Auto-scroll to focused group from right-click "Edit Group"
+                if (!focusCrossRegisterGroup_.empty() && group.groupName == focusCrossRegisterGroup_)
+                {
+                    ImGui::SetScrollHereY(0.0f);
+                    focusCrossRegisterGroup_.clear();
+                }
+                // Start/Stop buttons for the group
+                if (gs && gs->running)
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Button, {0.50f, 0.15f, 0.15f, 1.0f});
+                    if (ImGui::SmallButton("Stop Group"))
+                        manager_.stopGroup(group.groupName);
+                    ImGui::PopStyleColor();
+                }
+                else
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.40f, 0.15f, 1.0f});
+                    if (ImGui::SmallButton("Start Group"))
+                        manager_.startGroup(group.groupName);
+                    ImGui::PopStyleColor();
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(COL_TEXT_DIM, "(%zu pairings)", group.members.size());
+
+                // Pairing list with per-pairing status
+                for (size_t mi = 0; mi < group.members.size(); mi++)
+                {
+                    auto &[site, user] = group.members[mi];
+
+                    // Show pairing status from group state
+                    ImVec4 pairingCol = COL_TEXT_DIM;
+                    const char *pairingStatus = "—";
+                    bool pairingMobile = false;
+                    if (gs && mi < gs->pairings.size())
+                    {
+                        pairingCol = statusColor(gs->pairings[mi].lastStatus);
+                        pairingStatus = statusToString(gs->pairings[mi].lastStatus);
+                        pairingMobile = gs->pairings[mi].mobile;
+                    }
+
+                    // Active pairing gets a highlight marker
+                    bool isActive = gs && gs->activePairingIdx == (int)mi && gs->running;
+                    if (isActive)
+                    {
+                        float pulse = (std::sin(animTime_ * 3.0f) + 1.0f) * 0.5f;
+                        ImGui::TextColored({0.3f + pulse * 0.3f, 0.8f, 0.3f + pulse * 0.3f, 1.0f}, ">");
+                    }
+                    else
+                    {
+                        ImGui::TextColored({0.2f, 0.2f, 0.2f, 1.0f}, " ");
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextColored(pairingCol, "%s", pairingStatus);
+                    ImGui::SameLine();
+                    ImGui::Text("%s [%s]", user.c_str(), site.c_str());
+                    if (pairingMobile)
+                    {
+                        ImGui::SameLine();
+                        ImGui::TextColored(COL_ORANGE, "(Mobile)");
+                    }
+                    ImGui::SameLine();
+                    ImGui::PushID((int)mi);
+                    if (mi == 0)
+                    {
+                        // Primary indicator (first pairing = primary)
+                        ImGui::TextColored(COL_YELLOW, "★");
+                        ImGui::SameLine();
+                    }
+                    else
+                    {
+                        // Button to set as primary (move to front)
+                        ImGui::PushStyleColor(ImGuiCol_Button, {0.25f, 0.25f, 0.12f, 1.0f});
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.40f, 0.40f, 0.15f, 1.0f});
+                        if (ImGui::SmallButton("★"))
+                            manager_.setPrimaryPairing(group.groupName, mi);
+                        ImGui::PopStyleColor(2);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Set as primary (checked first)");
+                        ImGui::SameLine();
+                    }
+                    if (ImGui::SmallButton("Remove"))
+                        manager_.removeFromCrossRegisterGroup(group.groupName, site, user);
+                    ImGui::PopID();
+                }
+
+                // Add member — expanded inputs
+                auto sites = manager_.availableSites();
+                float addAvail = ImGui::GetContentRegionAvail().x;
+                float addBtnW = ImGui::CalcTextSize(" Add ").x + ImGui::GetStyle().FramePadding.x * 2;
+                float inputW = (addAvail - addBtnW - ImGui::GetStyle().ItemSpacing.x * 2) * 0.55f;
+                float comboW = (addAvail - addBtnW - ImGui::GetStyle().ItemSpacing.x * 2) * 0.45f;
+
+                ImGui::SetNextItemWidth(inputW);
+                ImGui::InputTextWithHint("##AddUser", "Username", crossUsername_, sizeof(crossUsername_));
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(comboW);
+                if (ImGui::BeginCombo("##AddSite",
+                                      crossSiteIdx_ < (int)sites.size() ? sites[crossSiteIdx_].c_str() : ""))
+                {
+                    // Search filter at top
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::IsWindowAppearing())
+                    {
+                        ImGui::SetKeyboardFocusHere();
+                        std::memset(siteFilterBuf_, 0, sizeof(siteFilterBuf_));
+                    }
+                    ImGui::InputTextWithHint("##SiteFilter", "Type to filter...", siteFilterBuf_, sizeof(siteFilterBuf_));
+                    ImGui::Separator();
+
+                    std::string filter(siteFilterBuf_);
+                    std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
+
+                    for (int i = 0; i < (int)sites.size(); i++)
+                    {
+                        if (!filter.empty())
+                        {
+                            std::string lower = sites[i];
+                            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                            if (lower.find(filter) == std::string::npos)
+                                continue;
+                        }
+                        if (ImGui::Selectable(sites[i].c_str(), crossSiteIdx_ == i))
+                            crossSiteIdx_ = i;
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Add") &&
+                    std::strlen(crossUsername_) > 0 && crossSiteIdx_ < (int)sites.size())
+                {
+                    manager_.addToCrossRegisterGroup(
+                        group.groupName, sites[crossSiteIdx_], crossUsername_);
+                    std::memset(crossUsername_, 0, sizeof(crossUsername_));
+                }
+
+                ImGui::Spacing();
+                if (ImGui::SmallButton("Delete Group"))
+                    manager_.removeCrossRegisterGroup(group.groupName);
+            }
+
+            ImGui::PopID();
+        }
+
+        if (groups.empty())
+            ImGui::TextColored(COL_TEXT_DIM, "No cross-register groups defined.");
+
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Bot detail panel
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderBotDetailPanel()
+    {
+        const auto &bot = cachedStates_[selectedBot_];
+        std::string title = bot.username + " [" + bot.siteName + "]###BotDetail";
+
+        ImGui::SetNextWindowSize({540 * dpiScale_, 500 * dpiScale_}, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin(title.c_str(), &showBotDetail_))
+        {
+            ImGui::End();
+            return;
+        }
+
+        // Header
+        ImGui::TextColored(COL_ACCENT, "%s", bot.username.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(statusColor(bot.status), "(%s)", statusToString(bot.status));
+
+        // Preview thumbnail
+        if (!bot.previewUrl.empty())
+        {
+            GLuint tex = imageCache_.getTexture(bot.previewUrl);
+            if (tex != 0)
+            {
+                ImGui::Spacing();
+                float avail = ImGui::GetContentRegionAvail().x;
+                float imgW = std::min(avail, 320.0f);
+                float imgH = imgW * 0.5625f; // 16:9
+                ImGui::Image((ImTextureID)(intptr_t)tex, {imgW, imgH});
+
+                // Right-click to refresh
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                {
+                    imageCache_.invalidate(bot.previewUrl);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Right-click to refresh preview");
+            }
+            else
+            {
+                ImGui::Spacing();
+                ImGui::TextColored(COL_TEXT_DIM, "Loading preview...");
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Info grid
+        ImGui::Text("Site:            %s (%s)", bot.siteName.c_str(), bot.siteSlug.c_str());
+        ImGui::Text("Website:         %s", bot.websiteUrl.c_str());
+        ImGui::Text("Gender:          %s", genderToString(bot.gender));
+        if (!bot.country.empty())
+            ImGui::Text("Country:         %s", bot.country.c_str());
+        ImGui::Text("Running:         %s", bot.running ? "Yes" : "No");
+        ImGui::Text("Recording:       %s", bot.recording ? "Yes" : "No");
+        if (bot.mobile)
+            ImGui::TextColored(COL_ORANGE, "Mobile:          Yes (broadcasting from phone)");
+        ImGui::Text("Errors:          %d", bot.consecutiveErrors);
+        ImGui::Text("Files:           %d", bot.fileCount);
+        ImGui::Text("Total Data:      %s", formatBytesHuman(bot.totalBytes).c_str());
+
+        if (bot.recording)
+        {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextColored(COL_GREEN, "Recording Details");
+            ImGui::Text("Current File:    %s", bot.recordingStats.currentFile.c_str());
+            ImGui::Text("Written:         %s", formatBytesHuman(bot.recordingStats.bytesWritten).c_str());
+            ImGui::Text("Segments:        %u", bot.recordingStats.segmentsRecorded);
+            ImGui::Text("Speed:           %.1fx", bot.recordingStats.currentSpeed);
+            ImGui::Text("Stalls:          %u", bot.recordingStats.stallsDetected);
+        }
+
+        // Cross-register group
+        auto group = manager_.getGroupForBot(bot.username, bot.siteName);
+        if (group)
+        {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextColored(COL_CYAN, "Cross-Register: %s", group->groupName.c_str());
+            for (const auto &[site, user] : group->members)
+            {
+                if (user != bot.username || site != bot.siteName)
+                    ImGui::BulletText("%s [%s]", user.c_str(), site.c_str());
+            }
+        }
+
+        // Error/Debug info section
+        if (!bot.lastError.empty() || !bot.lastApiResponse.empty() || bot.lastHttpCode != 0)
+        {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextColored(COL_ORANGE, "Debug Info");
+
+            if (bot.lastHttpCode != 0)
+                ImGui::Text("Last HTTP Code:  %d", bot.lastHttpCode);
+
+            if (!bot.lastError.empty())
+            {
+                ImGui::Text("Last Error:");
+                ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
+                ImGui::TextWrapped("%s", bot.lastError.c_str());
+                ImGui::PopStyleColor();
+                if (ImGui::SmallButton("Copy Error"))
+                    copyToClipboard(bot.lastError);
+            }
+
+            if (!bot.lastApiResponse.empty())
+            {
+                ImGui::Spacing();
+                ImGui::Text("Last API Response:");
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 4));
+                ImGui::BeginChild("##ApiJson", ImVec2(0, 150), true, ImGuiWindowFlags_HorizontalScrollbar);
+                ImGui::PushStyleColor(ImGuiCol_Text, COL_TEXT_DIM);
+                ImGui::TextUnformatted(bot.lastApiResponse.c_str());
+                ImGui::PopStyleColor();
+                ImGui::EndChild();
+                ImGui::PopStyleVar();
+                if (ImGui::SmallButton("Copy JSON"))
+                    copyToClipboard(bot.lastApiResponse);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // URL buttons — auto-sized to fill width
+        if (!bot.websiteUrl.empty())
+        {
+            float avail = ImGui::GetContentRegionAvail().x;
+            float spacing = ImGui::GetStyle().ItemSpacing.x;
+            float btnW = (avail - spacing * 2.0f) / 3.0f;
+
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.20f, 0.35f, 0.60f, 1.0f});
+            if (ImGui::Button("Copy URL", {btnW, 0}))
+                copyToClipboard(bot.websiteUrl);
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            if (ImGui::Button("Open in Browser", {btnW, 0}))
+                openUrlInBrowser(bot.websiteUrl);
+            ImGui::SameLine();
+            if (ImGui::Button("Open Folder", {btnW, 0}))
+            {
+                auto folder = config_.downloadsDir / (bot.username + " [" + bot.siteSlug + "]");
+                if (std::filesystem::exists(folder))
+                    openFolderInExplorer(folder);
+                else
+                    openFolderInExplorer(config_.downloadsDir);
+            }
+        }
+
+        ImGui::Spacing();
+
+        // Action buttons — auto-sized to fill width
+        {
+            float avail = ImGui::GetContentRegionAvail().x;
+            float spacing = ImGui::GetStyle().ItemSpacing.x;
+            float btnW = (avail - spacing * 2.0f) / 3.0f;
+
+            if (bot.running)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.5f, 0.15f, 0.15f, 1.0f});
+                if (ImGui::Button("Stop", {btnW, 0}))
+                    manager_.stopBot(bot.username, bot.siteName);
+                ImGui::PopStyleColor();
+            }
+            else
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.40f, 0.15f, 1.0f});
+                if (ImGui::Button("Start", {btnW, 0}))
+                    manager_.startBot(bot.username, bot.siteName);
+                ImGui::PopStyleColor();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Restart", {btnW, 0}))
+                manager_.restartBot(bot.username, bot.siteName);
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.5f, 0.15f, 0.15f, 1.0f});
+            if (ImGui::Button("Remove", {btnW, 0}))
+            {
+                manager_.removeBot(bot.username, bot.siteName);
+                showBotDetail_ = false;
+            }
+            ImGui::PopStyleColor();
+        }
+
+        // Resync button (full width)
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, {0.10f, 0.45f, 0.55f, 1.0f});
+        if (ImGui::Button("Force Resync (Check Status Now)", {-1, 0}))
+        {
+            std::string user = bot.username;
+            std::string site = bot.siteSlug;
+            pendingResyncBot_ = std::make_pair(user, site);
+        }
+        ImGui::PopStyleColor();
+
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Edit Model Dialog
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderEditModelDialog()
+    {
+        if (!showEditModel_)
+            return;
+
+        ImGui::SetNextWindowSize({420 * dpiScale_, 200 * dpiScale_}, ImGuiCond_Appearing);
+        if (ImGui::Begin("Edit Model##EditModel", &showEditModel_,
+                         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking))
+        {
+            ImGui::Text("Editing:  %s  [%s]", editModelOrigUser_.c_str(), editModelOrigSite_.c_str());
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("Username:");
+            ImGui::SameLine(110 * dpiScale_);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##editUser", editModelUsername_, sizeof(editModelUsername_));
+
+            ImGui::Text("Site:");
+            ImGui::SameLine(110 * dpiScale_);
+            ImGui::SetNextItemWidth(-1);
+            auto sites = manager_.availableSites();
+            if (ImGui::BeginCombo("##editSite", editModelSiteIdx_ < (int)sites.size()
+                                                    ? sites[editModelSiteIdx_].c_str()
+                                                    : ""))
+            {
+                for (int i = 0; i < (int)sites.size(); i++)
+                {
+                    bool sel = (i == editModelSiteIdx_);
+                    if (ImGui::Selectable(sites[i].c_str(), sel))
+                        editModelSiteIdx_ = i;
+                    if (sel)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            float btnW = 100 * dpiScale_;
+            float spacing = ImGui::GetStyle().ItemSpacing.x;
+            float totalW = btnW * 2 + spacing;
+            ImGui::SetCursorPosX((ImGui::GetWindowWidth() - totalW) * 0.5f);
+
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.55f, 0.25f, 1.0f});
+            if (ImGui::Button("Apply", {btnW, 0}))
+            {
+                std::string newUser = stripWhitespace(editModelUsername_);
+                std::string newSite = (editModelSiteIdx_ < (int)sites.size())
+                                          ? sites[editModelSiteIdx_]
+                                          : editModelOrigSite_;
+                if (!newUser.empty())
+                {
+                    manager_.editBot(editModelOrigUser_, editModelOrigSite_, newUser, newSite);
+                    addLog("info", "system", "Edited model: " + editModelOrigUser_ + " [" + editModelOrigSite_ + "] -> " + newUser + " [" + newSite + "]");
+                    showEditModel_ = false;
+                }
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", {btnW, 0}))
+                showEditModel_ = false;
+        }
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::refreshBotStates()
+    {
+        cachedStates_ = manager_.getAllStates();
+    }
+
+    void GuiApp::addLog(const std::string &level, const std::string &source,
+                        const std::string &message)
+    {
+        std::lock_guard lock(logMutex_);
+        logEntries_.push_back({message, level, source, Clock::now()});
+        if (logEntries_.size() > kMaxLogEntries)
+            logEntries_.pop_front();
+    }
+
+    ImVec4 GuiApp::statusColor(Status status) const
+    {
+        switch (status)
+        {
+        case Status::Public:
+        case Status::Online:
+            return COL_GREEN;
+        case Status::Private:
+        case Status::Restricted:
+            return COL_MAGENTA;
+        case Status::Offline:
+            return COL_TEXT_DIM;
+        case Status::LongOffline:
+            return {0.35f, 0.35f, 0.40f, 1.0f};
+        case Status::Error:
+            return COL_RED;
+        case Status::RateLimit:
+        case Status::Cloudflare:
+            return COL_ORANGE;
+        case Status::NotExist:
+        case Status::Deleted:
+            return COL_RED;
+        case Status::NotRunning:
+            return {0.40f, 0.40f, 0.45f, 1.0f};
+        default:
+            return COL_YELLOW;
+        }
+    }
+
+    const char *GuiApp::statusIcon(Status status) const
+    {
+        switch (status)
+        {
+        case Status::Public:
+        case Status::Online:
+            return "[LIVE]";
+        case Status::Private:
+            return "[PRV]";
+        case Status::Restricted:
+            return "[RST]";
+        case Status::Offline:
+        case Status::LongOffline:
+            return "[OFF]";
+        case Status::Error:
+            return "[ERR]";
+        case Status::RateLimit:
+            return "[LIM]";
+        case Status::NotExist:
+        case Status::Deleted:
+            return "[DEL]";
+        case Status::NotRunning:
+            return "[---]";
+        case Status::Cloudflare:
+            return "[CF]";
+        default:
+            return "[???]";
+        }
+    }
+
+    std::string GuiApp::formatBytes(uint64_t bytes) const
+    {
+        return formatBytesHuman(bytes);
+    }
+
+    std::string GuiApp::formatBytesHuman(uint64_t bytes) const
+    {
+        const char *units[] = {"B", "KB", "MB", "GB", "TB", "PB"};
+        double size = (double)bytes;
+        int unit = 0;
+        while (size >= 1024.0 && unit < 5)
+        {
+            size /= 1024.0;
+            unit++;
+        }
+
+        std::ostringstream oss;
+        if (unit == 0)
+            oss << bytes << " B";
+        else
+            oss << std::fixed << std::setprecision(1) << size << " " << units[unit];
+        return oss.str();
+    }
+
+    std::string GuiApp::formatDuration(double seconds) const
+    {
+        int h = (int)seconds / 3600;
+        int m = ((int)seconds % 3600) / 60;
+        int s = (int)seconds % 60;
+
+        std::ostringstream oss;
+        if (h > 0)
+            oss << h << "h " << m << "m";
+        else if (m > 0)
+            oss << m << "m " << s << "s";
+        else
+            oss << s << "s";
+        return oss.str();
+    }
+
+    std::string GuiApp::formatTimeAgo(TimePoint tp) const
+    {
+        auto now = Clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - tp).count();
+        return formatDuration((double)elapsed);
+    }
+
+    float GuiApp::getStatusPulse(Status status) const
+    {
+        if (status == Status::Public || status == Status::Online)
+            return (std::sin(animTime_ * 2.0f) + 1.0f) * 0.5f * 0.15f;
+        return 0.0f;
+    }
+
+} // namespace sm
