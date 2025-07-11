@@ -26,8 +26,8 @@ class CamSoda(Bot):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "User-Agent": UserAgent().chrome,  # Override user agent from config with a chrome user agent
         }
-
-        r = requests.get('https://www.camsoda.com/api/v1/video/vtoken/' + self.username, headers=headers, impersonate='chrome', verify=False)
+        impersonate = self.impersonate = 'chrome'
+        r = requests.get('https://www.camsoda.com/api/v1/video/vtoken/' + self.username, headers=headers, impersonate=impersonate, verify=False)
         if r.status_code != 200:
             return Status.UNKNOWN
 

@@ -7,8 +7,8 @@ from time import sleep
 from datetime import datetime
 from threading import Thread
 
-import requests
-import requests.cookies
+from curl_cffi import requests
+from curl_cffi import Cookies
 
 from streamonitor.enums import Status
 import streamonitor.log as log
@@ -25,7 +25,6 @@ class Bot(Thread):
     ratelimit = False
     url = "javascript:void(0)"
     recording = False
-
     sleep_on_private = 5
     sleep_on_offline = 5
     sleep_on_long_offline = 300
@@ -57,6 +56,7 @@ class Bot(Thread):
         self.logger = self.getLogger()
 
         self.cookies = None
+        self.impersonate = None
         self.cookieUpdater = None
         self.cookie_update_interval = 0
 
@@ -221,7 +221,7 @@ class Bot(Thread):
 
     def getPlaylistVariants(self, url):
         sources = []
-        result = requests.get(url, headers=self.headers, cookies=self.cookies, verify=False)
+        result = requests.get(url, headers=self.headers, cookies=self.cookies, impersonate=self.impersonate, verify=False)
         m3u8_doc = result.content.decode("utf-8")
         variant_m3u8 = m3u8.loads(m3u8_doc)
         for playlist in variant_m3u8.playlists:
