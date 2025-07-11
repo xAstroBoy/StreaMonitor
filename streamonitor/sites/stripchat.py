@@ -35,7 +35,7 @@ class StripChat(Bot):
         return variants
 
     def getStatus(self):
-        r = requests.get('https://stripchat.com/api/vr/v2/models/username/' + self.username, headers= headers, verify=False)
+        r = requests.get('https://stripchat.com/api/vr/v2/models/username/' + self.username, headers= self.headers, verify=False)
         if r.status_code != 200:
             return Status.UNKNOWN
 
