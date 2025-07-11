@@ -7,6 +7,9 @@ from streamonitor.managers.zmqmanager import ZMQManager
 from streamonitor.managers.outofspace_detector import OOSDetector
 from streamonitor.clean_exit import CleanExit
 import streamonitor.sites  # must have
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 
         
 def is_docker():
@@ -33,11 +36,11 @@ def main():
         console_manager = CLIManager(streamers)
         console_manager.start()
 
-    zmq_manager = ZMQManager(streamers)
-    zmq_manager.start()
+    #zmq_manager = ZMQManager(streamers)
+    #zmq_manager.start()
 
-    http_manager = HTTPManager(streamers)
-    http_manager.start()
+    #http_manager = HTTPManager(streamers)
+    #http_manager.start()
 
 
 main()
