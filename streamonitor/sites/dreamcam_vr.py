@@ -40,5 +40,9 @@ class DreamCamVR(DreamCam):
             vr_suffix += f'_{vr_frame_format}{vr_angle}'
         return vr_suffix
 
+    
+    def isMobile(self):
+        return False
+
 
 Bot.loaded_sites.add(DreamCamVR)

@@ -16,7 +16,6 @@ from parameters import DOWNLOADS_DIR, DEBUG, WANTED_RESOLUTION, WANTED_RESOLUTIO
 from streamonitor.downloaders.ffmpeg import getVideoFfmpeg
 from streamonitor.models import VideoData
 
-
 class Bot(Thread):
     loaded_sites = set()
     username = None
@@ -87,6 +86,7 @@ class Bot(Thread):
         if thread_too:
             self.quitting = True
 
+
     def getStatus(self):
         return Status.UNKNOWN
 
@@ -107,6 +107,7 @@ class Bot(Thread):
             self.running = False
         return message
 
+    
     def getWebsiteURL(self):
         return "javascript:void(0)"
 
@@ -128,6 +129,8 @@ class Bot(Thread):
                 self.logger.warning(e)
         self.video_files = _videos
         self.video_files_total_size = _total_size
+
+
 
     def _sleep(self, time):
         while time > 0:
@@ -218,7 +221,7 @@ class Bot(Thread):
 
     def getPlaylistVariants(self, url):
         sources = []
-        result = requests.get(url, headers=self.headers, cookies=self.cookies)
+        result = requests.get(url, headers=self.headers, cookies=self.cookies, verify=False)
         m3u8_doc = result.content.decode("utf-8")
         variant_m3u8 = m3u8.loads(m3u8_doc)
         for playlist in variant_m3u8.playlists:
@@ -235,6 +238,7 @@ class Bot(Thread):
             self.logger.warn("Not variant playlist, can't select resolution")
             return None
         return sources  # [(url, (width, height)),...]
+
 
     def getWantedResolutionPlaylist(self, url):
         try:
@@ -301,19 +305,32 @@ class Bot(Thread):
         if p['status'] == 'downloading':
             self.log("Downloading " + str(round(float(p['downloaded_bytes']) / float(p['total_bytes']) * 100, 1)) + "%")
         if p['status'] == 'finished':
-            self.log("Show ended. File:" + p['filename'])
+            self.log("Recording ended. File:" + p['filename'])
 
     @property
     def outputFolder(self):
-        return str(os.path.join(DOWNLOADS_DIR, self.username + ' [' + self.siteslug + ']'))
+        base_folder = os.path.join(DOWNLOADS_DIR, self.username + ' [' + self.siteslug + ']')
+        if self.siteslug == 'SC' and hasattr(self, 'isMobileBroadcast') and self.isMobileBroadcast:
+            base_folder = os.path.join(base_folder, 'Mobile')
+        return base_folder
 
     def genOutFilename(self, create_dir=True):
         folder = self.outputFolder
         if create_dir:
             os.makedirs(folder, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = os.path.join(folder, f'{self.username}-{timestamp}.{CONTAINER}')
+            
+        # Get the latest sequential number from existing files in the folder
+        existing_files = os.listdir(folder)
+        latest_number = max([int(filename.split(".")[0]) for filename in existing_files if filename.split(".")[0].isdigit()] + [0])
+
+        # Increment the latest number until we find an available filename
+        next_number = latest_number + 1
+        while f"{next_number}.{CONTAINER}" in existing_files:
+            next_number += 1
+
+        filename = os.path.join(folder, f"{next_number}.{CONTAINER}")
         return filename
+    
 
     def export(self):
         return {"site": self.site, "username": self.username, "running": self.running}
@@ -326,7 +343,6 @@ class Bot(Thread):
                     site == sitecls.siteslug.lower() or \
                     site in sitecls.aliases:
                 return sitecls
-        return None
 
     @staticmethod
     def createInstance(username: str, site: str = None):

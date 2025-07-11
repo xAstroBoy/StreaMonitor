@@ -23,7 +23,7 @@ class XLoveCam(Bot):
             'origin': "filter-chg",
             'stat':	"0",
         }
-        r = requests.post(f'https://www.xlovecam.com/hu/performerAction/onlineList', headers=self.headers, data=data)
+        r = requests.post(f'https://www.xlovecam.com/hu/performerAction/onlineList', headers= self.headers, data=data, verify=False)
         if not r.ok:
             return None
         resp = r.json()
@@ -46,7 +46,7 @@ class XLoveCam(Bot):
         data = {
             'performerId': self._id,
         }
-        r = requests.post(f'https://www.xlovecam.com/hu/performerAction/getPerformerRoom', headers=self.headers, data=data)
+        r = requests.post(f'https://www.xlovecam.com/hu/performerAction/getPerformerRoom', headers= self.headers, data=data, verify=False)
 
         if not r.ok:
             return Status.UNKNOWN
@@ -65,5 +65,9 @@ class XLoveCam(Bot):
         if self.lastInfo.get('online') == 0:
             return Status.OFFLINE
         return Status.UNKNOWN
+    
+    def isMobile(self):
+        return False
+
 
 Bot.loaded_sites.add(XLoveCam)

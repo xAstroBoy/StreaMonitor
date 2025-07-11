@@ -27,7 +27,7 @@ class CamSoda(Bot):
             "User-Agent": UserAgent().chrome,  # Override user agent from config with a chrome user agent
         }
 
-        r = requests.get('https://www.camsoda.com/api/v1/video/vtoken/' + self.username, headers=headers, impersonate='chrome')
+        r = requests.get('https://www.camsoda.com/api/v1/video/vtoken/' + self.username, headers=headers, impersonate='chrome', verify=False)
         if r.status_code != 200:
             return Status.UNKNOWN
 
@@ -42,6 +42,10 @@ class CamSoda(Bot):
         elif "token" in self.lastInfo:
             return Status.OFFLINE
         return Status.UNKNOWN
+
+    
+    def isMobile(self):
+        return False
 
 
 Bot.loaded_sites.add(CamSoda)
