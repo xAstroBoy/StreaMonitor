@@ -2,6 +2,7 @@ import errno
 import os
 import subprocess
 import sys
+import signal
 
 import requests.cookies
 from threading import Thread
@@ -26,17 +27,21 @@ def getVideoFfmpeg(self, url, filename):
 
     cmd.extend([
         '-readrate', '1.3',
-        '-max_reload', '20',
-        '-seg_max_retry', '20',
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '2',
+        '-timeout', '15000000',
+        '-max_reload', '50',
+        '-seg_max_retry', '50',
         '-m3u8_hold_counters', '20',
+        '-probesize', '5000000',
+        '-analyzeduration', '7000000',
         '-i', url,
         '-c:a', 'copy',
         '-c:v', 'copy',
     ])
 
     suffix = ''
-    if hasattr(self, 'filename_extra_suffix'):
-        suffix = self.filename_extra_suffix
 
     if SEGMENT_TIME is not None:
         username = filename.rsplit('-', maxsplit=2)[0]
@@ -49,52 +54,87 @@ def getVideoFfmpeg(self, url, filename):
         ])
     else:
         cmd.extend([
+            '-movflags', '+frag_keyframe+empty_moov',
+            '-f', 'mp4',
             os.path.splitext(filename)[0] + suffix + '.' + CONTAINER
         ])
 
     class _Stopper:
         def __init__(self):
             self.stop = False
-
         def pls_stop(self):
             self.stop = True
 
     stopping = _Stopper()
     error = False
+    process = None
 
     def execute():
-        nonlocal error
+        nonlocal error, process
         try:
-            stderr = open(filename + '.stderr.log', 'w+') if DEBUG else subprocess.DEVNULL
+            stderr_path = filename + '.stderr.log'
+            stderr = open(stderr_path, 'w+', encoding='utf-8') if DEBUG else subprocess.DEVNULL
             startupinfo = None
+            creationflags = 0
             if sys.platform == "win32":
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
             process = subprocess.Popen(
-                args=cmd, stdin=subprocess.PIPE, stderr=stderr, stdout=subprocess.DEVNULL, startupinfo=startupinfo)
+                args=cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+                startupinfo=startupinfo,
+                creationflags=creationflags
+            )
         except OSError as e:
-            if e.errno == errno.ENOENT:
-                self.logger.error('FFMpeg executable not found!')
-                error = True
-                return
-            else:
-                self.logger.error("Got OSError, errno: " + str(e.errno))
-                error = True
-                return
+            self.logger.error(f"FFMpeg start failed: {e}")
+            error = True
+            return
 
         while process.poll() is None:
             if stopping.stop:
-                process.communicate(b'q')
+                try:
+                    process.communicate(b'q', timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.logger.warning("Graceful stop failed, killing ffmpeg process")
+                    try:
+                        if sys.platform == "win32":
+                            process.send_signal(signal.CTRL_BREAK_EVENT)
+                        else:
+                            process.terminate()
+                        process.wait(timeout=3)
+                    except Exception as kill_err:
+                        self.logger.error(f"Force kill failed: {kill_err}")
+                        process.kill()
                 break
             try:
-                process.wait(1)
+                process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 pass
 
-        if process.returncode and process.returncode != 0 and process.returncode != 255:
-            self.logger.error('The process exited with an error. Return code: ' + str(process.returncode))
+        if process.returncode not in (0, 255):
+            self.logger.error(f'FFMpeg exited with error. Return code: {process.returncode}')
             error = True
-            return
+
+        if DEBUG:
+            try:
+                with open(stderr_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                    shown_skips = 0
+                    for line in lines:
+                        if shown_skips >= 5:
+                            break
+                        line = line.strip()
+                        if '[hls]' in line and 'skipping' in line and 'expired' in line:
+                            self.logger.warning('[ffmpeg HLS] ' + line)
+                            shown_skips += 1
+                        elif '[ffmpeg]' not in line and shown_skips < 5:
+                            self.logger.debug('[ffmpeg] ' + line)
+            except Exception as e:
+                self.logger.warning(f"Failed to read stderr log: {e}")
 
     thread = Thread(target=execute)
     thread.start()
