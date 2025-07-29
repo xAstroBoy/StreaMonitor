@@ -15,7 +15,7 @@ import streamonitor.log as log
 from parameters import DOWNLOADS_DIR, DEBUG, WANTED_RESOLUTION, WANTED_RESOLUTION_PREFERENCE, CONTAINER, HTTP_USER_AGENT
 from streamonitor.downloaders.ffmpeg import getVideoFfmpeg
 from streamonitor.models import VideoData
-
+from threading import Event, Thread
 class Bot(Thread):
     loaded_sites = set()
     username = None
@@ -28,9 +28,9 @@ class Bot(Thread):
     sleep_on_private = 5
     sleep_on_offline = 5
     sleep_on_long_offline = 300
-    sleep_on_error = 20
+    sleep_on_error = 5
     sleep_on_ratelimit = 180
-    long_offline_timeout = 600
+    long_offline_timeout = 180
     previous_status = None
 
     headers = {
@@ -60,10 +60,13 @@ class Bot(Thread):
         self.cookieUpdater = None
         self.cookie_update_interval = 0
 
-        self.lastInfo = {}  # This dict will hold information about stream after getStatus is called. One can use this in getVideoUrl
+        self._cookie_thread = None
+        self._cookie_thread_stop = Event()
+
+        self.lastInfo = {}
         self.running = False
         self.quitting = False
-        self.sc: Status = Status.NOTRUNNING  # Status code
+        self.sc: Status = Status.NOTRUNNING
         self.getVideo = getVideoFfmpeg
         self.stopDownload = None
         self.recording = False
@@ -86,7 +89,6 @@ class Bot(Thread):
         if thread_too:
             self.quitting = True
 
-
     def getStatus(self):
         return Status.UNKNOWN
 
@@ -107,7 +109,6 @@ class Bot(Thread):
             self.running = False
         return message
 
-    
     def getWebsiteURL(self):
         return "javascript:void(0)"
 
@@ -130,14 +131,62 @@ class Bot(Thread):
         self.video_files = _videos
         self.video_files_total_size = _total_size
 
-
-
     def _sleep(self, time):
         while time > 0:
             sleep(1)
             time -= 1
             if self.quitting or not self.running:
                 return
+
+    def _start_cookie_updater(self):
+        if self.cookie_update_interval > 0 and self.cookieUpdater is not None:
+            if self._cookie_thread is None or not self._cookie_thread.is_alive():
+                self._cookie_thread_stop.clear()
+                def update_cookie():
+                    while not self._cookie_thread_stop.is_set() and self.sc == Status.PUBLIC and self.running and not self.quitting:
+                        self._sleep(self.cookie_update_interval)
+                        if self._cookie_thread_stop.is_set():
+                            break
+                        ret = self.cookieUpdater()
+                        if ret:
+                            self.debug('Updated cookies')
+                        else:
+                            self.logger.warning('Failed to update cookies')
+                self._cookie_thread = Thread(target=update_cookie, daemon=True)
+                self._cookie_thread.start()
+
+    def _stop_cookie_updater(self):
+        if self._cookie_thread is not None:
+            self._cookie_thread_stop.set()
+            self._cookie_thread = None
+
+    def _download_once(self):
+        video_url = self.getVideoUrl()
+        if video_url is None:
+            self.sc = Status.ERROR
+            self.logger.error(self.status())
+            return False
+        self.log('Started downloading show')
+        self.recording = True
+        file = self.genOutFilename()
+        ok = False
+        try:
+            ok = bool(self.getVideo(self, video_url, file))
+        except Exception as e:
+            self.logger.exception(e)
+            ok = False
+        finally:
+            self.recording = False
+            self.stopDownload = None
+            try:
+                self.cache_file_list()
+            except Exception as e:
+                self.logger.exception(e)
+        if ok:
+            self.log('Recording ended')
+        else:
+            self.log('Recording aborted/failed')
+        return ok
 
     def run(self):
         while not self.quitting:
@@ -146,54 +195,55 @@ class Bot(Thread):
             if self.quitting:
                 break
 
-            offline_time = self.long_offline_timeout + 1  # Don't start polling when streamer was offline at start
+            offline_time = self.long_offline_timeout + 1
             while self.running:
                 try:
                     self.recording = False
                     self.sc = self.getStatus()
-                    # Check if the status has changed and log the update if it's different from the previous status
                     if self.sc != self.previous_status:
                         self.log(self.status())
                         self.previous_status = self.sc
+
                     if self.sc == Status.ERROR:
                         self._sleep(self.sleep_on_error)
+
                     if self.sc == Status.OFFLINE:
                         offline_time += self.sleep_on_offline
                         if offline_time > self.long_offline_timeout:
                             self.sc = Status.LONG_OFFLINE
-                    elif self.sc == Status.PUBLIC or self.sc == Status.PRIVATE:
-                        offline_time = 0
-                        if self.sc == Status.PUBLIC:
-                            if self.cookie_update_interval > 0 and self.cookieUpdater is not None:
-                                def update_cookie():
-                                    while self.sc == Status.PUBLIC and not self.quitting and self.running:
-                                        self._sleep(self.cookie_update_interval)
-                                        ret = self.cookieUpdater()
-                                        if ret:
-                                            self.debug('Updated cookies')
-                                        else:
-                                            self.logger.warning('Failed to update cookies')
-                                cookie_update_process = Thread(target=update_cookie)
-                                cookie_update_process.start()
 
-                            video_url = self.getVideoUrl()
-                            if video_url is None:
-                                self.sc = Status.ERROR
-                                self.logger.error(self.status())
-                                self._sleep(self.sleep_on_error)
-                                continue
-                            self.log('Started downloading show')
-                            self.recording = True
-                            file = self.genOutFilename()
-                            ret = self.getVideo(self, video_url, file)
-                            if not ret:
-                                self.sc = Status.ERROR
-                                self.log(self.status())
-                                self._sleep(self.sleep_on_error)
-                                continue
-                            self.recording = False
-                            self.log('Recording ended')
-                            self.cache_file_list()
+                    elif self.sc in (Status.PUBLIC, Status.PRIVATE):
+                        offline_time = 0
+
+                        if self.sc == Status.PUBLIC:
+                            self._start_cookie_updater()
+
+                            # keep retrying as long as it's PUBLIC and we are supposed to run
+                            while self.running and not self.quitting and self.sc == Status.PUBLIC:
+                                success = self._download_once()
+                                if not self.running or self.quitting:
+                                    break
+                                # quick re-check; if still PUBLIC, loop again to restart ffmpeg
+                                self.sc = self.getStatus()
+                                if self.sc != Status.PUBLIC:
+                                    break
+                                if not success:
+                                    self.sc = Status.ERROR
+                                    self.log(self.status())
+                                    self._sleep(self.sleep_on_error)
+                                    # after error, re-check status again
+                                    self.sc = self.getStatus()
+                                    if self.sc != Status.PUBLIC:
+                                        break
+                                    continue
+                                # stream may still be live, spin again immediately (no long sleep)
+                                self.log('Stream still online, restarting...')
+                                self._sleep(1)
+
+                            # leaving PUBLIC state
+                            self._stop_cookie_updater()
+
+                    # normal sleep decisions
                 except Exception as e:
                     self.logger.exception(e)
                     try:
@@ -216,6 +266,7 @@ class Bot(Thread):
                 else:
                     self._sleep(self.sleep_on_offline)
 
+            self._stop_cookie_updater()
             self.sc = Status.NOTRUNNING
             self.log("Stopped")
 
@@ -233,33 +284,27 @@ class Bot(Thread):
                 'frame_rate': stream_info.frame_rate,
                 'bandwidth': stream_info.bandwidth
             })
-
         if not variant_m3u8.is_variant and len(sources) >= 1:
             self.logger.warn("Not variant playlist, can't select resolution")
             return None
-        return sources  # [(url, (width, height)),...]
-
+        return sources
 
     def getWantedResolutionPlaylist(self, url):
         try:
             sources = self.getPlaylistVariants(url)
             if sources is None:
                 return None
-
             if len(sources) == 0:
                 self.logger.error("No available sources")
                 return None
-
             for source in sources:
                 width, height = source['resolution']
                 if width < height:
                     source['resolution_diff'] = width - WANTED_RESOLUTION
                 else:
                     source['resolution_diff'] = height - WANTED_RESOLUTION
-
             sources.sort(key=lambda a: abs(a['resolution_diff']))
             selected_source = None
-
             if WANTED_RESOLUTION_PREFERENCE == 'exact':
                 if sources[0]['resolution_diff'] == 0:
                     selected_source = sources[0]
@@ -278,11 +323,9 @@ class Bot(Thread):
             else:
                 self.logger.error('Invalid value for WANTED_RESOLUTION_PREFERENCE')
                 return None
-
             if selected_source is None:
                 self.logger.error("Couldn't select a resolution")
                 return None
-
             if selected_source['resolution'][1] != 0:
                 frame_rate = ''
                 if selected_source['frame_rate'] is not None and selected_source['frame_rate'] != 0:
@@ -318,19 +361,13 @@ class Bot(Thread):
         folder = self.outputFolder
         if create_dir:
             os.makedirs(folder, exist_ok=True)
-            
-        # Get the latest sequential number from existing files in the folder
         existing_files = os.listdir(folder)
         latest_number = max([int(filename.split(".")[0]) for filename in existing_files if filename.split(".")[0].isdigit()] + [0])
-
-        # Increment the latest number until we find an available filename
         next_number = latest_number + 1
         while f"{next_number}.{CONTAINER}" in existing_files:
             next_number += 1
-
         filename = os.path.join(folder, f"{next_number}.{CONTAINER}")
         return filename
-    
 
     def export(self):
         return {"site": self.site, "username": self.username, "running": self.running}
