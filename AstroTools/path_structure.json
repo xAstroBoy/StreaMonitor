@@ -1,0 +1,1221 @@
+{
+    ".": {
+        "_files": [
+            "MK12.exe"
+        ]
+    },
+    ".egstore": {
+        "_files": [
+            "2D057D16409BDD5CDEF8CDB215BDC745.mancpn",
+            "2D057D16409BDD5CDEF8CDB215BDC745.manifest",
+            "2EF5C9614D9917FCFB08D2A0779B0789.mancpn",
+            "2EF5C9614D9917FCFB08D2A0779B0789.manifest"
+        ],
+        "a6504fad6e7840a09c5afb8465ff6e01": {
+            "_files": [
+                "fda0f2b4047f46ffb4e94d5595c1468e0fbb9caadbe34fa1a29ed8a77394a036.ovt"
+            ]
+        },
+        "Pending": {
+            "_files": []
+        }
+    },
+    "Engine": {
+        "_files": [],
+        "Binaries": {
+            "_files": [],
+            "ThirdParty": {
+                "_files": [],
+                "NVIDIA": {
+                    "_files": [],
+                    "GeForceNOW": {
+                        "_files": [],
+                        "Win64": {
+                            "_files": [
+                                "GfnRuntimeSdk.dll"
+                            ]
+                        }
+                    },
+                    "NVaftermath": {
+                        "_files": [],
+                        "Win64": {
+                            "_files": [
+                                "GFSDK_Aftermath_Lib.x64.dll"
+                            ]
+                        }
+                    }
+                },
+                "Ogg": {
+                    "_files": [],
+                    "Win64": {
+                        "_files": [],
+                        "VS2015": {
+                            "_files": [
+                                "libogg_64.dll"
+                            ]
+                        }
+                    }
+                },
+                "PhysX3": {
+                    "_files": [],
+                    "Win64": {
+                        "_files": [],
+                        "VS2015": {
+                            "_files": [
+                                "ApexFramework_x64.dll",
+                                "APEX_Clothing_x64.dll",
+                                "APEX_Legacy_x64.dll",
+                                "PhysX3Common_x64.dll",
+                                "PhysX3Cooking_x64.dll",
+                                "PhysX3_x64.dll",
+                                "PxFoundation_x64.dll",
+                                "PxPvdSDK_x64.dll"
+                            ]
+                        }
+                    }
+                },
+                "Vorbis": {
+                    "_files": [],
+                    "Win64": {
+                        "_files": [],
+                        "VS2015": {
+                            "_files": [
+                                "libvorbisfile_64.dll",
+                                "libvorbis_64.dll"
+                            ]
+                        }
+                    }
+                },
+                "Windows": {
+                    "_files": [],
+                    "XAudio2_9": {
+                        "_files": [],
+                        "x64": {
+                            "_files": [
+                                "xaudio2_9redist.dll"
+                            ]
+                        }
+                    }
+                }
+            },
+            "Win64": {
+                "_files": [
+                    "CrashReportClient.exe"
+                ]
+            }
+        },
+        "Extras": {
+            "_files": [],
+            "Redist": {
+                "_files": [],
+                "en-us": {
+                    "_files": [
+                        "UE4PrereqSetup_x64.exe"
+                    ]
+                }
+            }
+        },
+        "Plugins": {
+            "_files": [],
+            "Online": {
+                "_files": [],
+                "VoiceChat": {
+                    "_files": [],
+                    "VivoxCoreVoiceChat": {
+                        "_files": [],
+                        "Source": {
+                            "_files": [],
+                            "ThirdParty": {
+                                "_files": [],
+                                "VivoxCoreLibrary": {
+                                    "_files": [],
+                                    "Windows": {
+                                        "_files": [],
+                                        "Release": {
+                                            "_files": [],
+                                            "x64": {
+                                                "_files": [
+                                                    "vivoxsdk.dll"
+                                                ]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "Optitrack": {
+                "_files": [],
+                "OptitrackLiveLink": {
+                    "_files": [],
+                    "ThirdParty": {
+                        "_files": [],
+                        "NatNetSDK": {
+                            "_files": [],
+                            "lib": {
+                                "_files": [],
+                                "Win64": {
+                                    "_files": [
+                                        "NatNetLib.dll"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                },
+                "OptitrackNatnet": {
+                    "_files": [],
+                    "ThirdParty": {
+                        "_files": [],
+                        "NatNetSDK": {
+                            "_files": [],
+                            "lib": {
+                                "_files": [],
+                                "Win64": {
+                                    "_files": [
+                                        "NatNetLib.dll"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "Runtime": {
+                "_files": [],
+                "AMD": {
+                    "_files": [],
+                    "FSR3": {
+                        "_files": [],
+                        "Binaries": {
+                            "_files": [],
+                            "ThirdParty": {
+                                "_files": [],
+                                "Win64": {
+                                    "_files": [
+                                        "amd_fidelityfx_dx12.dll"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                },
+                "Intel": {
+                    "_files": [],
+                    "XeSS": {
+                        "_files": [],
+                        "Binaries": {
+                            "_files": [],
+                            "ThirdParty": {
+                                "_files": [],
+                                "Win64": {
+                                    "_files": [
+                                        "libxess.dll"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                },
+                "Nvidia": {
+                    "_files": [],
+                    "DLSS": {
+                        "_files": [],
+                        "Binaries": {
+                            "_files": [],
+                            "ThirdParty": {
+                                "_files": [],
+                                "Win64": {
+                                    "_files": [
+                                        "nvngx_dlss.dll"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "Wwise": {
+                "_files": [],
+                "ThirdParty": {
+                    "_files": [],
+                    "x64_vc170": {
+                        "_files": [],
+                        "Release": {
+                            "_files": [],
+                            "bin": {
+                                "_files": [
+                                    "Ak3DAudioBedMixer.dll",
+                                    "AkAudioInput.dll",
+                                    "AkCompressor.dll",
+                                    "AkConvolutionReverb.dll",
+                                    "AkDelay.dll",
+                                    "AkExpander.dll",
+                                    "AkFlanger.dll",
+                                    "AkGain.dll",
+                                    "AkGuitarDistortion.dll",
+                                    "AkHarmonizer.dll",
+                                    "AkMatrixReverb.dll",
+                                    "AkMotion.dll",
+                                    "AkParametricEQ.dll",
+                                    "AkPeakLimiter.dll",
+                                    "AkPitchShifter.dll",
+                                    "AkRecorder.dll",
+                                    "AkRoomVerb.dll",
+                                    "AkSilenceGenerator.dll",
+                                    "AkSineTone.dll",
+                                    "AkSoundEngineDLL.dll",
+                                    "AkStereoDelay.dll",
+                                    "AkSynthOne.dll",
+                                    "AkTimeStretch.dll",
+                                    "AkToneGen.dll",
+                                    "AkTremolo.dll"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "Programs": {
+            "_files": [],
+            "CrashReportClient": {
+                "_files": [],
+                "Content": {
+                    "_files": [],
+                    "Paks": {
+                        "_files": [
+                            "CrashReportClient.pak"
+                        ]
+                    }
+                }
+            }
+        }
+    },
+    "MK12": {
+        "_files": [],
+        "Binaries": {
+            "_files": [],
+            "Win64": {
+                "_files": [
+                    "EOSSDK-Win64-Shipping.dll",
+                    "MK12.exe",
+                    "SDL2.dll"
+                ]
+            }
+        },
+        "Content": {
+            "_files": [],
+            "Movies": {
+                "_files": [],
+                "Khaoseum": {
+                    "_files": [
+                        "Khaoseum_Crowd_01.mp4",
+                        "Khaoseum_Crowd_02.mp4",
+                        "Khaoseum_Crowd_03.mp4",
+                        "Khaoseum_Crowd_04.mp4",
+                        "Khaoseum_Crowd_05.mp4",
+                        "Khaoseum_Crowd_06.mp4",
+                        "Khaoseum_Crowd_Combined.mp4"
+                    ]
+                },
+                "MapMode": {
+                    "_files": [
+                        "MK12_ENV_MM_Mansion_Video1.mp4",
+                        "MK3_AttractMode_1.mp4",
+                        "MKUnoTrailer.mp4"
+                    ]
+                },
+                "TeaHouse": {
+                    "_files": [
+                        "MS_RoomyBot_1.mp4"
+                    ]
+                }
+            },
+            "MovieSources": {
+                "_files": [],
+                "Movies_1080P": {
+                    "_files": [
+                        "MK12_002_006.bk2",
+                        "MK12_002_006_audiometa.txt",
+                        "MK12_007_008.bk2",
+                        "MK12_007_008_audiometa.txt",
+                        "MK12_009.bk2",
+                        "MK12_009_audiometa.txt",
+                        "MK12_010.bk2",
+                        "MK12_010_audiometa.txt",
+                        "MK12_011_016.bk2",
+                        "MK12_011_016_audiometa.txt",
+                        "MK12_011_InfluencerBuild.bk2",
+                        "MK12_011_InfluencerBuild_audiometa.txt",
+                        "MK12_017_019.bk2",
+                        "MK12_017_019_audiometa.txt",
+                        "MK12_020_023.bk2",
+                        "MK12_020_023_audiometa.txt",
+                        "MK12_024_025.bk2",
+                        "MK12_024_025_audiometa.txt",
+                        "MK12_026_027.bk2",
+                        "MK12_026_027_audiometa.txt",
+                        "MK12_026_TrialMode.bk2",
+                        "MK12_026_TrialMode_audiometa.txt",
+                        "MK12_028.bk2",
+                        "MK12_028_audiometa.txt",
+                        "MK12_029_030.bk2",
+                        "MK12_029_030_audiometa.txt",
+                        "MK12_031_038.bk2",
+                        "MK12_031_038_audiometa.txt",
+                        "MK12_039.bk2",
+                        "MK12_039_audiometa.txt",
+                        "MK12_040_043.bk2",
+                        "MK12_040_043_audiometa.txt",
+                        "MK12_044.bk2",
+                        "MK12_044_audiometa.txt",
+                        "MK12_045_050.bk2",
+                        "MK12_045_050_audiometa.txt",
+                        "MK12_051_054.bk2",
+                        "MK12_051_054_audiometa.txt",
+                        "MK12_055.bk2",
+                        "MK12_055_audiometa.txt",
+                        "MK12_056.bk2",
+                        "MK12_056_audiometa.txt",
+                        "MK12_057_058.bk2",
+                        "MK12_057_058_audiometa.txt",
+                        "MK12_059_060.bk2",
+                        "MK12_059_060_audiometa.txt",
+                        "MK12_061_062.bk2",
+                        "MK12_061_062_audiometa.txt",
+                        "MK12_063.bk2",
+                        "MK12_063_audiometa.txt",
+                        "MK12_063_TYM_Fail.bk2",
+                        "MK12_063_TYM_Fail_audiometa.txt",
+                        "MK12_064_067.bk2",
+                        "MK12_064_067_audiometa.txt",
+                        "MK12_068_072.bk2",
+                        "MK12_068_072_audiometa.txt",
+                        "MK12_073_074.bk2",
+                        "MK12_073_074_audiometa.txt",
+                        "MK12_075.bk2",
+                        "MK12_075_audiometa.txt",
+                        "MK12_076.bk2",
+                        "MK12_076_audiometa.txt",
+                        "MK12_077_086.bk2",
+                        "MK12_077_086_audiometa.txt",
+                        "MK12_087_090.bk2",
+                        "MK12_087_090_audiometa.txt",
+                        "MK12_091_093.bk2",
+                        "MK12_091_093_audiometa.txt",
+                        "MK12_094_095.bk2",
+                        "MK12_094_095_audiometa.txt",
+                        "MK12_096_104.bk2",
+                        "MK12_096_104_audiometa.txt",
+                        "MK12_105.bk2",
+                        "MK12_105_audiometa.txt",
+                        "MK12_105_TYM_FAIL.bk2",
+                        "MK12_105_TYM_FAIL_audiometa.txt",
+                        "MK12_106.bk2",
+                        "MK12_106_audiometa.txt",
+                        "MK12_107_111.bk2",
+                        "MK12_107_111_audiometa.txt",
+                        "MK12_112.bk2",
+                        "MK12_112_audiometa.txt",
+                        "MK12_113_116.bk2",
+                        "MK12_113_116_audiometa.txt",
+                        "MK12_117_118.bk2",
+                        "MK12_117_118_audiometa.txt",
+                        "MK12_119.bk2",
+                        "MK12_119_audiometa.txt",
+                        "MK12_119_TYM_Fail.bk2",
+                        "MK12_119_TYM_Fail_audiometa.txt",
+                        "MK12_120.bk2",
+                        "MK12_120_audiometa.txt",
+                        "MK12_121_123.bk2",
+                        "MK12_121_123_audiometa.txt",
+                        "MK12_124_132.bk2",
+                        "MK12_124_132_audiometa.txt",
+                        "MK12_133_134.bk2",
+                        "MK12_133_134_audiometa.txt",
+                        "MK12_135_137.bk2",
+                        "MK12_135_137_audiometa.txt",
+                        "MK12_138.bk2",
+                        "MK12_138_audiometa.txt",
+                        "MK12_140_143.bk2",
+                        "MK12_140_143_audiometa.txt",
+                        "MK12_144_145.bk2",
+                        "MK12_144_145_audiometa.txt",
+                        "MK12_146.bk2",
+                        "MK12_146_audiometa.txt",
+                        "MK12_147.bk2",
+                        "MK12_147_audiometa.txt",
+                        "MK12_148_154.bk2",
+                        "MK12_148_154_audiometa.txt",
+                        "MK12_157_159.bk2",
+                        "MK12_157_159_audiometa.txt",
+                        "MK12_160.bk2",
+                        "MK12_160_audiometa.txt",
+                        "MK12_161.bk2",
+                        "MK12_161_audiometa.txt",
+                        "MK12_162_172.bk2",
+                        "MK12_162_172_audiometa.txt",
+                        "MK12_173.bk2",
+                        "MK12_173_audiometa.txt",
+                        "MK12_174.bk2",
+                        "MK12_174_audiometa.txt",
+                        "MK12_175.bk2",
+                        "MK12_175_audiometa.txt",
+                        "MK12_176_178.bk2",
+                        "MK12_176_178_audiometa.txt",
+                        "MK12_179.bk2",
+                        "MK12_179_audiometa.txt",
+                        "MK12_180_181.bk2",
+                        "MK12_180_181_audiometa.txt",
+                        "MK12_182.bk2",
+                        "MK12_182_audiometa.txt",
+                        "MK12_183_185A.bk2",
+                        "MK12_183_185A_audiometa.txt",
+                        "MK12_185A_CharSelect.bk2",
+                        "MK12_185A_CharSelect_audiometa.txt",
+                        "MK12_185B_186A.bk2",
+                        "MK12_185B_186A_audiometa.txt",
+                        "MK12_186B_Ashrah.bk2",
+                        "MK12_186B_Ashrah_audiometa.txt",
+                        "MK12_186B_Baraka.bk2",
+                        "MK12_186B_Baraka_audiometa.txt",
+                        "MK12_186B_Geras.bk2",
+                        "MK12_186B_Geras_audiometa.txt",
+                        "MK12_186B_Havik.bk2",
+                        "MK12_186B_Havik_audiometa.txt",
+                        "MK12_186B_JohnnyCage.bk2",
+                        "MK12_186B_JohnnyCage_audiometa.txt",
+                        "MK12_186B_Kenshi.bk2",
+                        "MK12_186B_Kenshi_audiometa.txt",
+                        "MK12_186B_Kitana.bk2",
+                        "MK12_186B_Kitana_audiometa.txt",
+                        "MK12_186B_KungLao.bk2",
+                        "MK12_186B_KungLao_audiometa.txt",
+                        "MK12_186B_LiMei.bk2",
+                        "MK12_186B_LiMei_audiometa.txt",
+                        "MK12_186B_LiuKang.bk2",
+                        "MK12_186B_LiuKang_audiometa.txt",
+                        "MK12_186B_Mileena.bk2",
+                        "MK12_186B_Mileena_audiometa.txt",
+                        "MK12_186B_Nitara.bk2",
+                        "MK12_186B_Nitara_audiometa.txt",
+                        "MK12_186B_Raiden.bk2",
+                        "MK12_186B_Raiden_audiometa.txt",
+                        "MK12_186B_RainMage.bk2",
+                        "MK12_186B_RainMage_audiometa.txt",
+                        "MK12_186B_Reiko.bk2",
+                        "MK12_186B_Reiko_audiometa.txt",
+                        "MK12_186B_Reptile.bk2",
+                        "MK12_186B_Reptile_audiometa.txt",
+                        "MK12_186B_Scorpion.bk2",
+                        "MK12_186B_Scorpion_audiometa.txt",
+                        "MK12_186B_ShangTsung.bk2",
+                        "MK12_186B_ShangTsung_audiometa.txt",
+                        "MK12_186B_ShaoKahn.bk2",
+                        "MK12_186B_ShaoKahn_audiometa.txt",
+                        "MK12_186B_Sindel.bk2",
+                        "MK12_186B_Sindel_audiometa.txt",
+                        "MK12_186B_Smoke.bk2",
+                        "MK12_186B_Smoke_audiometa.txt",
+                        "MK12_186B_Subzero.bk2",
+                        "MK12_186B_Subzero_audiometa.txt",
+                        "MK12_186B_Tanya.bk2",
+                        "MK12_186B_Tanya_audiometa.txt",
+                        "MK12_188A.bk2",
+                        "MK12_188A_audiometa.txt",
+                        "MK12_192B.bk2",
+                        "MK12_192B_audiometa.txt",
+                        "MK12_193C.bk2",
+                        "MK12_193C_audiometa.txt",
+                        "MK12_196B.bk2",
+                        "MK12_196B_audiometa.txt",
+                        "MK12_199_200A.bk2",
+                        "MK12_199_200A_audiometa.txt",
+                        "MK12_200AC.bk2",
+                        "MK12_200AC_audiometa.txt",
+                        "MK12_202A.bk2",
+                        "MK12_202A_audiometa.txt",
+                        "MK12_203B.bk2",
+                        "MK12_203B_audiometa.txt",
+                        "MK12_204B.bk2",
+                        "MK12_204B_audiometa.txt",
+                        "MK12_205_206.bk2",
+                        "MK12_205_206_audiometa.txt",
+                        "MK12_207.bk2",
+                        "MK12_207_audiometa.txt",
+                        "MK12_Credits_Crawl_PC.bk2",
+                        "MK12_Credits_Crawl_PC_audiometa.txt",
+                        "MK12_LadderEnding_Ashrah.bk2",
+                        "MK12_LadderEnding_Ashrah_audiometa.txt",
+                        "MK12_LadderEnding_Baraka.bk2",
+                        "MK12_LadderEnding_Baraka_audiometa.txt",
+                        "MK12_LadderEnding_Cyrax.bk2",
+                        "MK12_LadderEnding_Cyrax_audiometa.txt",
+                        "MK12_LadderEnding_Ermac.bk2",
+                        "MK12_LadderEnding_Ermac_audiometa.txt",
+                        "MK12_LadderEnding_Geras.bk2",
+                        "MK12_LadderEnding_Geras_audiometa.txt",
+                        "MK12_LadderEnding_Ghostface.bk2",
+                        "MK12_LadderEnding_Ghostface_audiometa.txt",
+                        "MK12_LadderEnding_Havik.bk2",
+                        "MK12_LadderEnding_Havik_audiometa.txt",
+                        "MK12_LadderEnding_Homelander.bk2",
+                        "MK12_LadderEnding_Homelander_audiometa.txt",
+                        "MK12_LadderEnding_JohnnyCage.bk2",
+                        "MK12_LadderEnding_JohnnyCage_audiometa.txt",
+                        "MK12_LadderEnding_Kenshi.bk2",
+                        "MK12_LadderEnding_Kenshi_audiometa.txt",
+                        "MK12_LadderEnding_Kitana.bk2",
+                        "MK12_LadderEnding_Kitana_audiometa.txt",
+                        "MK12_LadderEnding_KungLao.bk2",
+                        "MK12_LadderEnding_KungLao_audiometa.txt",
+                        "MK12_LadderEnding_LiMei.bk2",
+                        "MK12_LadderEnding_LiMei_audiometa.txt",
+                        "MK12_LadderEnding_LiuKang.bk2",
+                        "MK12_LadderEnding_LiuKang_audiometa.txt",
+                        "MK12_LadderEnding_Mileena.bk2",
+                        "MK12_LadderEnding_Mileena_audiometa.txt",
+                        "MK12_LadderEnding_Nitara.bk2",
+                        "MK12_LadderEnding_Nitara_audiometa.txt",
+                        "MK12_LadderEnding_NoobSaibot.bk2",
+                        "MK12_LadderEnding_NoobSaibot_audiometa.txt",
+                        "MK12_LadderEnding_OmniMan.bk2",
+                        "MK12_LadderEnding_OmniMan_audiometa.txt",
+                        "MK12_LadderEnding_Peacemaker.bk2",
+                        "MK12_LadderEnding_Peacemaker_audiometa.txt",
+                        "MK12_LadderEnding_QuanChi.bk2",
+                        "MK12_LadderEnding_QuanChi_audiometa.txt",
+                        "MK12_LadderEnding_Raiden.bk2",
+                        "MK12_LadderEnding_Raiden_audiometa.txt",
+                        "MK12_LadderEnding_RainMage.bk2",
+                        "MK12_LadderEnding_RainMage_audiometa.txt",
+                        "MK12_LadderEnding_Reiko.bk2",
+                        "MK12_LadderEnding_Reiko_audiometa.txt",
+                        "MK12_LadderEnding_Reptile.bk2",
+                        "MK12_LadderEnding_Reptile_audiometa.txt",
+                        "MK12_LadderEnding_Scorpion.bk2",
+                        "MK12_LadderEnding_Scorpion_audiometa.txt",
+                        "MK12_LadderEnding_Sektor.bk2",
+                        "MK12_LadderEnding_Sektor_audiometa.txt",
+                        "MK12_LadderEnding_ShangTsung.bk2",
+                        "MK12_LadderEnding_ShangTsung_audiometa.txt",
+                        "MK12_LadderEnding_ShaoKahn.bk2",
+                        "MK12_LadderEnding_ShaoKahn_audiometa.txt",
+                        "MK12_LadderEnding_Sindel.bk2",
+                        "MK12_LadderEnding_Sindel_audiometa.txt",
+                        "MK12_LadderEnding_Smoke.bk2",
+                        "MK12_LadderEnding_Smoke_audiometa.txt",
+                        "MK12_LadderEnding_SubZero.bk2",
+                        "MK12_LadderEnding_SubZero_audiometa.txt",
+                        "MK12_LadderEnding_Takeda.bk2",
+                        "MK12_LadderEnding_Takeda_audiometa.txt",
+                        "MK12_LadderEnding_Tanya.bk2",
+                        "MK12_LadderEnding_Tanya_audiometa.txt",
+                        "MK12_MapMode_LiuKang_Opener.bk2",
+                        "MK12_MapMode_LiuKang_Opener_audiometa.txt",
+                        "MK12_MapMode_LiuKang_PostFight.bk2",
+                        "MK12_MapMode_LiuKang_PostFight_audiometa.txt",
+                        "MK12_MapMode_LiuKang_PreFight.bk2",
+                        "MK12_MapMode_LiuKang_PreFight_audiometa.txt",
+                        "MK12_MapMode_Mileena_Opener.bk2",
+                        "MK12_MapMode_Mileena_Opener_audiometa.txt",
+                        "MK12_MapMode_Mileena_PostFight.bk2",
+                        "MK12_MapMode_Mileena_PostFight_audiometa.txt",
+                        "MK12_MapMode_Mileena_PreFight.bk2",
+                        "MK12_MapMode_Mileena_PreFight_audiometa.txt",
+                        "MK12_MapMode_Mileena_Teaser.bk2",
+                        "MK12_MapMode_Mileena_Teaser_audiometa.txt",
+                        "MK12_MapMode_Mode_Opener.bk2",
+                        "MK12_MapMode_Mode_Opener_audiometa.txt",
+                        "MK12_MapMode_Nitara_Opener.bk2",
+                        "MK12_MapMode_Nitara_Opener_audiometa.txt",
+                        "MK12_MapMode_Nitara_PostFight.bk2",
+                        "MK12_MapMode_Nitara_PostFight_audiometa.txt",
+                        "MK12_MapMode_Nitara_PreFight.bk2",
+                        "MK12_MapMode_Nitara_PreFight_audiometa.txt",
+                        "MK12_MapMode_Nitara_Teaser.bk2",
+                        "MK12_MapMode_Nitara_Teaser_audiometa.txt",
+                        "MK12_MapMode_Raiden_Opener.bk2",
+                        "MK12_MapMode_Raiden_Opener_audiometa.txt",
+                        "MK12_MapMode_Raiden_PostFight.bk2",
+                        "MK12_MapMode_Raiden_PostFight_audiometa.txt",
+                        "MK12_MapMode_Raiden_PreFight.bk2",
+                        "MK12_MapMode_Raiden_PreFight_audiometa.txt",
+                        "MK12_MapMode_Raiden_Teaser.bk2",
+                        "MK12_MapMode_Raiden_Teaser_audiometa.txt",
+                        "MK12_MapMode_Reptile_Opener.bk2",
+                        "MK12_MapMode_Reptile_Opener_audiometa.txt",
+                        "MK12_MapMode_Reptile_PostFight.bk2",
+                        "MK12_MapMode_Reptile_PostFight_audiometa.txt",
+                        "MK12_MapMode_Reptile_PreFight.bk2",
+                        "MK12_MapMode_Reptile_PreFight_audiometa.txt",
+                        "MK12_MapMode_Scorpion_Opener.bk2",
+                        "MK12_MapMode_Scorpion_Opener_audiometa.txt",
+                        "MK12_MapMode_Scorpion_PostFight.bk2",
+                        "MK12_MapMode_Scorpion_PostFight_audiometa.txt",
+                        "MK12_MapMode_Scorpion_PreFight.bk2",
+                        "MK12_MapMode_Scorpion_PreFight_audiometa.txt",
+                        "MK12_MapMode_Scorpion_Teaser.bk2",
+                        "MK12_MapMode_Scorpion_Teaser_audiometa.txt",
+                        "MK12_MapMode_Season7_Teaser.bk2",
+                        "MK12_MapMode_Season7_Teaser_audiometa.txt",
+                        "MK12_MapMode_Season8_Teaser.bk2",
+                        "MK12_MapMode_Season8_Teaser_audiometa.txt",
+                        "MK12_MapMode_ShangTsung_Opener.bk2",
+                        "MK12_MapMode_ShangTsung_Opener_audiometa.txt",
+                        "MK12_MapMode_ShangTsung_PostFight.bk2",
+                        "MK12_MapMode_ShangTsung_PostFight_audiometa.txt",
+                        "MK12_MapMode_ShangTsung_PreFight.bk2",
+                        "MK12_MapMode_ShangTsung_PreFight_audiometa.txt",
+                        "MK12_MapMode_SubZero_Opener.bk2",
+                        "MK12_MapMode_SubZero_Opener_audiometa.txt",
+                        "MK12_MapMode_SubZero_PostFight.bk2",
+                        "MK12_MapMode_SubZero_PostFight_audiometa.txt",
+                        "MK12_MapMode_SubZero_PreFight.bk2",
+                        "MK12_MapMode_SubZero_PreFight_audiometa.txt",
+                        "MK12_MapMode_SubZero_Teaser.bk2",
+                        "MK12_MapMode_SubZero_Teaser_audiometa.txt",
+                        "MK12_Studio_Credits.bk2",
+                        "MK12_Studio_Credits_audiometa.txt",
+                        "MK12_Studio_Logos.bk2",
+                        "MK12_Studio_Logos_audiometa.txt"
+                    ]
+                },
+                "Movies_4K": {
+                    "_files": [
+                        "MK12_301.bk2",
+                        "MK12_301_audiometa.txt",
+                        "MK12_302_304.bk2",
+                        "MK12_302_304_audiometa.txt",
+                        "MK12_305.bk2",
+                        "MK12_305_audiometa.txt",
+                        "MK12_306.bk2",
+                        "MK12_306_audiometa.txt",
+                        "MK12_307_308.bk2",
+                        "MK12_307_308_audiometa.txt",
+                        "MK12_309_312.bk2",
+                        "MK12_309_312_audiometa.txt",
+                        "MK12_313_314.bk2",
+                        "MK12_313_314_audiometa.txt",
+                        "MK12_315_324.bk2",
+                        "MK12_315_324_audiometa.txt",
+                        "MK12_325.bk2",
+                        "MK12_325_audiometa.txt",
+                        "MK12_326.bk2",
+                        "MK12_326_audiometa.txt",
+                        "MK12_327_339.bk2",
+                        "MK12_327_339_audiometa.txt",
+                        "MK12_340.bk2",
+                        "MK12_340_audiometa.txt",
+                        "MK12_341.bk2",
+                        "MK12_341_audiometa.txt",
+                        "MK12_342_349.bk2",
+                        "MK12_342_349_audiometa.txt",
+                        "MK12_350.bk2",
+                        "MK12_350_audiometa.txt",
+                        "MK12_351_358.bk2",
+                        "MK12_351_358_audiometa.txt",
+                        "MK12_359.bk2",
+                        "MK12_359_audiometa.txt",
+                        "MK12_360_370.bk2",
+                        "MK12_360_370_audiometa.txt",
+                        "MK12_371_372.bk2",
+                        "MK12_371_372_audiometa.txt",
+                        "MK12_373.bk2",
+                        "MK12_373_audiometa.txt",
+                        "MK12_374_375.bk2",
+                        "MK12_374_375_audiometa.txt",
+                        "MK12_376_379.bk2",
+                        "MK12_376_379_audiometa.txt",
+                        "MK12_380.bk2",
+                        "MK12_380_audiometa.txt",
+                        "MK12_381.bk2",
+                        "MK12_381_audiometa.txt",
+                        "MK12_382_383.bk2",
+                        "MK12_382_383_audiometa.txt",
+                        "MK12_384.bk2",
+                        "MK12_384_audiometa.txt",
+                        "MK12_385.bk2",
+                        "MK12_385_audiometa.txt",
+                        "MK12_386_388.bk2",
+                        "MK12_386_388_audiometa.txt"
+                    ]
+                }
+            },
+            "Paks": {
+                "_files": [
+                    "global.ucas",
+                    "global.utoc",
+                    "pakchunk0-WindowsNoEditor.pak",
+                    "pakchunk0-WindowsNoEditor.sig",
+                    "pakchunk0-WindowsNoEditor.ucas",
+                    "pakchunk0-WindowsNoEditor.utoc",
+                    "pakchunk1-WindowsNoEditor.pak",
+                    "pakchunk1-WindowsNoEditor.sig",
+                    "pakchunk1-WindowsNoEditor.ucas",
+                    "pakchunk1-WindowsNoEditor.utoc",
+                    "pakchunk10-WindowsNoEditor.pak",
+                    "pakchunk10-WindowsNoEditor.sig",
+                    "pakchunk10-WindowsNoEditor.ucas",
+                    "pakchunk10-WindowsNoEditor.utoc",
+                    "pakchunk11-WindowsNoEditor.pak",
+                    "pakchunk11-WindowsNoEditor.sig",
+                    "pakchunk11-WindowsNoEditor.ucas",
+                    "pakchunk11-WindowsNoEditor.utoc",
+                    "pakchunk12-WindowsNoEditor.pak",
+                    "pakchunk12-WindowsNoEditor.sig",
+                    "pakchunk12-WindowsNoEditor.ucas",
+                    "pakchunk12-WindowsNoEditor.utoc",
+                    "pakchunk13-WindowsNoEditor.pak",
+                    "pakchunk13-WindowsNoEditor.sig",
+                    "pakchunk13-WindowsNoEditor.ucas",
+                    "pakchunk13-WindowsNoEditor.utoc",
+                    "pakchunk14-WindowsNoEditor.pak",
+                    "pakchunk14-WindowsNoEditor.sig",
+                    "pakchunk14-WindowsNoEditor.ucas",
+                    "pakchunk14-WindowsNoEditor.utoc",
+                    "pakchunk15-WindowsNoEditor.pak",
+                    "pakchunk15-WindowsNoEditor.sig",
+                    "pakchunk15-WindowsNoEditor.ucas",
+                    "pakchunk15-WindowsNoEditor.utoc",
+                    "pakchunk18-WindowsNoEditor.pak",
+                    "pakchunk18-WindowsNoEditor.sig",
+                    "pakchunk18-WindowsNoEditor.ucas",
+                    "pakchunk18-WindowsNoEditor.utoc",
+                    "pakchunk2-WindowsNoEditor.pak",
+                    "pakchunk2-WindowsNoEditor.sig",
+                    "pakchunk2-WindowsNoEditor.ucas",
+                    "pakchunk2-WindowsNoEditor.utoc",
+                    "pakchunk21-WindowsNoEditor.pak",
+                    "pakchunk21-WindowsNoEditor.sig",
+                    "pakchunk21-WindowsNoEditor.ucas",
+                    "pakchunk21-WindowsNoEditor.utoc",
+                    "pakchunk22-WindowsNoEditor.pak",
+                    "pakchunk22-WindowsNoEditor.sig",
+                    "pakchunk22-WindowsNoEditor.ucas",
+                    "pakchunk22-WindowsNoEditor.utoc",
+                    "pakchunk23-WindowsNoEditor.pak",
+                    "pakchunk23-WindowsNoEditor.sig",
+                    "pakchunk23-WindowsNoEditor.ucas",
+                    "pakchunk23-WindowsNoEditor.utoc",
+                    "pakchunk24-WindowsNoEditor.pak",
+                    "pakchunk24-WindowsNoEditor.sig",
+                    "pakchunk24-WindowsNoEditor.ucas",
+                    "pakchunk24-WindowsNoEditor.utoc",
+                    "pakchunk3-WindowsNoEditor.pak",
+                    "pakchunk3-WindowsNoEditor.sig",
+                    "pakchunk3-WindowsNoEditor.ucas",
+                    "pakchunk3-WindowsNoEditor.utoc",
+                    "pakchunk4-WindowsNoEditor.pak",
+                    "pakchunk4-WindowsNoEditor.sig",
+                    "pakchunk4-WindowsNoEditor.ucas",
+                    "pakchunk4-WindowsNoEditor.utoc",
+                    "pakchunk5-WindowsNoEditor.pak",
+                    "pakchunk5-WindowsNoEditor.sig",
+                    "pakchunk5-WindowsNoEditor.ucas",
+                    "pakchunk5-WindowsNoEditor.utoc",
+                    "pakchunk6-WindowsNoEditor.pak",
+                    "pakchunk6-WindowsNoEditor.sig",
+                    "pakchunk6-WindowsNoEditor.ucas",
+                    "pakchunk6-WindowsNoEditor.utoc",
+                    "pakchunk7-WindowsNoEditor.pak",
+                    "pakchunk7-WindowsNoEditor.sig",
+                    "pakchunk7-WindowsNoEditor.ucas",
+                    "pakchunk7-WindowsNoEditor.utoc",
+                    "pakchunk8-WindowsNoEditor.pak",
+                    "pakchunk8-WindowsNoEditor.sig",
+                    "pakchunk8-WindowsNoEditor.ucas",
+                    "pakchunk8-WindowsNoEditor.utoc",
+                    "pakchunk9-WindowsNoEditor.pak",
+                    "pakchunk9-WindowsNoEditor.sig",
+                    "pakchunk9-WindowsNoEditor.ucas",
+                    "pakchunk9-WindowsNoEditor.utoc",
+                    "pakpc0-WindowsNoEditor.pak",
+                    "pakpc0-WindowsNoEditor.sig",
+                    "pakpc0-WindowsNoEditor.ucas",
+                    "pakpc0-WindowsNoEditor.utoc",
+                    "pakpc1-WindowsNoEditor.pak",
+                    "pakpc1-WindowsNoEditor.sig",
+                    "pakpc1-WindowsNoEditor.ucas",
+                    "pakpc1-WindowsNoEditor.utoc",
+                    "pakpc2-WindowsNoEditor.pak",
+                    "pakpc2-WindowsNoEditor.sig",
+                    "pakpc2-WindowsNoEditor.ucas",
+                    "pakpc2-WindowsNoEditor.utoc",
+                    "pakpc3-WindowsNoEditor.pak",
+                    "pakpc3-WindowsNoEditor.sig",
+                    "pakpc3-WindowsNoEditor.ucas",
+                    "pakpc3-WindowsNoEditor.utoc"
+                ]
+            },
+            "Splash": {
+                "_files": [
+                    "Splash.bmp"
+                ]
+            }
+        },
+        "Plugins": {
+            "_files": [],
+            "ChromaSDKPlugin": {
+                "_files": [],
+                "Binaries": {
+                    "_files": [],
+                    "Win64": {
+                        "_files": [
+                            "CChromaEditorLibrary64.dll"
+                        ]
+                    }
+                },
+                "Content": {
+                    "_files": [
+                        "AshrahFatalityA_ChromaLink.chroma",
+                        "AshrahFatalityA_Headset.chroma",
+                        "AshrahFatalityA_Keyboard.chroma",
+                        "AshrahFatalityA_Keypad.chroma",
+                        "AshrahFatalityA_Mouse.chroma",
+                        "AshrahFatalityA_Mousepad.chroma",
+                        "BarakaFatalityA_ChromaLink.chroma",
+                        "BarakaFatalityA_Headset.chroma",
+                        "BarakaFatalityA_Keyboard.chroma",
+                        "BarakaFatalityA_Keypad.chroma",
+                        "BarakaFatalityA_Mouse.chroma",
+                        "BarakaFatalityA_Mousepad.chroma",
+                        "Blank_ChromaLink.chroma",
+                        "Blank_Headset.chroma",
+                        "Blank_Keyboard.chroma",
+                        "Blank_Keypad.chroma",
+                        "Blank_Mouse.chroma",
+                        "Blank_Mousepad.chroma",
+                        "CyraxKAMFatalityA_ChromaLink.chroma",
+                        "CyraxKAMFatalityA_Headset.chroma",
+                        "CyraxKAMFatalityA_Keyboard.chroma",
+                        "CyraxKAMFatalityA_Keypad.chroma",
+                        "CyraxKAMFatalityA_Mouse.chroma",
+                        "CyraxKAMFatalityA_Mousepad.chroma",
+                        "DarriusKAMFatalityA_ChromaLink.chroma",
+                        "DarriusKAMFatalityA_Headset.chroma",
+                        "DarriusKAMFatalityA_Keyboard.chroma",
+                        "DarriusKAMFatalityA_Keypad.chroma",
+                        "DarriusKAMFatalityA_Mouse.chroma",
+                        "DarriusKAMFatalityA_Mousepad.chroma",
+                        "Effect1_ChromaLink.chroma",
+                        "Effect1_Headset.chroma",
+                        "Effect1_Keyboard.chroma",
+                        "Effect1_Keypad.chroma",
+                        "Effect1_Mouse.chroma",
+                        "Effect1_Mousepad.chroma",
+                        "ErmacFatalityA_ChromaLink.chroma",
+                        "ErmacFatalityA_Headset.chroma",
+                        "ErmacFatalityA_Keyboard.chroma",
+                        "ErmacFatalityA_Keypad.chroma",
+                        "ErmacFatalityA_Mouse.chroma",
+                        "ErmacFatalityA_Mousepad.chroma",
+                        "FatalityChristmas_ChromaLink.chroma",
+                        "FatalityChristmas_Headset.chroma",
+                        "FatalityChristmas_Keyboard.chroma",
+                        "FatalityChristmas_Keypad.chroma",
+                        "FatalityChristmas_Mouse.chroma",
+                        "FatalityChristmas_Mousepad.chroma",
+                        "FatalityHalloween_ChromaLink.chroma",
+                        "FatalityHalloween_Headset.chroma",
+                        "FatalityHalloween_Keyboard.chroma",
+                        "FatalityHalloween_Keypad.chroma",
+                        "FatalityHalloween_Mouse.chroma",
+                        "FatalityHalloween_Mousepad.chroma",
+                        "FatalityThanksgiving_ChromaLink.chroma",
+                        "FatalityThanksgiving_Headset.chroma",
+                        "FatalityThanksgiving_Keyboard.chroma",
+                        "FatalityThanksgiving_Keypad.chroma",
+                        "FatalityThanksgiving_Mouse.chroma",
+                        "FatalityThanksgiving_Mousepad.chroma",
+                        "FerraKAMFatalityA_ChromaLink.chroma",
+                        "FerraKAMFatalityA_Headset.chroma",
+                        "FerraKAMFatalityA_Keyboard.chroma",
+                        "FerraKAMFatalityA_Keypad.chroma",
+                        "FerraKAMFatalityA_Mouse.chroma",
+                        "FerraKAMFatalityA_Mousepad.chroma",
+                        "FrostKAMFatalityA_ChromaLink.chroma",
+                        "FrostKAMFatalityA_Headset.chroma",
+                        "FrostKAMFatalityA_Keyboard.chroma",
+                        "FrostKAMFatalityA_Keypad.chroma",
+                        "FrostKAMFatalityA_Mouse.chroma",
+                        "FrostKAMFatalityA_Mousepad.chroma",
+                        "GerasFatalityA_ChromaLink.chroma",
+                        "GerasFatalityA_Headset.chroma",
+                        "GerasFatalityA_Keyboard.chroma",
+                        "GerasFatalityA_Keypad.chroma",
+                        "GerasFatalityA_Mouse.chroma",
+                        "GerasFatalityA_Mousepad.chroma",
+                        "GoroKAMFatalityA_ChromaLink.chroma",
+                        "GoroKAMFatalityA_Headset.chroma",
+                        "GoroKAMFatalityA_Keyboard.chroma",
+                        "GoroKAMFatalityA_Keypad.chroma",
+                        "GoroKAMFatalityA_Mouse.chroma",
+                        "GoroKAMFatalityA_Mousepad.chroma",
+                        "Gradient_ChromaLink.chroma",
+                        "Gradient_Headset.chroma",
+                        "Gradient_Keyboard.chroma",
+                        "Gradient_Keypad.chroma",
+                        "Gradient_Mouse.chroma",
+                        "Gradient_Mousepad.chroma",
+                        "HavikFatalityA_ChromaLink.chroma",
+                        "HavikFatalityA_Headset.chroma",
+                        "HavikFatalityA_Keyboard.chroma",
+                        "HavikFatalityA_Keypad.chroma",
+                        "HavikFatalityA_Mouse.chroma",
+                        "HavikFatalityA_Mousepad.chroma",
+                        "Idle_DefaultVariant_Chaos_ChromaLink.chroma",
+                        "Idle_DefaultVariant_Chaos_Headset.chroma",
+                        "Idle_DefaultVariant_Chaos_Keyboard.chroma",
+                        "Idle_DefaultVariant_Chaos_Keypad.chroma",
+                        "Idle_DefaultVariant_Chaos_Mouse.chroma",
+                        "Idle_DefaultVariant_Chaos_Mousepad.chroma",
+                        "Idle_DefaultVariant_ChromaLink.chroma",
+                        "Idle_DefaultVariant_Headset.chroma",
+                        "Idle_DefaultVariant_Keyboard.chroma",
+                        "Idle_DefaultVariant_Keypad.chroma",
+                        "Idle_DefaultVariant_Mouse.chroma",
+                        "Idle_DefaultVariant_Mousepad.chroma",
+                        "JanetCageKAMFatalityA_ChromaLink.chroma",
+                        "JanetCageKAMFatalityA_Headset.chroma",
+                        "JanetCageKAMFatalityA_Keyboard.chroma",
+                        "JanetCageKAMFatalityA_Keypad.chroma",
+                        "JanetCageKAMFatalityA_Mouse.chroma",
+                        "JanetCageKAMFatalityA_Mousepad.chroma",
+                        "JaxKAMFatalityA_ChromaLink.chroma",
+                        "JaxKAMFatalityA_Headset.chroma",
+                        "JaxKAMFatalityA_Keyboard.chroma",
+                        "JaxKAMFatalityA_Keypad.chroma",
+                        "JaxKAMFatalityA_Mouse.chroma",
+                        "JaxKAMFatalityA_Mousepad.chroma",
+                        "JohnnyCageFatalityA_ChromaLink.chroma",
+                        "JohnnyCageFatalityA_Headset.chroma",
+                        "JohnnyCageFatalityA_Keyboard.chroma",
+                        "JohnnyCageFatalityA_Keypad.chroma",
+                        "JohnnyCageFatalityA_Mouse.chroma",
+                        "JohnnyCageFatalityA_Mousepad.chroma",
+                        "KanoKAMFatalityA_ChromaLink.chroma",
+                        "KanoKAMFatalityA_Headset.chroma",
+                        "KanoKAMFatalityA_Keyboard.chroma",
+                        "KanoKAMFatalityA_Keypad.chroma",
+                        "KanoKAMFatalityA_Mouse.chroma",
+                        "KanoKAMFatalityA_Mousepad.chroma",
+                        "KenshiFatalityA_ChromaLink.chroma",
+                        "KenshiFatalityA_Headset.chroma",
+                        "KenshiFatalityA_Keyboard.chroma",
+                        "KenshiFatalityA_Keypad.chroma",
+                        "KenshiFatalityA_Mouse.chroma",
+                        "KenshiFatalityA_Mousepad.chroma",
+                        "KhameleonKAMFatalityA_ChromaLink.chroma",
+                        "KhameleonKAMFatalityA_Headset.chroma",
+                        "KhameleonKAMFatalityA_Keyboard.chroma",
+                        "KhameleonKAMFatalityA_Keypad.chroma",
+                        "KhameleonKAMFatalityA_Mouse.chroma",
+                        "KhameleonKAMFatalityA_Mousepad.chroma",
+                        "KitanaFatalityA_ChromaLink.chroma",
+                        "KitanaFatalityA_Headset.chroma",
+                        "KitanaFatalityA_Keyboard.chroma",
+                        "KitanaFatalityA_Keypad.chroma",
+                        "KitanaFatalityA_Mouse.chroma",
+                        "KitanaFatalityA_Mousepad.chroma",
+                        "KungLaoFatalityA_ChromaLink.chroma",
+                        "KungLaoFatalityA_Headset.chroma",
+                        "KungLaoFatalityA_Keyboard.chroma",
+                        "KungLaoFatalityA_Keypad.chroma",
+                        "KungLaoFatalityA_Mouse.chroma",
+                        "KungLaoFatalityA_Mousepad.chroma",
+                        "KungLaoKAMFatalityA_ChromaLink.chroma",
+                        "KungLaoKAMFatalityA_Headset.chroma",
+                        "KungLaoKAMFatalityA_Keyboard.chroma",
+                        "KungLaoKAMFatalityA_Keypad.chroma",
+                        "KungLaoKAMFatalityA_Mouse.chroma",
+                        "KungLaoKAMFatalityA_Mousepad.chroma",
+                        "LiMeiFatalityA_ChromaLink.chroma",
+                        "LiMeiFatalityA_Headset.chroma",
+                        "LiMeiFatalityA_Keyboard.chroma",
+                        "LiMeiFatalityA_Keypad.chroma",
+                        "LiMeiFatalityA_Mouse.chroma",
+                        "LiMeiFatalityA_Mousepad.chroma",
+                        "LiuKangFatalityA_ChromaLink.chroma",
+                        "LiuKangFatalityA_Headset.chroma",
+                        "LiuKangFatalityA_Keyboard.chroma",
+                        "LiuKangFatalityA_Keypad.chroma",
+                        "LiuKangFatalityA_Mouse.chroma",
+                        "LiuKangFatalityA_Mousepad.chroma",
+                        "MavadoKAMFatalityA_ChromaLink.chroma",
+                        "MavadoKAMFatalityA_Headset.chroma",
+                        "MavadoKAMFatalityA_Keyboard.chroma",
+                        "MavadoKAMFatalityA_Keypad.chroma",
+                        "MavadoKAMFatalityA_Mouse.chroma",
+                        "MavadoKAMFatalityA_Mousepad.chroma",
+                        "MileenaFatalityA_ChromaLink.chroma",
+                        "MileenaFatalityA_Headset.chroma",
+                        "MileenaFatalityA_Keyboard.chroma",
+                        "MileenaFatalityA_Keypad.chroma",
+                        "MileenaFatalityA_Mouse.chroma",
+                        "MileenaFatalityA_Mousepad.chroma",
+                        "MotaroKAMFatalityA_ChromaLink.chroma",
+                        "MotaroKAMFatalityA_Headset.chroma",
+                        "MotaroKAMFatalityA_Keyboard.chroma",
+                        "MotaroKAMFatalityA_Keypad.chroma",
+                        "MotaroKAMFatalityA_Mouse.chroma",
+                        "MotaroKAMFatalityA_Mousepad.chroma",
+                        "NitaraFatalityA_ChromaLink.chroma",
+                        "NitaraFatalityA_Headset.chroma",
+                        "NitaraFatalityA_Keyboard.chroma",
+                        "NitaraFatalityA_Keypad.chroma",
+                        "NitaraFatalityA_Mouse.chroma",
+                        "NitaraFatalityA_Mousepad.chroma",
+                        "OmniManFatalityA_ChromaLink.chroma",
+                        "OmniManFatalityA_Headset.chroma",
+                        "OmniManFatalityA_Keyboard.chroma",
+                        "OmniManFatalityA_Keypad.chroma",
+                        "OmniManFatalityA_Mouse.chroma",
+                        "OmniManFatalityA_Mousepad.chroma",
+                        "PeacemakerFatalityA_ChromaLink.chroma",
+                        "PeacemakerFatalityA_Headset.chroma",
+                        "PeacemakerFatalityA_Keyboard.chroma",
+                        "PeacemakerFatalityA_Keypad.chroma",
+                        "PeacemakerFatalityA_Mouse.chroma",
+                        "PeacemakerFatalityA_Mousepad.chroma",
+                        "QuanChiFatalityA_ChromaLink.chroma",
+                        "QuanChiFatalityA_Headset.chroma",
+                        "QuanChiFatalityA_Keyboard.chroma",
+                        "QuanChiFatalityA_Keypad.chroma",
+                        "QuanChiFatalityA_Mouse.chroma",
+                        "QuanChiFatalityA_Mousepad.chroma",
+                        "RaidenFatalityA_ChromaLink.chroma",
+                        "RaidenFatalityA_Headset.chroma",
+                        "RaidenFatalityA_Keyboard.chroma",
+                        "RaidenFatalityA_Keypad.chroma",
+                        "RaidenFatalityA_Mouse.chroma",
+                        "RaidenFatalityA_Mousepad.chroma",
+                        "RainFatalityA_ChromaLink.chroma",
+                        "RainFatalityA_Headset.chroma",
+                        "RainFatalityA_Keyboard.chroma",
+                        "RainFatalityA_Keypad.chroma",
+                        "RainFatalityA_Mouse.chroma",
+                        "RainFatalityA_Mousepad.chroma",
+                        "RainMageFatalityA_ChromaLink.chroma",
+                        "RainMageFatalityA_Headset.chroma",
+                        "RainMageFatalityA_Keyboard.chroma",
+                        "RainMageFatalityA_Keypad.chroma",
+                        "RainMageFatalityA_Mouse.chroma",
+                        "RainMageFatalityA_Mousepad.chroma",
+                        "ReikoFatalityA_ChromaLink.chroma",
+                        "ReikoFatalityA_Headset.chroma",
+                        "ReikoFatalityA_Keyboard.chroma",
+                        "ReikoFatalityA_Keypad.chroma",
+                        "ReikoFatalityA_Mouse.chroma",
+                        "ReikoFatalityA_Mousepad.chroma",
+                        "ReptileFatalityA_ChromaLink.chroma",
+                        "ReptileFatalityA_Headset.chroma",
+                        "ReptileFatalityA_Keyboard.chroma",
+                        "ReptileFatalityA_Keypad.chroma",
+                        "ReptileFatalityA_Mouse.chroma",
+                        "ReptileFatalityA_Mousepad.chroma",
+                        "SareenaKAMFatalityA_ChromaLink.chroma",
+                        "SareenaKAMFatalityA_Headset.chroma",
+                        "SareenaKAMFatalityA_Keyboard.chroma",
+                        "SareenaKAMFatalityA_Keypad.chroma",
+                        "SareenaKAMFatalityA_Mouse.chroma",
+                        "SareenaKAMFatalityA_Mousepad.chroma",
+                        "ScorpionFatalityA_ChromaLink.chroma",
+                        "ScorpionFatalityA_Headset.chroma",
+                        "ScorpionFatalityA_Keyboard.chroma",
+                        "ScorpionFatalityA_Keypad.chroma",
+                        "ScorpionFatalityA_Mouse.chroma",
+                        "ScorpionFatalityA_Mousepad.chroma",
+                        "ScorpionKAMFatalityA_ChromaLink.chroma",
+                        "ScorpionKAMFatalityA_Headset.chroma",
+                        "ScorpionKAMFatalityA_Keyboard.chroma",
+                        "ScorpionKAMFatalityA_Keypad.chroma",
+                        "ScorpionKAMFatalityA_Mouse.chroma",
+                        "ScorpionKAMFatalityA_Mousepad.chroma",
+                        "SektorKAMFatalityA_ChromaLink.chroma",
+                        "SektorKAMFatalityA_Headset.chroma",
+                        "SektorKAMFatalityA_Keyboard.chroma",
+                        "SektorKAMFatalityA_Keypad.chroma",
+                        "SektorKAMFatalityA_Mouse.chroma",
+                        "SektorKAMFatalityA_Mousepad.chroma",
+                        "ShangTsungFatalityA_ChromaLink.chroma",
+                        "ShangTsungFatalityA_Headset.chroma",
+                        "ShangTsungFatalityA_Keyboard.chroma",
+                        "ShangTsungFatalityA_Keypad.chroma",
+                        "ShangTsungFatalityA_Mouse.chroma",
+                        "ShangTsungFatalityA_Mousepad.chroma",
+                        "ShaoKahnFatalityA_ChromaLink.chroma",
+                        "ShaoKahnFatalityA_Headset.chroma",
+                        "ShaoKahnFatalityA_Keyboard.chroma",
+                        "ShaoKahnFatalityA_Keypad.chroma",
+                        "ShaoKahnFatalityA_Mouse.chroma",
+                        "ShaoKahnFatalityA_Mousepad.chroma",
+                        "ShujinkoKAMFatalityA_ChromaLink.chroma",
+                        "ShujinkoKAMFatalityA_Headset.chroma",
+                        "ShujinkoKAMFatalityA_Keyboard.chroma",
+                        "ShujinkoKAMFatalityA_Keypad.chroma",
+                        "ShujinkoKAMFatalityA_Mouse.chroma",
+                        "ShujinkoKAMFatalityA_Mousepad.chroma",
+                        "SindelFatalityA_ChromaLink.chroma",
+                        "SindelFatalityA_Headset.chroma",
+                        "SindelFatalityA_Keyboard.chroma",
+                        "SindelFatalityA_Keypad.chroma",
+                        "SindelFatalityA_Mouse.chroma",
+                        "SindelFatalityA_Mousepad.chroma",
+                        "SmokeFatalityA_ChromaLink.chroma",
+                        "SmokeFatalityA_Headset.chroma",
+                        "SmokeFatalityA_Keyboard.chroma",
+                        "SmokeFatalityA_Keypad.chroma",
+                        "SmokeFatalityA_Mouse.chroma",
+                        "SmokeFatalityA_Mousepad.chroma",
+                        "SonyaKAMFatalityA_ChromaLink.chroma",
+                        "SonyaKAMFatalityA_Headset.chroma",
+                        "SonyaKAMFatalityA_Keyboard.chroma",
+                        "SonyaKAMFatalityA_Keypad.chroma",
+                        "SonyaKAMFatalityA_Mouse.chroma",
+                        "SonyaKAMFatalityA_Mousepad.chroma",
+                        "StrykerKAMFatalityA_ChromaLink.chroma",
+                        "StrykerKAMFatalityA_Headset.chroma",
+                        "StrykerKAMFatalityA_Keyboard.chroma",
+                        "StrykerKAMFatalityA_Keypad.chroma",
+                        "StrykerKAMFatalityA_Mouse.chroma",
+                        "StrykerKAMFatalityA_Mousepad.chroma",
+                        "SubZeroFatalityA_ChromaLink.chroma",
+                        "SubZeroFatalityA_Headset.chroma",
+                        "SubZeroFatalityA_Keyboard.chroma",
+                        "SubZeroFatalityA_Keypad.chroma",
+                        "SubZeroFatalityA_Mouse.chroma",
+                        "SubZeroFatalityA_Mousepad.chroma",
+                        "SubZeroKAMFatalityA_ChromaLink.chroma",
+                        "SubZeroKAMFatalityA_Headset.chroma",
+                        "SubZeroKAMFatalityA_Keyboard.chroma",
+                        "SubZeroKAMFatalityA_Keypad.chroma",
+                        "SubZeroKAMFatalityA_Mouse.chroma",
+                        "SubZeroKAMFatalityA_Mousepad.chroma",
+                        "TakedaFatalityA_ChromaLink.chroma",
+                        "TakedaFatalityA_Headset.chroma",
+                        "TakedaFatalityA_Keyboard.chroma",
+                        "TakedaFatalityA_Keypad.chroma",
+                        "TakedaFatalityA_Mouse.chroma",
+                        "TakedaFatalityA_Mousepad.chroma",
+                        "TanyaFatalityA_ChromaLink.chroma",
+                        "TanyaFatalityA_Headset.chroma",
+                        "TanyaFatalityA_Keyboard.chroma",
+                        "TanyaFatalityA_Keypad.chroma",
+                        "TanyaFatalityA_Mouse.chroma",
+                        "TanyaFatalityA_Mousepad.chroma",
+                        "TremorKAMFatalityA_ChromaLink.chroma",
+                        "TremorKAMFatalityA_Headset.chroma",
+                        "TremorKAMFatalityA_Keyboard.chroma",
+                        "TremorKAMFatalityA_Keypad.chroma",
+                        "TremorKAMFatalityA_Mouse.chroma",
+                        "TremorKAMFatalityA_Mousepad.chroma"
+                    ]
+                }
+            }
+        }
+    }
+}

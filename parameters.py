@@ -32,7 +32,7 @@ WANTED_RESOLUTION_PREFERENCE = env.str("STRMNTR_RESOLUTION_PREF", 'closest')
 CONTAINER = env.str("STRMNTR_CONTAINER", 'mp4')
 
 # Add auto-generated VR format suffix to files
-VR_FORMAT_SUFFIX = env.bool("STRMNTR_VR_FORMAT_SUFFIX", True)
+VR_FORMAT_SUFFIX = env.bool("STRMNTR_VR_FORMAT_SUFFIX", False)
 
 # Specify the segment time in seconds
 # If None, the video will be downloaded as a single file
