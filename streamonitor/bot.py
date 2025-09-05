@@ -16,6 +16,10 @@ from parameters import DOWNLOADS_DIR, DEBUG, WANTED_RESOLUTION, WANTED_RESOLUTIO
 from streamonitor.downloaders.ffmpeg import getVideoFfmpeg
 from streamonitor.models import VideoData
 from threading import Event, Thread
+
+# ADDED
+import subprocess  # only used if you later want to enable ffprobe checks (currently not forced)
+
 class Bot(Thread):
     loaded_sites = set()
     username = None
@@ -72,6 +76,11 @@ class Bot(Thread):
         self.recording = False
         self.video_files = []
         self.video_files_total_size = 0
+        self.isRetryingDownload = False
+        # ADDED: optional toggles (do nothing unless used)
+        self.verify_with_ffprobe = True  # not forced; size-only check is always on
+        self.clean_failed_temp = True     # remove temp artifacts on failed runs
+
         self.cache_file_list()
 
     def getLogger(self):
@@ -160,6 +169,74 @@ class Bot(Thread):
             self._cookie_thread_stop.set()
             self._cookie_thread = None
 
+    # ADDED: helpers (size check + temp cleanup)
+    def _is_zero_or_missing(self, path: str) -> bool:
+        try:
+            return (not os.path.exists(path)) or os.path.getsize(path) == 0
+        except Exception:
+            return True
+
+    # ADDED
+    def _guess_temp_candidates(self, final_path: str):
+        """
+        Common ffmpeg/temp artifacts to purge if the run failed.
+        Adjust patterns if your downloader uses different naming.
+        """
+        stem, _ext = os.path.splitext(final_path)
+        folder = os.path.dirname(final_path)
+        return [
+            f"{stem}.tmp.ts",
+            f"{stem}.part",
+            f"{stem}.tmp",
+            os.path.join(folder, "ffmpeg2pass-0.log"),
+        ]
+
+    # ADDED
+    def _post_download_cleanup(self, final_path: str, ok: bool) -> bool:
+        """
+        Ensure final file isn't 0 KB. If failed, remove temp artifacts.
+        Returns the (possibly updated) ok flag.
+        """
+        # If we think it succeeded but file is empty -> treat as failure and delete
+        if ok and self._is_zero_or_missing(final_path):
+            if os.path.exists(final_path):
+                self.logger.error("Output is 0 KB — deleting.")
+                self.isRetryingDownload = True
+                try:
+                    os.remove(final_path)
+                except Exception as e:
+                    self.logger.warning(f"Failed to remove zero-byte output '{final_path}': {e}")
+            ok = False
+
+        # If failed, clean temp artifacts (and also remove empty final file if any)
+        if not ok and self.clean_failed_temp:
+            # remove empty final file
+            if os.path.exists(final_path) and self._is_zero_or_missing(final_path):
+                try:
+                    os.remove(final_path)
+                except Exception as e:
+                    self.logger.warning(f"Failed to remove failed output '{final_path}': {e}")
+
+            # purge likely temp files
+            for tmp in self._guess_temp_candidates(final_path):
+                if os.path.exists(tmp):
+                    # Optional tiny peek to help diagnose HTML saves; non-fatal
+                    try:
+                        with open(tmp, "rb") as f:
+                            sniff = f.read(256)
+                        if len(sniff) == 0:
+                            self.logger.error(f"Temp file empty: {os.path.basename(tmp)} — deleting.")
+                        elif b"<html" in sniff.lower() or b"<!doctype" in sniff.lower():
+                            self.logger.error(f"Temp file contains HTML: {os.path.basename(tmp)} — deleting.")
+                    except Exception:
+                        pass
+                    try:
+                        os.remove(tmp)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to remove temp '{tmp}': {e}")
+
+        return ok
+
     def _download_once(self):
         video_url = self.getVideoUrl()
         if video_url is None:
@@ -178,6 +255,13 @@ class Bot(Thread):
         finally:
             self.recording = False
             self.stopDownload = None
+
+            # ADDED: verify/delete zero-byte outputs & temp artifacts
+            try:
+                ok = self._post_download_cleanup(file, ok)
+            except Exception as e:
+                self.logger.warning(f"Post-download cleanup error: {e}")
+
             try:
                 self.cache_file_list()
             except Exception as e:
@@ -270,11 +354,20 @@ class Bot(Thread):
             self.sc = Status.NOTRUNNING
             self.log("Stopped")
 
-    def getPlaylistVariants(self, url):
+    def getPlaylistVariants(self, url=None, m3u_data=None):
         sources = []
-        result = requests.get(url, headers=self.headers, cookies=self.cookies, impersonate=self.impersonate, verify=False)
-        m3u8_doc = result.content.decode("utf-8")
-        variant_m3u8 = m3u8.loads(m3u8_doc)
+
+        if isinstance(m3u_data, m3u8.M3U8):
+            variant_m3u8 = m3u_data
+        elif isinstance(m3u_data, str):
+            variant_m3u8 = m3u8.loads(m3u_data)
+        elif not m3u_data or url:
+            result = requests.get(url, headers=self.headers, cookies=self.cookies)
+            m3u8_doc = result.content.decode("utf-8")
+            variant_m3u8 = m3u8.loads(m3u8_doc)
+        else:
+            return sources
+
         for playlist in variant_m3u8.playlists:
             stream_info = playlist.stream_info
             resolution = stream_info.resolution if type(stream_info.resolution) is tuple else (0, 0)
@@ -284,10 +377,11 @@ class Bot(Thread):
                 'frame_rate': stream_info.frame_rate,
                 'bandwidth': stream_info.bandwidth
             })
+
         if not variant_m3u8.is_variant and len(sources) >= 1:
             self.logger.warn("Not variant playlist, can't select resolution")
             return None
-        return sources
+        return sources  # [(url, (width, height)),...]
 
     def getWantedResolutionPlaylist(self, url):
         try:
@@ -358,16 +452,69 @@ class Bot(Thread):
         return base_folder
 
     def genOutFilename(self, create_dir=True):
+        """
+        Create a filename like N.{CONTAINER} inside outputFolder.
+        Rules:
+        - If any existing file with our extension is 0 bytes, delete it and REUSE its number.
+        - Otherwise, pick the smallest missing positive integer (fill holes), so if 7 was invalid and deleted,
+            we return 7.{CONTAINER} again instead of skipping to 9, etc.
+        - Never force-create a new number if the previous one was invalid/removed.
+        """
         folder = self.outputFolder
         if create_dir:
             os.makedirs(folder, exist_ok=True)
-        existing_files = os.listdir(folder)
-        latest_number = max([int(filename.split(".")[0]) for filename in existing_files if filename.split(".")[0].isdigit()] + [0])
-        next_number = latest_number + 1
-        while f"{next_number}.{CONTAINER}" in existing_files:
-            next_number += 1
-        filename = os.path.join(folder, f"{next_number}.{CONTAINER}")
-        return filename
+
+        try:
+            entries = [f for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
+        except FileNotFoundError:
+            entries = []
+
+        ext = f".{CONTAINER}".lower()
+
+        # 1) Delete any 0-byte files with our extension so we can reuse their number
+        for f in entries:
+            if f.lower().endswith(ext):
+                path = os.path.join(folder, f)
+                try:
+                    if os.path.getsize(path) == 0:
+                        try:
+                            os.remove(path)
+                            self.logger.info(f"Deleted zero-byte file '{path}', number will be reused")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to remove zero-byte file '{path}': {e}")
+                except Exception:
+                    # If size check fails for any reason, ignore and move on
+                    pass
+
+        # Refresh listing after possible deletions
+        try:
+            entries = [f for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
+        except FileNotFoundError:
+            entries = []
+
+        # 2) Collect used numeric basenames for our extension
+        used_numbers = sorted({
+            int(os.path.splitext(f)[0])
+            for f in entries
+            if f.lower().endswith(ext) and os.path.splitext(f)[0].isdigit()
+        })
+
+        # 3) Find the smallest missing positive integer (first hole), starting at 1
+        n = 1
+        for v in used_numbers:
+            if v == n:
+                n += 1
+            elif v > n:
+                break  # found a hole at n
+
+        # 4) Build candidate filename; if a rare race leaves it existing, bump until free
+        candidate = os.path.join(folder, f"{n}{ext}")
+        while os.path.exists(candidate):
+            n += 1
+            candidate = os.path.join(folder, f"{n}{ext}")
+
+        return candidate
+
 
     def export(self):
         return {"site": self.site, "username": self.username, "running": self.running}

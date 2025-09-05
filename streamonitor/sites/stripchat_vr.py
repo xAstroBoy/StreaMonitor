@@ -44,7 +44,6 @@ class StripChatVR(StripChat):
                 return Status.PUBLIC
             return Status.OFFLINE
         return status
-    
     def isMobile(self):
         return False
 
