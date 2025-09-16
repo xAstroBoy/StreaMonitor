@@ -65,5 +65,9 @@ class XLoveCam(Bot):
         if self.lastInfo.get('online') == 0:
             return Status.OFFLINE
         return Status.UNKNOWN
+    
+    def isMobile(self):
+        return False
+
 
 Bot.loaded_sites.add(XLoveCam)

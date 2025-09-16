@@ -23,7 +23,7 @@ class Flirt4Free(Bot):
         if username in Flirt4Free.models:
             return Flirt4Free.models[username]['model_id']
 
-        r = requests.get(f'https://www.flirt4free.com/?model={username}')
+        r = requests.get(f'https://www.flirt4free.com/?model={username}', verify=False)
 
         start = b'window.__homePageData__ = '
 
@@ -54,12 +54,12 @@ class Flirt4Free(Bot):
         return self.getWantedResolutionPlaylist("https:" + self.lastInfo['data']['hls'][0]['url'])
 
     def getStatus(self):
-        r = requests.get(f'https://www.flirt4free.com/ws/chat/get-stream-urls.php?model_id={self.room_id}').json()
+        r = requests.get(f'https://www.flirt4free.com/ws/chat/get-stream-urls.php?model_id={self.room_id}', verify=False).json()
         self.lastInfo = r
         if r['code'] == 44:
             return Status.NOTEXIST
         if r['code'] == 0:
-            s = requests.get(f'https://www.flirt4free.com/ws/rooms/chat-room-interface.php?a=login_room&model_id={self.room_id}').json()
+            s = requests.get(f'https://www.flirt4free.com/ws/rooms/chat-room-interface.php?a=login_room&model_id={self.room_id}', verify=False).json()
             if 'config' not in s:
                 return Status.UNKNOWN
             if s['config']['room']['status'] == 'O':
@@ -70,6 +70,10 @@ class Flirt4Free(Bot):
                 return Status.OFFLINE
 
         return Status.UNKNOWN
+
+    
+    def isMobile(self):
+        return False
 
 
 Bot.loaded_sites.add(Flirt4Free)

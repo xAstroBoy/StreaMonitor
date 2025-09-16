@@ -30,7 +30,7 @@ class Chaturbate(Bot):
         data = {"room_slug": self.username, "bandwidth": "high"}
 
         try:
-            r = requests.post("https://chaturbate.com/get_edge_hls_url_ajax/", headers=headers, data=data)
+            r = requests.post("https://chaturbate.com/get_edge_hls_url_ajax/", headers=headers, data=data, verify=False)
             self.lastInfo = r.json()
 
             if self.lastInfo["room_status"] == "public":
@@ -44,6 +44,10 @@ class Chaturbate(Bot):
 
         self.ratelimit = status == Status.RATELIMIT
         return status
+
+    
+    def isMobile(self):
+        return False
 
 
 Bot.loaded_sites.add(Chaturbate)

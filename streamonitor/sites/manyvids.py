@@ -21,7 +21,7 @@ class ManyVids(Bot):
         self.updateSiteCookies()
 
     def requestStreamInfo(self):
-        r = requests.get("/".join([self.lastInfo['publicAPIURL'], self.lastInfo['floorId'], 'player-settings', self.username]), headers=self.headers, cookies=self.cookies)
+        r = requests.get("/".join([self.lastInfo['publicAPIURL'], self.lastInfo['floorId'], 'player-settings', self.username]), headers= self.headers, cookies=self.cookies, verify=False)
         if r.cookies is not None:
             self.cookies.update(r.cookies)
         return r
@@ -31,7 +31,7 @@ class ManyVids(Bot):
         return r.cookies is not None
 
     def updateSiteCookies(self):
-        r = requests.get('https://www.manyvids.com/tak-live-redirect.php', allow_redirects=False)
+        r = requests.get('https://www.manyvids.com/tak-live-redirect.php', allow_redirects=False, verify=False)
         self.cookies.update(r.cookies)
 
     def getVideoUrl(self):
@@ -42,7 +42,7 @@ class ManyVids(Bot):
         return self.getWantedResolutionPlaylist(url)
 
     def getStatus(self):
-        r = requests.get('https://roompool.live.manyvids.com/roompool/' + self.username + '?private=false', headers=self.headers)
+        r = requests.get('https://roompool.live.manyvids.com/roompool/' + self.username + '?private=false', headers= self.headers, verify=False)
         if r.status_code != 200:
             return Status.UNKNOWN
 
@@ -57,6 +57,10 @@ class ManyVids(Bot):
             return Status.PUBLIC
 
         return Status.UNKNOWN
+    
+    def isMobile(self):
+        return False
+
 
 
 Bot.loaded_sites.add(ManyVids)

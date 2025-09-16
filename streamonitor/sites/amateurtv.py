@@ -27,7 +27,7 @@ class AmateurTV(Bot):
             'Content-Type': 'application/json',
             'Referer': 'https://amateur.tv/'
         }
-        r = requests.get(f'https://www.amateur.tv/v3/readmodel/show/{self.username}/en', headers=headers)
+        r = requests.get(f'https://www.amateur.tv/v3/readmodel/show/{self.username}/en', headers= headers, verify=False)
 
         if r.status_code != 200:
             return Status.UNKNOWN
@@ -45,6 +45,10 @@ class AmateurTV(Bot):
                 return Status.PRIVATE
         if self.lastInfo.get('status') == 'offline':
             return Status.OFFLINE
+
+    
+    def isMobile(self):
+        return False
 
 
 Bot.loaded_sites.add(AmateurTV)
