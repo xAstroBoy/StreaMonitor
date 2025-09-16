@@ -18,7 +18,7 @@ class DreamCam(Bot):
         return None
 
     def getStatus(self):
-        r = requests.get('https://bss.dreamcamtrue.com/api/clients/v1/broadcasts/models/' + self.username, headers=self.headers)
+        r = requests.get('https://bss.dreamcamtrue.com/api/clients/v1/broadcasts/models/' + self.username, headers= self.headers, verify=False)
         if r.status_code != 200:
             return Status.UNKNOWN
 
@@ -32,6 +32,10 @@ class DreamCam(Bot):
             return Status.OFFLINE
         self.logger.warn(f'Got unknown status: {self.lastInfo["broadcastStatus"]}')
         return Status.UNKNOWN
+
+    
+    def isMobile(self):
+        return False
 
 
 Bot.loaded_sites.add(DreamCam)

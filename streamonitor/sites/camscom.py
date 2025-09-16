@@ -18,7 +18,7 @@ class CamsCom(Bot):
         return f'https://camscdn.cams.com/camscdn/cdn-{self.username.lower()}.m3u8'
 
     def getStatus(self):
-        r = requests.get(f'https://beta-api.cams.com/models/stream/{self.username}/')
+        r = requests.get(f'https://beta-api.cams.com/models/stream/{self.username}/', verify=False)
         self.lastInfo = r.json()
         
         if 'stream_name' not in self.lastInfo:
@@ -31,6 +31,10 @@ class CamsCom(Bot):
             return Status.PRIVATE
             
         return Status.UNKNOWN
+
+    
+    def isMobile(self):
+        return False
 
 
 Bot.loaded_sites.add(CamsCom)

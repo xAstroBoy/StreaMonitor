@@ -7,15 +7,19 @@ from time import sleep
 from datetime import datetime
 from threading import Thread
 
-import requests
-import requests.cookies
+from curl_cffi import requests
+from curl_cffi import Cookies
 
 from streamonitor.enums import Status
 import streamonitor.log as log
 from parameters import DOWNLOADS_DIR, DEBUG, WANTED_RESOLUTION, WANTED_RESOLUTION_PREFERENCE, CONTAINER, HTTP_USER_AGENT
 from streamonitor.downloaders.ffmpeg import getVideoFfmpeg
 from streamonitor.models import VideoData
+from threading import Event, Thread
+from streamonitor.utils.cf_session import CFSessionManager
 
+# ADDED
+import subprocess  # only used if you later want to enable ffprobe checks (currently not forced)
 
 class Bot(Thread):
     loaded_sites = set()
@@ -26,7 +30,6 @@ class Bot(Thread):
     ratelimit = False
     url = "javascript:void(0)"
     recording = False
-
     sleep_on_private = 5
     sleep_on_offline = 5
     sleep_on_long_offline = 300
@@ -49,7 +52,8 @@ class Bot(Thread):
         Status.NOTEXIST: "Nonexistent user",
         Status.NOTRUNNING: "Not running",
         Status.ERROR: "Error on downloading",
-        Status.RESTRICTED: "Model is restricted, maybe geo-block"
+        Status.RESTRICTED: "Model is restricted, maybe geo-block",
+        Status.CLOUDFLARE: "Cloudflare",
     }
 
     def __init__(self, username):
@@ -58,18 +62,31 @@ class Bot(Thread):
         self.logger = self.getLogger()
 
         self.cookies = None
+        self.impersonate = None
         self.cookieUpdater = None
         self.cookie_update_interval = 0
+        self.session = CFSessionManager(
+            logger=self.logger,
+            bot_id=f"[{self.siteslug}] {self.username}"
+        )
 
-        self.lastInfo = {}  # This dict will hold information about stream after getStatus is called. One can use this in getVideoUrl
+        self._cookie_thread = None
+        self._cookie_thread_stop = Event()
+
+        self.lastInfo = {}
         self.running = False
         self.quitting = False
-        self.sc: Status = Status.NOTRUNNING  # Status code
+        self.sc: Status = Status.NOTRUNNING
         self.getVideo = getVideoFfmpeg
         self.stopDownload = None
         self.recording = False
         self.video_files = []
         self.video_files_total_size = 0
+        self.isRetryingDownload = False
+        # ADDED: optional toggles (do nothing unless used)
+        self.verify_with_ffprobe = True  # not forced; size-only check is always on
+        self.clean_failed_temp = True     # remove temp artifacts on failed runs
+
         self.cache_file_list()
 
     def getLogger(self):
@@ -136,6 +153,135 @@ class Bot(Thread):
             if self.quitting or not self.running:
                 return
 
+    def _start_cookie_updater(self):
+        if self.cookie_update_interval > 0 and self.cookieUpdater is not None:
+            if self._cookie_thread is None or not self._cookie_thread.is_alive():
+                self._cookie_thread_stop.clear()
+                def update_cookie():
+                    while not self._cookie_thread_stop.is_set() and self.sc == Status.PUBLIC and self.running and not self.quitting:
+                        self._sleep(self.cookie_update_interval)
+                        if self._cookie_thread_stop.is_set():
+                            break
+                        ret = self.cookieUpdater()
+                        if ret:
+                            self.debug('Updated cookies')
+                        else:
+                            self.logger.warning('Failed to update cookies')
+                self._cookie_thread = Thread(target=update_cookie, daemon=True)
+                self._cookie_thread.start()
+
+    def _stop_cookie_updater(self):
+        if self._cookie_thread is not None:
+            self._cookie_thread_stop.set()
+            self._cookie_thread = None
+
+    # ADDED: helpers (size check + temp cleanup)
+    def _is_zero_or_missing(self, path: str) -> bool:
+        try:
+            return (not os.path.exists(path)) or os.path.getsize(path) == 0
+        except Exception:
+            return True
+
+    # ADDED
+    def _guess_temp_candidates(self, final_path: str):
+        """
+        Common ffmpeg/temp artifacts to purge if the run failed.
+        Adjust patterns if your downloader uses different naming.
+        """
+        stem, _ext = os.path.splitext(final_path)
+        folder = os.path.dirname(final_path)
+        return [
+            f"{stem}.tmp.ts",
+            f"{stem}.part",
+            f"{stem}.tmp",
+            os.path.join(folder, "ffmpeg2pass-0.log"),
+        ]
+
+    # ADDED
+    def _post_download_cleanup(self, final_path: str, ok: bool) -> bool:
+        """
+        Ensure final file isn't 0 KB. If failed, remove temp artifacts.
+        Returns the (possibly updated) ok flag.
+        """
+        # If we think it succeeded but file is empty -> treat as failure and delete
+        if ok and self._is_zero_or_missing(final_path):
+            if os.path.exists(final_path):
+                self.logger.error("Output is 0 KB — deleting.")
+                self.isRetryingDownload = True
+                try:
+                    os.remove(final_path)
+                except Exception as e:
+                    self.logger.warning(f"Failed to remove zero-byte output '{final_path}': {e}")
+            ok = False
+
+        # If failed, clean temp artifacts (and also remove empty final file if any)
+        if not ok and self.clean_failed_temp:
+            # remove empty final file
+            if os.path.exists(final_path) and self._is_zero_or_missing(final_path):
+                try:
+                    os.remove(final_path)
+                except Exception as e:
+                    self.logger.warning(f"Failed to remove failed output '{final_path}': {e}")
+
+            # purge likely temp files
+            for tmp in self._guess_temp_candidates(final_path):
+                if os.path.exists(tmp):
+                    # Optional tiny peek to help diagnose HTML saves; non-fatal
+                    try:
+                        delete = False
+                        with open(tmp, "rb") as f:
+                            sniff = f.read(256)
+                        if len(sniff) == 0:
+                            self.logger.error(f"Temp file empty: {os.path.basename(tmp)} — deleting.")
+                            delete = True
+                        elif b"<html" in sniff.lower() or b"<!doctype" in sniff.lower():
+                            self.logger.error(f"Temp file contains HTML: {os.path.basename(tmp)} — deleting.")
+                            delete = True
+                    except Exception:
+                        pass
+                    try:
+                        if delete or self._is_zero_or_missing(tmp):
+                            os.remove(tmp)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to remove temp '{tmp}': {e}")
+
+        return ok
+
+    def _download_once(self):
+        video_url = self.getVideoUrl()
+        if video_url is None:
+            self.sc = Status.ERROR
+            self.logger.error(self.status())
+            return False
+        self.log('Started downloading show')
+        self.recording = True
+        file = self.genOutFilename()
+        ok = False
+        try:
+            ok = bool(self.getVideo(self, video_url, file))
+        except Exception as e:
+            self.logger.exception(e)
+            ok = False
+        finally:
+            self.recording = False
+            self.stopDownload = None
+
+            # ADDED: verify/delete zero-byte outputs & temp artifacts
+            try:
+                ok = self._post_download_cleanup(file, ok)
+            except Exception as e:
+                self.logger.warning(f"Post-download cleanup error: {e}")
+
+            try:
+                self.cache_file_list()
+            except Exception as e:
+                self.logger.exception(e)
+        if ok:
+            self.log('Recording ended')
+        else:
+            self.log('Recording aborted/failed')
+        return ok
+
     def run(self):
         while not self.quitting:
             while not self.running and not self.quitting:
@@ -143,54 +289,55 @@ class Bot(Thread):
             if self.quitting:
                 break
 
-            offline_time = self.long_offline_timeout + 1  # Don't start polling when streamer was offline at start
+            offline_time = self.long_offline_timeout + 1
             while self.running:
                 try:
                     self.recording = False
                     self.sc = self.getStatus()
-                    # Check if the status has changed and log the update if it's different from the previous status
                     if self.sc != self.previous_status:
                         self.log(self.status())
                         self.previous_status = self.sc
+
                     if self.sc == Status.ERROR:
                         self._sleep(self.sleep_on_error)
+
                     if self.sc == Status.OFFLINE:
                         offline_time += self.sleep_on_offline
                         if offline_time > self.long_offline_timeout:
                             self.sc = Status.LONG_OFFLINE
-                    elif self.sc == Status.PUBLIC or self.sc == Status.PRIVATE:
-                        offline_time = 0
-                        if self.sc == Status.PUBLIC:
-                            if self.cookie_update_interval > 0 and self.cookieUpdater is not None:
-                                def update_cookie():
-                                    while self.sc == Status.PUBLIC and not self.quitting and self.running:
-                                        self._sleep(self.cookie_update_interval)
-                                        ret = self.cookieUpdater()
-                                        if ret:
-                                            self.debug('Updated cookies')
-                                        else:
-                                            self.logger.warning('Failed to update cookies')
-                                cookie_update_process = Thread(target=update_cookie)
-                                cookie_update_process.start()
 
-                            video_url = self.getVideoUrl()
-                            if video_url is None:
-                                self.sc = Status.ERROR
-                                self.logger.error(self.status())
-                                self._sleep(self.sleep_on_error)
-                                continue
-                            self.log('Started downloading show')
-                            self.recording = True
-                            file = self.genOutFilename()
-                            ret = self.getVideo(self, video_url, file)
-                            if not ret:
-                                self.sc = Status.ERROR
-                                self.log(self.status())
-                                self._sleep(self.sleep_on_error)
-                                continue
-                            self.recording = False
-                            self.log('Recording ended')
-                            self.cache_file_list()
+                    elif self.sc in (Status.PUBLIC, Status.PRIVATE):
+                        offline_time = 0
+
+                        if self.sc == Status.PUBLIC:
+                            self._start_cookie_updater()
+
+                            # keep retrying as long as it's PUBLIC and we are supposed to run
+                            while self.running and not self.quitting and self.sc == Status.PUBLIC:
+                                success = self._download_once()
+                                if not self.running or self.quitting:
+                                    break
+                                # quick re-check; if still PUBLIC, loop again to restart ffmpeg
+                                self.sc = self.getStatus()
+                                if self.sc != Status.PUBLIC:
+                                    break
+                                if not success:
+                                    self.sc = Status.ERROR
+                                    self.log(self.status())
+                                    self._sleep(self.sleep_on_error)
+                                    # after error, re-check status again
+                                    self.sc = self.getStatus()
+                                    if self.sc != Status.PUBLIC:
+                                        break
+                                    continue
+                                # stream may still be live, spin again immediately (no long sleep)
+                                self.log('Stream still online, restarting...')
+                                self._sleep(1)
+
+                            # leaving PUBLIC state
+                            self._stop_cookie_updater()
+
+                    # normal sleep decisions
                 except Exception as e:
                     self.logger.exception(e)
                     try:
@@ -213,6 +360,7 @@ class Bot(Thread):
                 else:
                     self._sleep(self.sleep_on_offline)
 
+            self._stop_cookie_updater()
             self.sc = Status.NOTRUNNING
             self.log("Stopped")
 
@@ -250,21 +398,17 @@ class Bot(Thread):
             sources = self.getPlaylistVariants(url)
             if sources is None:
                 return None
-
             if len(sources) == 0:
                 self.logger.error("No available sources")
                 return None
-
             for source in sources:
                 width, height = source['resolution']
                 if width < height:
                     source['resolution_diff'] = width - WANTED_RESOLUTION
                 else:
                     source['resolution_diff'] = height - WANTED_RESOLUTION
-
             sources.sort(key=lambda a: abs(a['resolution_diff']))
             selected_source = None
-
             if WANTED_RESOLUTION_PREFERENCE == 'exact':
                 if sources[0]['resolution_diff'] == 0:
                     selected_source = sources[0]
@@ -283,11 +427,9 @@ class Bot(Thread):
             else:
                 self.logger.error('Invalid value for WANTED_RESOLUTION_PREFERENCE')
                 return None
-
             if selected_source is None:
                 self.logger.error("Couldn't select a resolution")
                 return None
-
             if selected_source['resolution'][1] != 0:
                 frame_rate = ''
                 if selected_source['frame_rate'] is not None and selected_source['frame_rate'] != 0:
@@ -310,19 +452,129 @@ class Bot(Thread):
         if p['status'] == 'downloading':
             self.log("Downloading " + str(round(float(p['downloaded_bytes']) / float(p['total_bytes']) * 100, 1)) + "%")
         if p['status'] == 'finished':
-            self.log("Show ended. File:" + p['filename'])
+            self.log("Recording ended. File:" + p['filename'])
 
     @property
     def outputFolder(self):
-        return str(os.path.join(DOWNLOADS_DIR, self.username + ' [' + self.siteslug + ']'))
+        base_folder = os.path.join(DOWNLOADS_DIR, self.username + ' [' + self.siteslug + ']')
+        if self.siteslug == 'SC' and hasattr(self, 'isMobileBroadcast') and self.isMobileBroadcast:
+            base_folder = os.path.join(base_folder, 'Mobile')
+        return base_folder
 
     def genOutFilename(self, create_dir=True):
+        """
+        SAME numbering logic, plus:
+        - Delete only 0-byte finals to free the number
+        - Sidecars:
+            * ZERO bytes  -> delete and REUSE N
+            * NON-ZERO    -> SKIP N (never append)
+        - Logs EVERY skipped N (N=1, N=2, ...)
+        """
         folder = self.outputFolder
         if create_dir:
             os.makedirs(folder, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = os.path.join(folder, f'{self.username}-{timestamp}.{CONTAINER}')
-        return filename
+
+        ext = f".{CONTAINER}".lower()
+
+        # 1) Delete ONLY 0-byte finals so their numbers can be reused
+        try:
+            entries = [f for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
+        except FileNotFoundError:
+            entries = []
+        for f in entries:
+            if f.lower().endswith(ext):
+                p = os.path.join(folder, f)
+                try:
+                    if os.path.getsize(p) == 0:
+                        try:
+                            os.remove(p)
+                            self.logger.info(f"Deleted zero-byte final '{p}', number will be reused")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to remove zero-byte final '{p}': {e}")
+                except Exception:
+                    pass
+
+        # Refresh listing
+        try:
+            entries = [f for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
+        except FileNotFoundError:
+            entries = []
+
+        used_numbers = sorted({
+            int(os.path.splitext(f)[0])
+            for f in entries
+            if f.lower().endswith(ext) and os.path.splitext(f)[0].isdigit()
+        })
+
+        def sidecars_for(final_path: str):
+            stem, _ = os.path.splitext(final_path)
+            # ONLY per-number sidecars that could be appended to
+            return [
+                f"{stem}.tmp.ts",
+                f"{stem}.ts.tmp",
+                f"{stem}.segment.tmp",
+                f"{stem}.part",
+                f"{stem}.tmp",
+            ]
+
+        def block_reason(n: int):
+            """
+            Return None if N is allowed.
+            Return a human string and do any 0-byte cleanup if not.
+            """
+            final_path = os.path.join(folder, f"{n}{ext}")
+            nonzero_hits = []
+            for s in sidecars_for(final_path):
+                if os.path.exists(s):
+                    try:
+                        sz = os.path.getsize(s)
+                    except Exception:
+                        return f"Cannot stat sidecar '{s}'"
+                    if sz == 0:
+                        # delete zero-byte sidecars to free the number, but don't block N
+                        try:
+                            os.remove(s)
+                            self.logger.info(f"Deleted zero-byte sidecar '{s}' to reuse N={n}")
+                        except Exception as e:
+                            # if we can't remove it, better to block this N to avoid confusion
+                            return f"Failed to remove zero-byte sidecar '{s}': {e}"
+                    else:
+                        nonzero_hits.append(s)
+            if nonzero_hits:
+                return f"Non-zero sidecar present {nonzero_hits[0]}"
+            return None
+
+        # 2) Walk all numbers, logging every skip, until we find a clean N
+        n = 1
+        while True:
+            candidate = os.path.join(folder, f"{n}{ext}")
+            blocked = False
+            # If final exists and is non-zero, skip
+            if os.path.exists(candidate):
+                try:
+                    sz = os.path.getsize(candidate)
+                except Exception:
+                    sz = None
+                if sz == 0:
+                    try:
+                        os.remove(candidate)
+                        self.logger.info(f"Deleted zero-byte final '{candidate}', number will be reused")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to remove zero-byte final '{candidate}': {e}")
+                else:
+                    self.logger.info(f"{self.username}: Non-zero final present {candidate}, skipping N={n} to avoid append")
+                    blocked = True
+            # If any sidecar blocks, skip
+            reason = block_reason(n)
+            if reason is not None:
+                self.logger.info(f"{self.username}: {reason}, skipping N={n} to avoid append")
+                blocked = True
+            if not blocked:
+                # Double check: if file was deleted above, recheck existence
+                if not os.path.exists(candidate):
+                    return candidate
+            n += 1
+
 
     def export(self):
         return {"site": self.site, "username": self.username, "running": self.running}
@@ -335,7 +587,6 @@ class Bot(Thread):
                     site == sitecls.siteslug.lower() or \
                     site in sitecls.aliases:
                 return sitecls
-        return None
 
     @staticmethod
     def createInstance(username: str, site: str = None):

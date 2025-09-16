@@ -21,7 +21,7 @@ class SexChatHU(Bot):
         else:
             if SexChatHU._performers_list_cache_timestamp < time.time() - 60 * 60 or \
                     SexChatHU._performers_list_cache is None:  # Cache for 1 hour
-                req = requests.get('https://sexchat.hu/ajax/api/roomList/babes', headers=self.headers)
+                req = requests.get('https://sexchat.hu/ajax/api/roomList/babes', headers= self.headers, verify=False)
                 SexChatHU._performers_list_cache = req.json()
                 SexChatHU._performers_list_cache_timestamp = time.time()
             for performer in SexChatHU._performers_list_cache:
@@ -47,7 +47,7 @@ class SexChatHU(Bot):
         return self.getWantedResolutionPlaylist("https:" + self.lastInfo['onlineParams']['modeSpecific']['main']['hls']['address'])
 
     def getStatus(self):
-        r = requests.get('https://chat.a.apn2.com/chat-api/index.php/room/getRoom?tokenID=guest&roomID=' + self.room_id, headers=self.headers)
+        r = requests.get('https://chat.a.apn2.com/chat-api/index.php/room/getRoom?tokenID=guest&roomID=' + self.room_id, headers= self.headers, verify=False)
         if r.status_code != 200:
             return Status.UNKNOWN
 
@@ -62,6 +62,10 @@ class SexChatHU(Bot):
         elif self.lastInfo["onlineStatus"] == "offline":
             return Status.OFFLINE
         return Status.UNKNOWN
+
+    
+    def isMobile(self):
+        return False
 
 
 Bot.loaded_sites.add(SexChatHU)

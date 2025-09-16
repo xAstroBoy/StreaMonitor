@@ -23,7 +23,7 @@ class CamSoda(Bot):
         return self.getWantedResolutionPlaylist(url)
 
     def getStatus(self):
-        r = requests.get('https://www.camsoda.com/api/v1/chat/react/' + self.username, headers=self.headers)
+        r = self.session.get('https://www.camsoda.com/api/v1/chat/react/' + self.username, headers=self.headers)
         if r.status_code == 403:
             return Status.RATELIMIT
         if r.status_code != 200:
@@ -44,6 +44,10 @@ class CamSoda(Bot):
         if "token" in stream_data:
             return Status.OFFLINE
         return Status.UNKNOWN
+
+    
+    def isMobile(self):
+        return False
 
 
 Bot.loaded_sites.add(CamSoda)

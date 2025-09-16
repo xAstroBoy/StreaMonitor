@@ -35,12 +35,15 @@ class StreaMate(Bot):
             'Content-Type': 'application/json',
             'Referer': 'https://streamate.com/'
         }
-        r = requests.get('https://manifest-server.naiadsystems.com/live/s:' + self.username + '.json?last=load&format=mp4-hls',
-                         headers=headers)
+        r = requests.get('https://manifest-server.naiadsystems.com/live/s:' + self.username + '.json?last=load&format=mp4-hls', headers=headers, verify=False)
 
         if r.status_code == 200:
             self.lastInfo = r.json()
         return Status(r.status_code)
+    
+    def isMobile(self):
+        return False
+
 
 
 Bot.loaded_sites.add(StreaMate)

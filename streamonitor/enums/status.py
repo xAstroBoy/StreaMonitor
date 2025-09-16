@@ -12,3 +12,4 @@ class Status(Enum):
     OFFLINE = 404
     LONG_OFFLINE = 410
     RATELIMIT = 429
+    CLOUDFLARE = 503

@@ -1,3 +1,4 @@
+
 import re
 import time
 import requests
@@ -7,11 +8,12 @@ import hashlib
 from streamonitor.bot import Bot
 from streamonitor.downloaders.hls import getVideoNativeHLS
 from streamonitor.enums import Status
-
+from streamonitor.utils.CloudflareDetection import looks_like_cf_html
 
 class StripChat(Bot):
     site = 'StripChat'
     siteslug = 'SC'
+    isMobileBroadcast = False
 
     _static_data = None
     _main_js_data = None
@@ -133,29 +135,94 @@ class StripChat(Bot):
         return [variant | {'url': f'{variant["url"]}{"&" if "?" in variant["url"] else "?"}psch={psch}&pkey={pkey}'}
                 for variant in variants]
 
-    def getStatus(self):
-        r = requests.get('https://stripchat.com/api/vr/v2/models/username/' + self.username, headers=self.headers)
 
+
+
+
+    def getStatus(self):
+        url = 'https://stripchat.com/api/vr/v2/models/username/' + self.username
+        r = self.session.get(url, headers=self.headers)
+
+        ct = (r.headers.get("content-type") or "").lower()
+        body = r.text or ""
+
+        # Map obvious non-success first
+        if r.status_code == 404:
+            return Status.NOTEXIST
+        if r.status_code == 403:
+            # Could be geo/restricted or CF. Prefer CF if HTML challenge detected.
+            if looks_like_cf_html(body):
+                self.logger.error(f'Cloudflare challenge (403) for {self.username}')
+                return Status.CLOUDFLARE
+            return Status.RESTRICTED
+        if r.status_code == 429:
+            self.logger.error(f'Rate limited (429) for {self.username}')
+            return Status.RATELIMIT
+        if r.status_code >= 500:
+            # CF sometimes returns 503 with the challenge page
+            if looks_like_cf_html(body):
+                self.logger.error(f'Cloudflare challenge ({r.status_code}) for {self.username}')
+                return Status.CLOUDFLARE
+            self.logger.error(f'Server error {r.status_code} for {self.username}')
+            return Status.UNKNOWN
+
+        # If it's not JSON, don't try to json() it
+        if "application/json" not in ct:
+            if looks_like_cf_html(body):
+                self.logger.error(f'Cloudflare challenge (HTML) for {self.username}')
+                return Status.CLOUDFLARE
+            # Unexpected content-type
+            snippet = body[:200].replace("\n", " ")
+            self.logger.error(f'Non-JSON reply ({ct}) for {self.username}. Snippet: {snippet}')
+            return Status.UNKNOWN
+
+        # Guard against empty/whitespace body
+        if not body.strip():
+            self.logger.error(f'Empty JSON body for {self.username} (status {r.status_code})')
+            return Status.UNKNOWN
+
+        # Safe to parse JSON
         try:
             self.lastInfo = r.json()
-        except requests.exceptions.JSONDecodeError:
+        except Exception as e:
+            snippet = body[:200].replace("\n", " ")
+            self.logger.error(
+                f'Failed to decode JSON for {self.username}. Status {r.status_code}. Snippet: {snippet}'
+            )
+            # Heuristics again
+            if looks_like_cf_html(body):
+                return Status.CLOUDFLARE
+            if r.status_code == 429:
+                return Status.RATELIMIT
+            if r.status_code == 403:
+                return Status.RESTRICTED
+            if r.status_code == 404:
+                return Status.NOTEXIST
             return Status.UNKNOWN
 
-        if 'model' not in self.lastInfo:
-            if 'error' in self.lastInfo:
-                if self.lastInfo.get('error') == 'Not Found':
-                    return Status.NOTEXIST
-                self.logger.warn(f'Status returned error: {self.lastInfo["error"]}')
-            return Status.UNKNOWN
+        # Normal status mapping
+        self.isMobileBroadcast = (
+            self.lastInfo.get("broadcastSettings", {}).get("isMobile")
+            or self.lastInfo.get("model", {}).get("isMobile")
+            or False
+        )
+        model = self.lastInfo.get("model", {}) or {}
+        cam = self.lastInfo.get("cam", {}) or {}
 
-        if self.lastInfo["model"]["status"] == "public" and self.lastInfo["isCamAvailable"] and self.lastInfo['cam']["isCamActive"]:
+        if model.get("status") == "public" and self.lastInfo.get("isCamAvailable") and cam.get("isCamActive"):
             return Status.PUBLIC
-        if self.lastInfo["model"]["status"] in ["private", "groupShow", "p2p", "virtualPrivate", "p2pVoice"]:
+        if model.get("status") in ["private", "groupShow", "p2p", "virtualPrivate", "p2pVoice"]:
             return Status.PRIVATE
-        if self.lastInfo["model"]["status"] in ["off", "idle"]:
+        if model.get("status") in ["off", "idle"]:
             return Status.OFFLINE
-        self.logger.warn(f'Got unknown status: {self.lastInfo["model"]["status"]}')
+
+        self.logger.warn(
+            f'Unknown status: {model.get("status")} isCamAvailable={self.lastInfo.get("isCamAvailable")} isCamActive={cam.get("isCamActive")}'
+        )
         return Status.UNKNOWN
 
+
+    def isMobile(self):
+        return self.isMobileBroadcast
 
 Bot.loaded_sites.add(StripChat)
