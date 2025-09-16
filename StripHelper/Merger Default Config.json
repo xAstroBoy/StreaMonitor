@@ -1,0 +1,29 @@
+{
+    "VR": [
+        "[SCVR]",
+        "[DCVR]"
+    ],
+    "Desktop": [
+        "[BC]",
+        "[C4]",
+        "[CC]",
+        "[CS]",
+        "[CB]",
+        "[CHTV]",
+        "[F4F]",
+        "[MV]",
+        "[MFC]",
+        "[SCHU]",
+        "[SM]",
+        "[SC]"
+    ],
+    "Aliases": {
+        "modelname": [
+            "modelname_of_other_page",
+        ]
+    },
+    "PhoneClips": [
+        "-clip",
+        "-phoneclip"
+    ]
+}
