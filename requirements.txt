@@ -11,3 +11,5 @@ fake-useragent
 python-environ
 pycurl
 pycurl-requests
+playwright
+curl_cffi
