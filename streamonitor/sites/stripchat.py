@@ -1,5 +1,4 @@
-import itertools
-import random
+
 import re
 import time
 import requests
@@ -9,17 +8,18 @@ import hashlib
 from streamonitor.bot import Bot
 from streamonitor.downloaders.hls import getVideoNativeHLS
 from streamonitor.enums import Status
-
+from streamonitor.utils.CloudflareDetection import looks_like_cf_html
 
 class StripChat(Bot):
     site = 'StripChat'
     siteslug = 'SC'
+    isMobileBroadcast = False
 
     _static_data = None
     _main_js_data = None
     _doppio_js_data = None
     _mouflon_keys: dict = None
-    _cached_keys: dict[str, bytes] = None
+    _cached_keys: dict = None
 
     def __init__(self, username):
         if StripChat._static_data is None:
@@ -61,38 +61,48 @@ class StripChat(Bot):
 
     @classmethod
     def m3u_decoder(cls, content):
-        _mouflon_file_attr = "#EXT-X-MOUFLON:FILE:"
-        _mouflon_filename = 'media.mp4'
-
         def _decode(encrypted_b64: str, key: str) -> str:
             if cls._cached_keys is None:
                 cls._cached_keys = {}
-            hash_bytes = cls._cached_keys[key] if key in cls._cached_keys \
-                else cls._cached_keys.setdefault(key, hashlib.sha256(key.encode("utf-8")).digest())
+            if key not in cls._cached_keys:
+                cls._cached_keys[key] = hashlib.sha256(key.encode("utf-8")).digest()
+            hash_bytes = cls._cached_keys[key]
+            hash_len = len(hash_bytes)
+
             encrypted_data = base64.b64decode(encrypted_b64 + "==")
-            return bytes(a ^ b for (a, b) in zip(encrypted_data, itertools.cycle(hash_bytes))).decode("utf-8")
+
+            decrypted_bytes = bytearray()
+            for i, cipher_byte in enumerate(encrypted_data):
+                key_byte = hash_bytes[i % hash_len]
+                decrypted_byte = cipher_byte ^ key_byte
+                decrypted_bytes.append(decrypted_byte)
+
+            plaintext = decrypted_bytes.decode("utf-8")
+            return plaintext
 
         _, pkey = StripChat._getMouflonFromM3U(content)
 
-        decoded = ''
+        decoded = []
         lines = content.splitlines()
-        last_decoded_file = None
-        for line in lines:
-            if line.startswith(_mouflon_file_attr):
-                last_decoded_file = _decode(line[len(_mouflon_file_attr):], cls.getMouflonDecKey(pkey))
-            elif line.endswith(_mouflon_filename) and last_decoded_file:
-                decoded += (line.replace(_mouflon_filename, last_decoded_file)) + '\n'
-                last_decoded_file = None
+        for idx, line in enumerate(lines):
+            if line.startswith("#EXT-X-MOUFLON:FILE:"):
+                dec = _decode(line[20:], cls.getMouflonDecKey(pkey))
+                decoded.append(lines[idx + 1].replace("media.mp4", dec))
             else:
-                decoded += line + '\n'
-        return decoded
+                decoded.append(line)
+        return "\n".join(decoded)
 
     @classmethod
     def getMouflonDecKey(cls, pkey):
-        if cls._mouflon_keys is None:
+        if not cls._mouflon_keys:
             cls._mouflon_keys = {}
-        return cls._mouflon_keys[pkey] if pkey in cls._mouflon_keys \
-            else cls._mouflon_keys.setdefault(pkey, re.findall(f'"{pkey}:(.*?)"', cls._doppio_js_data)[0])
+
+        if pkey in cls._mouflon_keys:
+            return cls._mouflon_keys[pkey]
+
+        key = re.findall(f'"{pkey}:(.*?)"', cls._doppio_js_data)[0]
+        cls._mouflon_keys[pkey] = key
+        return key
 
     @staticmethod
     def _getMouflonFromM3U(m3u8_doc):
@@ -113,8 +123,8 @@ class StripChat(Bot):
 
     def getPlaylistVariants(self, url):
         url = "https://edge-hls.{host}/hls/{id}{vr}/master/{id}{vr}{auto}.m3u8".format(
-                host='doppiocdn.' + random.choice(['org', 'com', 'net']),
-                id=self.lastInfo["streamName"],
+                host='doppiocdn.com',
+                id=self.lastInfo["cam"]["streamName"],
                 vr='_vr' if self.vr else '',
                 auto='_auto' if not self.vr else ''
             )
@@ -125,47 +135,107 @@ class StripChat(Bot):
         return [variant | {'url': f'{variant["url"]}{"&" if "?" in variant["url"] else "?"}psch={psch}&pkey={pkey}'}
                 for variant in variants]
 
-    @staticmethod
-    def uniq(length=16):
-        chars = ''.join(chr(i) for i in range(ord('a'), ord('z')+1))
-        chars += ''.join(chr(i) for i in range(ord('0'), ord('9')+1))
-        return ''.join(random.choice(chars) for _ in range(length))
+
+
+
 
     def getStatus(self):
-        r = requests.get(
-            f'https://stripchat.com/api/front/v2/models/username/{self.username}/cam?uniq={StripChat.uniq()}',
-            headers=self.headers
+        url = 'https://vr.stripchat.com/api/vr/v2/models/username/' + self.username
+        r = self.session.get(url, headers=self.headers)
+
+        ct = (r.headers.get("content-type") or "").lower()
+        body = r.text or ""
+
+        # Map obvious non-success first
+        if r.status_code == 404:
+            return Status.NOTEXIST
+        if r.status_code == 403:
+            # Could be geo/restricted or CF. Prefer CF if HTML challenge detected.
+            if looks_like_cf_html(body):
+                self.logger.error(f'Cloudflare challenge (403) for {self.username}')
+                return Status.CLOUDFLARE
+            return Status.RESTRICTED
+        if r.status_code == 429:
+            self.logger.error(f'Rate limited (429) for {self.username}')
+            return Status.RATELIMIT
+        if r.status_code >= 500:
+            # CF sometimes returns 503 with the challenge page
+            if looks_like_cf_html(body):
+                self.logger.error(f'Cloudflare challenge ({r.status_code}) for {self.username}')
+                return Status.CLOUDFLARE
+            self.logger.error(f'Server error {r.status_code} for {self.username}')
+            return Status.UNKNOWN
+
+        # If it's not JSON, don't try to json() it
+        if "application/json" not in ct:
+            if looks_like_cf_html(body):
+                self.logger.error(f'Cloudflare challenge (HTML) for {self.username}')
+                return Status.CLOUDFLARE
+            # Unexpected content-type
+            snippet = body[:200].replace("\n", " ")
+            self.logger.error(f'Non-JSON reply ({ct}) for {self.username}. Snippet: {snippet}')
+            return Status.UNKNOWN
+
+        # Guard against empty/whitespace body
+        if not body.strip():
+            self.logger.error(f'Empty JSON body for {self.username} (status {r.status_code})')
+            return Status.UNKNOWN
+
+        # Safe to parse JSON
+        try:
+            self.lastInfo = r.json()
+        except Exception as e:
+            snippet = body[:200].replace("\n", " ")
+            self.logger.error(
+                f'Failed to decode JSON for {self.username}. Status {r.status_code}. Snippet: {snippet}'
+            )
+            # Heuristics again
+            if looks_like_cf_html(body):
+                return Status.CLOUDFLARE
+            if r.status_code == 429:
+                return Status.RATELIMIT
+            if r.status_code == 403:
+                return Status.RESTRICTED
+            if r.status_code == 404:
+                return Status.NOTEXIST
+            return Status.UNKNOWN
+
+        # Normal status mapping
+        self.isMobileBroadcast = (
+            self.lastInfo.get("broadcastSettings", {}).get("isMobile")
+            or self.lastInfo.get("model", {}).get("isMobile")
+            or False
         )
 
-        try:
-            data = r.json()
-        except requests.exceptions.JSONDecodeError:
-            self.log('Failed to parse JSON response')
-            return Status.UNKNOWN
+        model = self.lastInfo.get("model", {}) or {}
+        cam = self.lastInfo.get("cam", {}) or {}
 
-        if 'cam' not in data:
-            if 'error' in data:
-                error = data['error']
-                if error == 'Not Found':
-                    return Status.NOTEXIST
-                self.logger.warn(f'Status returned error: {error}')
-            return Status.UNKNOWN
+        # Prefer cam.streamStatus if present, otherwise fall back to model.status
+        status = (
+            cam.get("streamStatus")
+            or model.get("status")
+            or self.lastInfo.get("status")  # futureproof in case status moves root
+        )
 
-        self.lastInfo = {'model': data['user']['user']}
-        if isinstance(data['cam'], dict):
-            self.lastInfo |= data['cam']
-
-        status = self.lastInfo['model'].get('status')
-        if status == "public" and self.lastInfo["isCamAvailable"] and self.lastInfo["isCamActive"]:
+        if status == "public" and self.lastInfo.get("isCamAvailable") and cam.get("isCamActive"):
             return Status.PUBLIC
+
         if status in ["private", "groupShow", "p2p", "virtualPrivate", "p2pVoice"]:
             return Status.PRIVATE
+
         if status in ["off", "idle"]:
             return Status.OFFLINE
-        if data['user'].get('isGeoBanned') is True:
-            return Status.RESTRICTED
-        self.logger.warn(f'Got unknown status: {status}')
+
+        self.logger.warning(
+            f"Unknown status: {status} "
+            f"isCamAvailable={self.lastInfo.get('isCamAvailable')} "
+            f"isCamActive={cam.get('isCamActive')}"
+        )
         return Status.UNKNOWN
 
+
+
+    def isMobile(self):
+        return self.isMobileBroadcast
 
 Bot.loaded_sites.add(StripChat)
