@@ -140,7 +140,7 @@ class StripChat(Bot):
 
 
     def getStatus(self):
-        url = 'https://stripchat.com/api/vr/v2/models/username/' + self.username
+        url = 'https://vr.stripchat.com/api/vr/v2/models/username/' + self.username
         r = self.session.get(url, headers=self.headers)
 
         ct = (r.headers.get("content-type") or "").lower()
@@ -206,20 +206,33 @@ class StripChat(Bot):
             or self.lastInfo.get("model", {}).get("isMobile")
             or False
         )
+
         model = self.lastInfo.get("model", {}) or {}
         cam = self.lastInfo.get("cam", {}) or {}
 
-        if model.get("status") == "public" and self.lastInfo.get("isCamAvailable") and cam.get("isCamActive"):
+        # Prefer cam.streamStatus if present, otherwise fall back to model.status
+        status = (
+            cam.get("streamStatus")
+            or model.get("status")
+            or self.lastInfo.get("status")  # futureproof in case status moves root
+        )
+
+        if status == "public" and self.lastInfo.get("isCamAvailable") and cam.get("isCamActive"):
             return Status.PUBLIC
-        if model.get("status") in ["private", "groupShow", "p2p", "virtualPrivate", "p2pVoice"]:
+
+        if status in ["private", "groupShow", "p2p", "virtualPrivate", "p2pVoice"]:
             return Status.PRIVATE
-        if model.get("status") in ["off", "idle"]:
+
+        if status in ["off", "idle"]:
             return Status.OFFLINE
 
-        self.logger.warn(
-            f'Unknown status: {model.get("status")} isCamAvailable={self.lastInfo.get("isCamAvailable")} isCamActive={cam.get("isCamActive")}'
+        self.logger.warning(
+            f"Unknown status: {status} "
+            f"isCamAvailable={self.lastInfo.get('isCamAvailable')} "
+            f"isCamActive={cam.get('isCamActive')}"
         )
         return Status.UNKNOWN
+
 
 
     def isMobile(self):
