@@ -136,10 +136,13 @@ class StripChat(Bot):
                 for variant in variants]
 
 
-
-
+    
 
     def getStatus(self):
+        def _as_dict(obj):
+            """Return obj if it's a dict, otherwise {}."""
+            return obj if isinstance(obj, dict) else {}
+
         url = 'https://vr.stripchat.com/api/vr/v2/models/username/' + self.username
         r = self.session.get(url, headers=self.headers)
 
@@ -150,7 +153,6 @@ class StripChat(Bot):
         if r.status_code == 404:
             return Status.NOTEXIST
         if r.status_code == 403:
-            # Could be geo/restricted or CF. Prefer CF if HTML challenge detected.
             if looks_like_cf_html(body):
                 self.logger.error(f'Cloudflare challenge (403) for {self.username}')
                 return Status.CLOUDFLARE
@@ -159,7 +161,6 @@ class StripChat(Bot):
             self.logger.error(f'Rate limited (429) for {self.username}')
             return Status.RATELIMIT
         if r.status_code >= 500:
-            # CF sometimes returns 503 with the challenge page
             if looks_like_cf_html(body):
                 self.logger.error(f'Cloudflare challenge ({r.status_code}) for {self.username}')
                 return Status.CLOUDFLARE
@@ -171,7 +172,6 @@ class StripChat(Bot):
             if looks_like_cf_html(body):
                 self.logger.error(f'Cloudflare challenge (HTML) for {self.username}')
                 return Status.CLOUDFLARE
-            # Unexpected content-type
             snippet = body[:200].replace("\n", " ")
             self.logger.error(f'Non-JSON reply ({ct}) for {self.username}. Snippet: {snippet}')
             return Status.UNKNOWN
@@ -181,15 +181,14 @@ class StripChat(Bot):
             self.logger.error(f'Empty JSON body for {self.username} (status {r.status_code})')
             return Status.UNKNOWN
 
-        # Safe to parse JSON
+        # Parse JSON once
         try:
-            self.lastInfo = r.json()
-        except Exception as e:
+            raw = r.json()
+        except Exception:
             snippet = body[:200].replace("\n", " ")
             self.logger.error(
                 f'Failed to decode JSON for {self.username}. Status {r.status_code}. Snippet: {snippet}'
             )
-            # Heuristics again
             if looks_like_cf_html(body):
                 return Status.CLOUDFLARE
             if r.status_code == 429:
@@ -200,24 +199,37 @@ class StripChat(Bot):
                 return Status.NOTEXIST
             return Status.UNKNOWN
 
-        # Normal status mapping
+        # Normalize: force into dict
+        if isinstance(raw, list):
+            self.logger.debug(f'API returned list with {len(raw)} items for {self.username}, using first element')
+            self.lastInfo = raw[0] if raw else {}
+        elif isinstance(raw, dict):
+            self.lastInfo = raw
+        else:
+            self.logger.error(f'Unexpected JSON type {type(raw)} for {self.username}')
+            return Status.UNKNOWN
+
+        info = _as_dict(self.lastInfo)  # now guaranteed dict
+
+        # Safe access to broadcastSettings
+        bs = _as_dict(info.get("broadcastSettings"))
         self.isMobileBroadcast = (
-            self.lastInfo.get("broadcastSettings", {}).get("isMobile")
-            or self.lastInfo.get("model", {}).get("isMobile")
+            bs.get("isMobile")
+            or _as_dict(info.get("model")).get("isMobile")
             or False
         )
 
-        model = self.lastInfo.get("model", {}) or {}
-        cam = self.lastInfo.get("cam", {}) or {}
+        model = _as_dict(info.get("model"))
+        cam = _as_dict(info.get("cam"))
 
         # Prefer cam.streamStatus if present, otherwise fall back to model.status
         status = (
             cam.get("streamStatus")
             or model.get("status")
-            or self.lastInfo.get("status")  # futureproof in case status moves root
+            or info.get("status")  # futureproof in case status moves root
         )
 
-        if status == "public" and self.lastInfo.get("isCamAvailable") and cam.get("isCamActive"):
+        if status == "public" and info.get("isCamAvailable") and cam.get("isCamActive"):
             return Status.PUBLIC
 
         if status in ["private", "groupShow", "p2p", "virtualPrivate", "p2pVoice"]:
@@ -228,10 +240,13 @@ class StripChat(Bot):
 
         self.logger.warning(
             f"Unknown status: {status} "
-            f"isCamAvailable={self.lastInfo.get('isCamAvailable')} "
+            f"isCamAvailable={info.get('isCamAvailable')} "
             f"isCamActive={cam.get('isCamActive')}"
         )
         return Status.UNKNOWN
+
+
+
 
 
 
