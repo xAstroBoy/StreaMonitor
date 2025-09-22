@@ -1,51 +1,245 @@
-import os, re, m3u8, subprocess, time
-from urllib.parse import urljoin
+import os, re, m3u8, subprocess, time, threading
+from urllib.parse import urljoin, urlparse, urlunparse, urlencode, parse_qsl
+
 from parameters import DEBUG, CONTAINER, FFMPEG_PATH
 from streamonitor.bot import Bot
-# Always use stdlib requests here (avoids curl_cffi threadpool shutdown errors)
+# stdlib requests only (stable vs curl_cffi inside threads)
 import requests
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Temp root resolver (NO HARDCODED PATHS)
+# Priority:
+#   1) ENV SC_TMP
+#   2) parameters.HLS_TMP_DIR (optional)
+#   3) <repo_root>/SC_TMP
+#   4) <downloads_root>/SC_TMP  (same drive as downloads)
+#   5) CWD/SC_TMP
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    from parameters import HLS_TMP_DIR as _HLS_TMP_DIR
+except Exception:
+    _HLS_TMP_DIR = None
+
+def _get_tmp_root(self: Bot) -> str:
+    env = os.getenv("SC_TMP")
+    if env:
+        os.makedirs(env, exist_ok=True)
+        return env
+
+    if _HLS_TMP_DIR:
+        os.makedirs(_HLS_TMP_DIR, exist_ok=True)
+        return _HLS_TMP_DIR
+
+    # repo_root/SC_TMP
+    try:
+        here = os.path.abspath(__file__)
+        repo_root = os.path.abspath(os.path.join(here, "..", ".."))  # …/streamonitor/
+        repo_root = os.path.abspath(os.path.join(repo_root, ".."))   # repo root
+        candidate = os.path.join(repo_root, "SC_TMP")
+        os.makedirs(candidate, exist_ok=True)
+        return candidate
+    except Exception:
+        pass
+
+    # near downloads root
+    try:
+        downloads_parent = os.path.abspath(os.path.join(self.outputFolder, ".."))
+        candidate = os.path.join(downloads_parent, "SC_TMP")
+        os.makedirs(candidate, exist_ok=True)
+        return candidate
+    except Exception:
+        pass
+
+    # fallback: cwd
+    candidate = os.path.join(os.getcwd(), "SC_TMP")
+    os.makedirs(candidate, exist_ok=True)
+    return candidate
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# URL helpers: make relatives absolute + inherit parent query tokens
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _abs_with_parent_query(base_url: str, maybe_rel: str) -> str:
+    base = urlparse(base_url)
+    base_dir = base._replace(path=(base.path.rsplit("/", 1)[0] + "/"), query="", fragment="")
+    absu = maybe_rel if maybe_rel.startswith(("http://", "https://")) else urljoin(urlunparse(base_dir), maybe_rel)
+    up = urlparse(absu)
+
+    q_child = dict(parse_qsl(up.query or ""))
+    q_parent = dict(parse_qsl(base.query or ""))
+    merged = dict(q_parent)
+    merged.update(q_child)
+    return urlunparse(up._replace(query=urlencode(merged)))
+
+
+def _rewrite_playlist_abs_and_tokens(base_url: str, playlist_text: str) -> str:
+    out = []
+    saw_header = False
+    for line in playlist_text.splitlines():
+        if line.startswith("#EXTM3U"):
+            saw_header = True
+            out.append(line)
+            continue
+
+        if line.startswith("#EXT-X-MAP:"):
+            m = re.search(r'URI="([^"]+)"', line)
+            if m:
+                newu = _abs_with_parent_query(base_url, m.group(1))
+                line = re.sub(r'URI="[^"]+"', f'URI="{newu}"', line)
+            out.append(line); continue
+
+        if line.startswith("#EXT-X-KEY:"):
+            m = re.search(r'URI="([^"]+)"', line)
+            if m:
+                newu = _abs_with_parent_query(base_url, m.group(1))
+                line = re.sub(r'URI="[^"]+"', f'URI="{newu}"', line)
+            out.append(line); continue
+
+        if not line or line.startswith("#"):
+            out.append(line); continue
+
+        # segment URI
+        out.append(_abs_with_parent_query(base_url, line))
+
+    if not saw_header:
+        out.insert(0, "#EXTM3U")
+    return "\n".join(out) + "\n"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rolling per-model playlist writer (NO PROXY). Cleans only its own files.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _RollingM3UWriter:
+    """
+    Periodically polls the live media playlist, fixes URIs (absolute + tokens),
+    and writes to a per-model .m3u8 file under SC_TMP/<SITE>_<USER>/rolling.m3u8.
+    Only this writer’s file is ever removed.
+    """
+    def __init__(self, media_url: str, sess: requests.Session, headers: dict,
+                 m3u_processor, tmp_root: str, model_key: str, poll_sec=1.5):
+        self.media_url = media_url
+        self.sess = sess
+        self.headers = dict(headers or {})
+        self.m3u_processor = m3u_processor
+        self.poll_sec = poll_sec
+        self._stop = threading.Event()
+        self._thr = None
+
+        self.model_dir = os.path.join(tmp_root, model_key)
+        os.makedirs(self.model_dir, exist_ok=True)
+
+        # On start: purge ONLY leftovers in this model dir (ours)
+        for fname in os.listdir(self.model_dir):
+            if fname.endswith(".m3u8") or fname.endswith(".part"):
+                try:
+                    os.remove(os.path.join(self.model_dir, fname))
+                except Exception:
+                    pass
+
+        self.path = os.path.join(self.model_dir, "rolling.m3u8")
+
+    def start(self):
+        self._thr = threading.Thread(target=self._loop, daemon=True)
+        self._thr.start()
+
+    def _loop(self):
+        last_text = None
+        while not self._stop.is_set():
+            try:
+                r = self.sess.get(self.media_url, headers=self.headers, timeout=15)
+                if r.status_code != 200:
+                    time.sleep(self.poll_sec); continue
+                txt = r.content.decode("utf-8", errors="ignore")
+                if callable(self.m3u_processor):
+                    txt = self.m3u_processor(txt)
+                fixed = _rewrite_playlist_abs_and_tokens(self.media_url, txt)
+                if fixed != last_text:
+                    tmp2 = self.path + ".part"
+                    with open(tmp2, "wb") as f:
+                        f.write(fixed.encode("utf-8"))
+                    try:
+                        os.replace(tmp2, self.path) if os.path.exists(self.path) else os.rename(tmp2, self.path)
+                    except Exception:
+                        with open(self.path, "wb") as f:
+                            f.write(fixed.encode("utf-8"))
+                last_text = fixed
+            except Exception:
+                # keep rolling regardless
+                pass
+            self._stop.wait(self.poll_sec)
+
+    def stop(self):
+        self._stop.set()
+        if self._thr:
+            try:
+                self._thr.join(timeout=2.0)
+            except Exception:
+                pass
+        # Clean ONLY our own files; do not touch siblings from other models
+        try:
+            if os.path.exists(self.path):
+                os.unlink(self.path)
+        except Exception:
+            pass
+        try:
+            pp = self.path + ".part"
+            if os.path.exists(pp):
+                os.unlink(pp)
+        except Exception:
+            pass
+        # remove empty model dir (best-effort)
+        try:
+            if not os.listdir(self.model_dir):
+                os.rmdir(self.model_dir)
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main entry (unchanged name): ALWAYS writes <N>.tmp.ts in the model folder
+# ─────────────────────────────────────────────────────────────────────────────
 
 def getVideoNativeHLS(self: Bot, url, filename, m3u_processor=None):
     """
     Robust HLS capture that ALWAYS writes a growing N.tmp.ts during the live show.
-    No mid-flight remux; no final remux here. The merger handles *.tmp.ts later.
+    No mid-flight remux; merger handles *.tmp.ts later.
     """
-
-    # ───────────── config / helpers ─────────────
+    # Stop wiring
     self.stopDownloadFlag = False
+    writer_ref = {"w": None}
+    ffmpeg_proc_ref = {"p": None}
 
-    # expose a proper stop function for Bot
-    def _stop():
+    def _stop_both():
         self.stopDownloadFlag = True
-    self.stopDownload = _stop
+        try:
+            if ffmpeg_proc_ref["p"] is not None:
+                ffmpeg_proc_ref["p"].terminate()
+        except Exception:
+            pass
+        try:
+            if writer_ref["w"] is not None:
+                writer_ref["w"].stop()
+        except Exception:
+            pass
 
-    # we always write .tmp.ts (name only; content may be TS or fMP4 chunks)
+    self.stopDownload = _stop_both
+
+    # Output path: always .tmp.ts — merger will finalize later
     tmp_path = filename[:-len("." + CONTAINER)] + ".tmp.ts"
-    os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
+    out_dir = os.path.dirname(tmp_path)
+    os.makedirs(out_dir, exist_ok=True)
 
-    def abs_url(base, maybe_rel):
-        return maybe_rel if maybe_rel.startswith(("http://", "https://")) else urljoin(base, maybe_rel)
-
-    # sensible default headers if caller didn’t set them
+    # Headers (sane defaults)
     headers = dict(self.headers or {})
     headers.setdefault("User-Agent", headers.get("User-Agent") or "Mozilla/5.0")
     headers.setdefault("Accept", "*/*")
     headers.setdefault("Connection", "keep-alive")
 
-    # guess Referer/Origin by site (fixes many 403s on HLS CDNs)
-    site_ref_map = {
-        "SC": "https://stripchat.com/",
-        "SCVR": "https://stripchat.com/",
-        "CB": "https://chaturbate.com/",
-        "CS": "https://www.camsoda.com/",
-    }
-    ref = site_ref_map.get(getattr(self, "siteslug", ""), None)
-    if ref:
-        headers.setdefault("Referer", ref)
-        headers.setdefault("Origin", ref.rstrip("/"))
-
-    # keep one plain requests Session for this capture
+    # Per-stream session (NOT curl_cffi)
     sess = requests.Session()
     if self.cookies:
         try:
@@ -58,21 +252,20 @@ def getVideoNativeHLS(self: Bot, url, filename, m3u_processor=None):
         except Exception:
             pass
 
-    # ───────────── resolve variant (or fallback to ffmpeg on 403) ─────────────
     def fetch_text(u):
         r = sess.get(u, headers=headers, timeout=15)
         if r.status_code != 200:
             return None, r.status_code
         return r.content.decode("utf-8", errors="ignore"), 200
 
+    # Resolve master → best variant
     text0, code0 = fetch_text(url)
-    if code0 == 403:
-        self.debug(f"[HLS] master fetch failed: {code0} (will try ffmpeg direct → .tmp.ts)")
-        return _ffmpeg_dump_to_ts(self, url, headers, tmp_path)
-
     if text0 is None:
-        self.debug(f"[HLS] master fetch failed: {code0}")
-        return False
+        self.debug(f"[HLS] master fetch failed/unavailable ({code0}); FFmpeg direct → .tmp.ts")
+        ok = _ffmpeg_dump_to_ts(self, url, headers, tmp_path, ffmpeg_proc_ref)
+        try: sess.close()
+        except Exception: pass
+        return bool(ok)
 
     if callable(m3u_processor):
         text0 = m3u_processor(text0)
@@ -84,157 +277,172 @@ def getVideoNativeHLS(self: Bot, url, filename, m3u_processor=None):
 
     if getattr(pl0, "is_variant", False) and getattr(pl0, "playlists", []):
         best = max(pl0.playlists, key=lambda p: (getattr(p.stream_info, "bandwidth", 0) or 0))
-        url = abs_url(url, best.uri)
+        url = best.uri if best.uri.startswith(("http://", "https://")) else urljoin(url, best.uri)
 
-    # peek media playlist
+    # Fetch media playlist (so the writer can roll it)
     text1, code1 = fetch_text(url)
-    if code1 == 403:
-        self.debug(f"[HLS] media fetch failed: {code1} (will try ffmpeg direct → .tmp.ts)")
-        return _ffmpeg_dump_to_ts(self, url, headers, tmp_path)
     if text1 is None:
-        self.debug(f"[HLS] media fetch failed: {code1}")
-        return False
+        self.debug(f"[HLS] media fetch failed ({code1}); FFmpeg direct → .tmp.ts")
+        ok = _ffmpeg_dump_to_ts(self, url, headers, tmp_path, ffmpeg_proc_ref)
+        try: sess.close()
+        except Exception: pass
+        return bool(ok)
+
     if callable(m3u_processor):
         text1 = m3u_processor(text1)
 
-    is_encrypted = "#EXT-X-KEY" in text1
-    has_map = "#EXT-X-MAP" in text1  # fMP4 init
+    # Start rolling writer under SC_TMP/<SITE>_<USER>
+    tmp_root = _get_tmp_root(self)
+    model_key = f"{getattr(self,'siteslug','SITE')}_{self.username}"
+    writer = _RollingM3UWriter(
+        media_url=url, sess=sess, headers=headers, m3u_processor=m3u_processor,
+        tmp_root=tmp_root, model_key=model_key, poll_sec=1.5
+    )
+    writer.start()
+    writer_ref["w"] = writer
 
-    if is_encrypted:
-        self.debug("[HLS] encrypted stream detected → ffmpeg capture to .tmp.ts")
-        return _ffmpeg_dump_to_ts(self, url, headers, tmp_path)
+    # Wait a moment for first snapshot
+    t0 = time.time()
+    while (not os.path.exists(writer.path) or os.path.getsize(writer.path) == 0) and time.time() - t0 < 3.0:
+        time.sleep(0.05)
 
-    # ───────────── non-encrypted: pull segments ourselves into .tmp.ts ─────────
-    downloaded = set()
-    f = open(tmp_path, "ab", buffering=0)
+    # Hand local playlist to FFmpeg (no proxy). Blocks until FFmpeg exits.
+    ok = _ffmpeg_dump_to_ts(self, writer.path, headers, tmp_path, ffmpeg_proc_ref, local_m3u=True)
 
-    def write_bytes(b):
-        if not b:
-            return
-        f.write(b)
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except Exception:
-            pass
-
-    try:
-        if has_map:
-            m = re.search(r'#EXT-X-MAP:.*URI="([^"]+)"', text1)
-            if m:
-                init_uri = abs_url(url, m.group(1))
-                if init_uri not in downloaded:
-                    try:
-                        r = sess.get(init_uri, headers=headers, stream=True, timeout=20)
-                        if r.status_code == 200:
-                            for chunk in r.iter_content(262144):
-                                if not chunk:
-                                    break
-                                write_bytes(chunk)
-                            downloaded.add(init_uri)
-                            self.debug(f"[HLS] + init {init_uri}")
-                        else:
-                            self.debug(f"[HLS] init fetch failed: {r.status_code}")
-                    except Exception as ex:
-                        self.debug(f"[HLS] init fetch error: {ex}")
-
-        def poll_once():
-            r = sess.get(url, headers=headers, timeout=15)
-            if r.status_code != 200:
-                time.sleep(2)
-                return False
-            txt = r.content.decode("utf-8", errors="ignore")
-            if callable(m3u_processor):
-                txt = m3u_processor(txt)
-            try:
-                pl = m3u8.loads(txt)
-            except Exception:
-                time.sleep(2)
-                return False
-
-            segs = getattr(pl, "segments", []) or []
-            did = False
-            for seg in segs:
-                if self.stopDownloadFlag or not self.running or self.quitting:
-                    return True
-                seg_uri = abs_url(url, seg.uri)
-                if seg_uri in downloaded:
-                    continue
-                try:
-                    rr = sess.get(seg_uri, headers=headers, stream=True, timeout=20)
-                    if rr.status_code != 200:
-                        continue
-                    self.debug(f"[HLS] + {seg_uri}")
-                    for chunk in rr.iter_content(262144):
-                        if not chunk:
-                            break
-                        write_bytes(chunk)
-                    downloaded.add(seg_uri)
-                    did = True
-                except Exception as ex:
-                    self.debug(f"[HLS] segment fetch error: {ex}")
-            return did
-
-        while not self.stopDownloadFlag and self.running and not self.quitting:
-            got = poll_once()
-            if not got:
-                time.sleep(2)
-
-    finally:
-        try:
-            f.close()
-        except Exception:
-            pass
-        self.stopDownload = None
+    # Shutdown writer + session
+    try: writer.stop()
+    except Exception: pass
+    try: sess.close()
+    except Exception: pass
 
     try:
-        if os.path.getsize(tmp_path) > 0:
-            return True
-        else:
-            self.debug(f"[HLS] possibly no data downloaded")
-            return False
+        return bool(ok) and os.path.getsize(tmp_path) > 0
     except Exception:
-        pass
-    return False
+        return bool(ok)
 
 
-def _ffmpeg_dump_to_ts(self : Bot, url, headers, out_path):
-    hdr_blob = "\r\n".join(f"{k}: {v}" for k, v in headers.items()) + "\r\n"
+# ─────────────────────────────────────────────────────────────────────────────
+# FFmpeg runner: copy HLS → single growing TS. Accepts remote URL or local m3u8
+# ─────────────────────────────────────────────────────────────────────────────
+def _ffmpeg_dump_to_ts(self: Bot, url_or_path, headers, out_path, proc_ref, local_m3u=False):
+    # Build safe headers blob
+    hdrs = {
+        "User-Agent": headers.get("User-Agent", "Mozilla/5.0"),
+        "Accept": headers.get("Accept", "*/*"),
+        "Connection": headers.get("Connection", "keep-alive"),
+        "Accept-Language": headers.get("Accept-Language", "en-US,en;q=0.9"),
+    }
+    if "Cookie" in headers:
+        hdrs["Cookie"] = headers["Cookie"]
+    hdr_blob = "\r\n".join(f"{k}: {v}" for k, v in hdrs.items()) + "\r\n"
 
-    in_opts = [
-        "-hide_banner", "-loglevel", "info",
-        "-user_agent", headers.get("User-Agent", "Mozilla/5.0"),
-        "-timeout", "5000000", "-rw_timeout", "5000000",
-        "-reconnect", "1", "-reconnect_streamed", "1",
-        "-reconnect_on_network_error", "1",
-        "-reconnect_on_http_error", "4xx,5xx",
-        "-reconnect_at_eof", "1", "-reconnect_delay_max", "10",
-        "-live_start_index", "-3",
-        "-max_reload", "30", "-seg_max_retry", "30", "-m3u8_hold_counters", "30",
+    cmd = [
+        FFMPEG_PATH,
+        "-hide_banner", "-loglevel", "info", "-nostdin",
+        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,pipe",
         "-fflags", "nobuffer", "-fflags", "+discardcorrupt", "-fflags", "+genpts",
-        "-probesize", "4M", "-analyzeduration", "10000000",
-        "-allowed_extensions", "ALL", "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
-        "-headers", hdr_blob,
-        "-i", url,
-        "-map", "0", "-dn", "-sn",
-        "-c", "copy",
+        "-probesize", "64M", "-analyzeduration", "120M",
+        "-i", url_or_path,
+        "-map", "0:v:0?", "-map", "0:a?", "-dn", "-sn",
+        "-c", "copy", "-copyinkf",
+        "-avoid_negative_ts", "make_zero",
+        "-reset_timestamps", "1",
+        "-muxpreload", "0", "-muxdelay", "0", "-max_interleave_delta", "0",
         "-f", "mpegts",
-        out_path
+        out_path,
     ]
 
-    self.debug("FFmpeg CMD (capture→.tmp.ts): " + " ".join(subprocess.list2cmdline([a]) for a in [FFMPEG_PATH] + in_opts))
+    # Add network-only options for remote inputs
+    if not local_m3u and str(url_or_path).startswith(("http://", "https://")):
+        net_opts = [
+            "-headers", hdr_blob,
+            "-rw_timeout", "5000000",
+            "-stimeout", "5000000",     # common on Windows builds
+            "-reconnect", "1", "-reconnect_streamed", "1",
+            "-reconnect_on_network_error", "1",
+            "-reconnect_on_http_error", "4xx,5xx",
+            "-reconnect_at_eof", "1", "-reconnect_delay_max", "10",
+            "-max_reload", "180", "-seg_max_retry", "180", "-m3u8_hold_counters", "180",
+            "-allowed_extensions", "ALL",
+        ]
+        # Inject before "-i"
+        idx = cmd.index("-i")
+        cmd[idx:idx] = net_opts
 
-    proc = subprocess.Popen([FFMPEG_PATH] + in_opts)
-    self.stopDownload = lambda: StopBot(self, proc)
+    # Log the command (to file only; not console)
+    try:
+        dbg_cmd = " ".join(_shlex_quote(c) for c in cmd)
+        self.debug("FFmpeg CMD (capture→.tmp.ts): " + dbg_cmd)
+    except Exception:
+        pass
+
+    # Spawn ffmpeg with stderr piped; forward ALL lines to logger
+    startupinfo = None
+    creationflags = 0
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        # Hide console window on Windows
+        try:
+            creationflags = subprocess.CREATE_NO_WINDOW
+        except Exception:
+            creationflags = 0
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        bufsize=1,
+        startupinfo=startupinfo,
+        creationflags=creationflags,
+    )
+    proc_ref["p"] = proc
+
+    # DO NOT override self.stopDownload here (getVideoNativeHLS already set a closure that stops both proc+writer)
+
+    # Stream all stderr lines to the logger
+    try:
+        for line in proc.stderr:
+            line = (line or "").rstrip("\r\n")
+            if not line:
+                continue
+            if DEBUG:
+                self.logger.debug("[ffmpeg] " + line)
+    except Exception:
+        pass
+
     rc = proc.wait()
+    proc_ref["p"] = None
+    try:
+        proc.stderr.close()
+    except Exception:
+        pass
 
-def StopBot(self : Bot, proc : subprocess.Popen = None):
-   if proc is not None:
-       try:
-           proc.terminate()
-       except Exception:
-           pass
+    # Succeed if ffmpeg returned OK or we produced non-empty TS
+    try:
+        nonempty = os.path.exists(out_path) and os.path.getsize(out_path) > 0
+    except Exception:
+        nonempty = False
+    return (rc == 0) or nonempty
 
-   self.recording = False
-   self.stopDownload = None
-   
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legacy StopBot (name unchanged). Kept for compatibility (not used by closure)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def StopBot(self: Bot, proc: subprocess.Popen = None):
+    if proc is not None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    self.recording = False
+    self.stopDownload = None
+
+
+def _shlex_quote(s: str) -> str:
+    # safe-ish command logging without importing shlex for Windows paths
+    if re.match(r'^[a-zA-Z0-9._/\-+=:@%,\\]+$', s):
+        return s
+    return "'" + s.replace("'", "'\"'\"'") + "'"
