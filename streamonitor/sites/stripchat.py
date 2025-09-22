@@ -1,4 +1,3 @@
-
 import re
 import time
 import requests
@@ -10,6 +9,7 @@ from streamonitor.bot import Bot
 from streamonitor.downloaders.hls import getVideoNativeHLS
 from streamonitor.enums import Status
 from streamonitor.utils.CloudflareDetection import looks_like_cf_html
+
 
 class StripChat(Bot):
     site = 'StripChat'
@@ -60,70 +60,38 @@ class StripChat(Bot):
             raise Exception("Failed to fetch doppio.js from StripChat")
         StripChat._doppio_js_data = r.content.decode('utf-8')
 
-
     @classmethod
     def m3u_decoder(cls, content):
-
         def _decode(encrypted_b64: str, key: str) -> str:
             if cls._cached_keys is None:
                 cls._cached_keys = {}
             if key not in cls._cached_keys:
                 cls._cached_keys[key] = hashlib.sha256(key.encode("utf-8")).digest()
-            key_bytes = cls._cached_keys[key]
-            enc = base64.b64decode(encrypted_b64 + "==")
-            out = bytearray()
-            for i, b in enumerate(enc):
-                out.append(b ^ key_bytes[i % len(key_bytes)])
-            return out.decode("utf-8")
+            hash_bytes = cls._cached_keys[key]
+            hash_len = len(hash_bytes)
 
-        # get pkey (returns (psch, pkey))
+            encrypted_data = base64.b64decode(encrypted_b64 + "==")
+
+            decrypted_bytes = bytearray()
+            for i, cipher_byte in enumerate(encrypted_data):
+                key_byte = hash_bytes[i % hash_len]
+                decrypted_byte = cipher_byte ^ key_byte
+                decrypted_bytes.append(decrypted_byte)
+
+            plaintext = decrypted_bytes.decode("utf-8")
+            return plaintext
+
         _, pkey = StripChat._getMouflonFromM3U(content)
-        if not pkey:
-            return content
 
-        key = cls.getMouflonDecKey(pkey)
-
+        decoded = []
         lines = content.splitlines()
-        out = []
-        i = 0
-        tag = "#EXT-X-MOUFLON:FILE:"
-        tlen = len(tag)
-
-        while i < len(lines):
-            line = lines[i]
-
-            if line.startswith(tag):
-                enc = line[tlen:]
-                dec = None
-                try:
-                    dec = _decode(enc, key)  # decoded per-segment filename (e.g. abcd1234.mp4)
-                except Exception:
-                    pass
-
-                # Replace the *next* line and SKIP it (do not keep media.mp4)
-                if i + 1 < len(lines):
-                    nxt = lines[i + 1]
-                    if dec:
-                        # replace media.mp4 or media.mp4?query
-                        nxt = re.sub(r"media\.mp4(\?[^ \t\n\r]*)?", dec, nxt)
-                    out.append(nxt)
-                    i += 2
-                    continue
-                else:
-                    # no next line? just drop the tag
-                    i += 1
-                    continue
-
-            # drop any other mouflon metadata just in case
-            if line.startswith("#EXT-X-MOUFLON"):
-                i += 1
-                continue
-
-            out.append(line)
-            i += 1
-
-        return "\n".join(out)
-
+        for idx, line in enumerate(lines):
+            if line.startswith("#EXT-X-MOUFLON:FILE:"):
+                dec = _decode(line[20:], cls.getMouflonDecKey(pkey))
+                decoded.append(lines[idx + 1].replace("media.mp4", dec))
+            else:
+                decoded.append(line)
+        return "\n".join(decoded)
 
     @classmethod
     def getMouflonDecKey(cls, pkey):
@@ -154,6 +122,7 @@ class StripChat(Bot):
     def getVideoUrl(self):
         return self.getWantedResolutionPlaylist(None)
 
+
     def getPlaylistVariants(self, url):
         stream_id = self.getStreamName()    
         url = "https://edge-hls.{host}/hls/{id}{vr}/master/{id}{vr}{auto}.m3u8".format(
@@ -170,18 +139,82 @@ class StripChat(Bot):
                 for variant in variants]
 
 
-    
 
     @staticmethod
     def uniq():
-        chars = ''.join(chr(i) for i in range(ord('a'), ord('z')+1))
-        chars += ''.join(chr(i) for i in range(ord('0'), ord('9')+1))
+        chars = ''.join(chr(i) for i in range(ord('a'), ord('z') + 1))
+        chars += ''.join(chr(i) for i in range(ord('0'), ord('9') + 1))
         return ''.join(random.choice(chars) for _ in range(16))
 
-    def getStatus(self):
-        def _as_dict(obj):
-            return obj if isinstance(obj, dict) else {}
+    # ────────────────────────────────────────────────
+    # Cross-API normalizers
+    # ────────────────────────────────────────────────
+    @staticmethod
+    def normalizeInfo(raw: dict) -> dict:
+        """Normalize JSON so lastInfo is always a dict."""
+        if not raw:
+            return {}
+        if isinstance(raw, list):
+            return raw[0] if raw else {}
+        if "item" in raw and isinstance(raw["item"], dict):
+            return raw["item"]
+        return raw
 
+    def getStreamName(self) -> str:
+        if not self.lastInfo:
+            raise KeyError("lastInfo is empty, call getStatus() first")
+        if "streamName" in self.lastInfo:
+            return self.lastInfo["streamName"]
+        cam = self.lastInfo.get("cam")
+        if isinstance(cam, dict) and "streamName" in cam:
+            return cam["streamName"]
+        raise KeyError(f"No streamName in lastInfo: keys={list(self.lastInfo.keys())}")
+
+    def getStatusField(self):
+        if not self.lastInfo:
+            return None
+        if "status" in self.lastInfo:
+            return self.lastInfo["status"]
+        cam = self.lastInfo.get("cam")
+        if isinstance(cam, dict) and "streamStatus" in cam:
+            return cam["streamStatus"]
+        model = self.lastInfo.get("model")
+        if isinstance(model, dict) and "status" in model:
+            return model["status"]
+        return None
+
+    def getIsLive(self) -> bool:
+        if not self.lastInfo:
+            return False
+        if "isLive" in self.lastInfo:
+            return bool(self.lastInfo["isLive"])
+        cam = self.lastInfo.get("cam")
+        if isinstance(cam, dict) and "isCamActive" in cam:
+            return bool(cam["isCamActive"])
+        return False
+
+    def getIsMobile(self) -> bool:
+        if not self.lastInfo:
+            return False
+        if "isMobile" in self.lastInfo:
+            return bool(self.lastInfo["isMobile"])
+        model = self.lastInfo.get("model")
+        if isinstance(model, dict) and "isMobile" in model:
+            return bool(model["isMobile"])
+        bs = self.lastInfo.get("broadcastSettings")
+        if isinstance(bs, dict) and "isMobile" in bs:
+            return bool(bs["isMobile"])
+        cam = self.lastInfo.get("cam")
+        if isinstance(cam, dict):
+            bs2 = cam.get("broadcastSettings")
+            if isinstance(bs2, dict) and "isMobile" in bs2:
+                return bool(bs2["isMobile"])
+        return False
+
+    # ────────────────────────────────────────────────
+    # Status + playlist
+    # ────────────────────────────────────────────────
+    def getStatus(self):
         url = f'https://stripchat.com/api/front/v1/broadcasts/{self.username}?uniq={StripChat.uniq()}'
         r = self.session.get(url, headers=self.headers)
 
@@ -205,71 +238,50 @@ class StripChat(Bot):
             self.logger.error(f'Server error {r.status_code} for {self.username}')
             return Status.UNKNOWN
 
-        if "application/json" not in ct:
-            snippet = body[:200].replace("\n", " ")
-            self.logger.error(f'Non-JSON reply ({ct}) for {self.username}. Snippet: {snippet}')
-            return Status.UNKNOWN
-        if not body.strip():
-            self.logger.error(f'Empty JSON body for {self.username} (status {r.status_code})')
+        if "application/json" not in ct or not body.strip():
             return Status.UNKNOWN
 
         try:
             raw = r.json()
         except Exception:
-            snippet = body[:200].replace("\n", " ")
-            self.logger.error(
-                f'Failed to decode JSON for {self.username}. Status {r.status_code}. Snippet: {snippet}'
-            )
             return Status.UNKNOWN
 
-        self.lastInfo = _as_dict(raw.get("item"))
-        info = self.lastInfo
+        self.lastInfo = self.normalizeInfo(raw)
+        self.isMobileBroadcast = self.getIsMobile()
 
-        # fallback safe dicts
-        settings = _as_dict(info.get("settings"))
+        status = self.getStatusField()
+        is_live = self.getIsLive()
 
-        # isMobile flag
-        self.isMobileBroadcast = info.get("isMobile") or settings.get("isMobile") or False
-
-        # status
-        status = info.get("status")
-
-        if status == "public" and info.get("isLive") and not info.get("isBadStream"):
+        if status == "public" and is_live:
             return Status.PUBLIC
         if status in ["private", "groupShow", "p2p", "virtualPrivate", "p2pVoice"]:
             return Status.PRIVATE
-        if not info.get("isLive") or status in ["off", "idle"]:
+        if not is_live or status in ["off", "idle"]:
             return Status.OFFLINE
 
-        self.logger.warning(
-            f"Unknown status: {status} "
-            f"isLive={info.get('isLive')} "
-            f"isBadStream={info.get('isBadStream')}"
-        )
+        self.logger.warning(f"Unknown status: {status}")
         return Status.UNKNOWN
 
     def isMobile(self):
         return self.isMobileBroadcast
 
-    def getStreamName(self) -> str:
-        """
-        Return the current streamName for this model.
-        Handles both legacy API (cam.streamName) and new broadcasts API (streamName).
-        Raises KeyError if not found.
-        """
-        if not self.lastInfo:
-            raise KeyError("lastInfo is empty, call getStatus() first")
-
-        # New API
-        if "streamName" in self.lastInfo:
-            return self.lastInfo["streamName"]
-
-        # Old API fallback
-        cam = self.lastInfo.get("cam")
-        if isinstance(cam, dict) and "streamName" in cam:
-            return cam["streamName"]
-
-        raise KeyError(f"No streamName in lastInfo: keys={list(self.lastInfo.keys())}")
+    def getPlaylistVariants(self, url):
+        url = "https://edge-hls.{host}/hls/{id}{vr}/master/{id}{vr}{auto}.m3u8".format(
+            host='doppiocdn.com',
+            id=self.getStreamName(),
+            vr='_vr' if self.vr else '',
+            auto='_auto' if not self.vr else ''
+        )
+        result = requests.get(url, headers=self.headers, cookies=self.cookies)
+        m3u8_doc = result.content.decode("utf-8")
+        psch, pkey = StripChat._getMouflonFromM3U(m3u8_doc)
+        variants = super().getPlaylistVariants(m3u_data=m3u8_doc)
+        return [
+            variant | {
+                'url': f'{variant["url"]}{"&" if "?" in variant["url"] else "?"}psch={psch}&pkey={pkey}'
+            }
+            for variant in variants
+        ]
 
 
 Bot.loaded_sites.add(StripChat)
