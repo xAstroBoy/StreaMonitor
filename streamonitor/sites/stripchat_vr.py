@@ -25,13 +25,13 @@ class StripChatVR(StripChat):
         if not VR_FORMAT_SUFFIX:
             return ''
 
-        vr_cam_settings = self.lastInfo['broadcastSettings']['vrCameraSettings']
-        if vr_cam_settings is not None:
-            vr_packing = vr_cam_settings["stereoPacking"]
-            vr_frame_format = self.vr_frame_format_map[vr_cam_settings["frameFormat"]]
-            vr_angle = vr_cam_settings["horizontalAngle"]
-            vr_suffix = f'_{vr_packing}_{vr_frame_format}{vr_angle}'
-            return vr_suffix
+        bs = self.lastInfo.get('broadcastSettings') or {}
+        vr_cam_settings = bs.get('vrCameraSettings')
+        if isinstance(vr_cam_settings, dict):
+            vr_packing = vr_cam_settings.get("stereoPacking", "M")
+            vr_frame_format = self.vr_frame_format_map.get(vr_cam_settings.get("frameFormat"), "X")
+            vr_angle = vr_cam_settings.get("horizontalAngle", 0)
+            return f'_{vr_packing}_{vr_frame_format}{vr_angle}'
         return ''
 
     def getWebsiteURL(self):
@@ -40,11 +40,21 @@ class StripChatVR(StripChat):
     def getStatus(self):
         status = super(StripChatVR, self).getStatus()
         if status == Status.PUBLIC:
-            if self.lastInfo['model']['isVr'] and type(self.lastInfo['broadcastSettings']['vrCameraSettings']) is dict:
+            # Check VR flag across APIs
+            model = self.lastInfo.get("model", {})
+            is_vr_model = isinstance(model, dict) and bool(model.get("isVr"))
+            is_vr_direct = bool(self.lastInfo.get("isVr"))
+
+            bs = self.lastInfo.get("broadcastSettings") or {}
+            has_vr_settings = isinstance(bs.get("vrCameraSettings"), dict)
+
+            if (is_vr_model or is_vr_direct) and has_vr_settings:
                 return Status.PUBLIC
             return Status.OFFLINE
         return status
+
     def isMobile(self):
         return False
+
 
 Bot.loaded_sites.add(StripChatVR)
