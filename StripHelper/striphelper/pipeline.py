@@ -51,33 +51,26 @@ def detect_ffmpeg_encoders() -> dict[str, bool]:
     have: dict[str, bool] = {}
 
     def has(token: str) -> bool:
-        # lines look like: " DEV.LS hevc_nvenc ..."
         return bool(re.search(rf"^\S+\s+{re.escape(token)}\b", text, re.MULTILINE))
 
-    # NVIDIA NVENC
     have["h264_nvenc"] = has("h264_nvenc")
     have["hevc_nvenc"] = has("hevc_nvenc")
     have["av1_nvenc"]  = has("av1_nvenc")
-    # Intel Quick Sync
     have["h264_qsv"]   = has("h264_qsv")
     have["hevc_qsv"]   = has("hevc_qsv")
     have["av1_qsv"]    = has("av1_qsv")
-    # AMD AMF
     have["h264_amf"]   = has("h264_amf")
     have["hevc_amf"]   = has("hevc_amf")
     have["av1_amf"]    = has("av1_amf")
-    # CPU fallbacks
     have["libx264"]    = has("libx264")
     have["libx265"]    = has("libx265")
 
-    # Audio: AAC via Media Foundation (Windows) can be a tad faster
     _AUDIO_AAC_MF_AVAILABLE = has("aac_mf")
 
     _ENCODER_CACHE = have
     return have
 
 def _aac_encoder_name() -> str:
-    # prefer aac_mf if available, else builtin aac
     global _AUDIO_AAC_MF_AVAILABLE
     if _AUDIO_AAC_MF_AVAILABLE is None:
         detect_ffmpeg_encoders()
@@ -90,7 +83,6 @@ def encoder_argsets_ordered_fast() -> list[tuple[list[str], str]]:
     have = detect_ffmpeg_encoders()
     out: list[tuple[list[str], str]] = []
 
-    # NVIDIA (fastest generally). Use p5 (p4 is even faster; p7 is slowest).
     if have["hevc_nvenc"]:
         out.append((
             ["-c:v","hevc_nvenc", "-preset","p5", "-rc","vbr", "-cq","19", "-bf","0"],
@@ -107,7 +99,6 @@ def encoder_argsets_ordered_fast() -> list[tuple[list[str], str]]:
             "av1_nvenc_p5_cq23"
         ))
 
-    # Intel QSV
     if have["hevc_qsv"]:
         out.append((
             ["-c:v","hevc_qsv", "-global_quality","21", "-look_ahead","0"],
@@ -124,7 +115,6 @@ def encoder_argsets_ordered_fast() -> list[tuple[list[str], str]]:
             "av1_qsv_gq27"
         ))
 
-    # AMD AMF
     if have["hevc_amf"]:
         out.append((
             ["-c:v","hevc_amf", "-quality","speed", "-usage","transcoding"],
@@ -141,7 +131,6 @@ def encoder_argsets_ordered_fast() -> list[tuple[list[str], str]]:
             "av1_amf_speed"
         ))
 
-    # CPU fallbacks last
     if have["libx264"]:
         out.append((
             ["-c:v","libx264", "-preset","veryfast", "-crf","20", "-tune","fastdecode"],
@@ -197,14 +186,12 @@ def make_symlink(folder: Path, cfg: dict):
         if not src.exists():
             return
 
-        # ---- find model root (first parent that has [...] in name) ----
         model_root = folder
         for q in (folder, *folder.parents):
             if "[" in q.name and "]" in q.name:
                 model_root = q
                 break
 
-        # ---- helpers from your old script ----
         def _norm_tokens(xlist):
             return [t.lower() for t in (xlist or [])]
 
@@ -220,11 +207,9 @@ def make_symlink(folder: Path, cfg: dict):
 
         def clean(name: str) -> str:
             out = name
-            # strip VR/Desktop tokens
             for t in (cfg.get("VR", []) or []) + (cfg.get("Desktop", []) or []):
                 if t:
                     out = out.replace(t, "").strip()
-            # normalize aliases
             for canonical, als in aliases.items():
                 for a in (als or []):
                     out = out.replace(a, canonical)
@@ -245,27 +230,24 @@ def make_symlink(folder: Path, cfg: dict):
         dst_dir.mkdir(parents=True, exist_ok=True)
 
         site = getsite(model_root.name)
-        base = src.name  # "0.mkv"
+        base = src.name
         attempt = 0
 
         while True:
             dst = dst_dir / base
             if not dst.exists():
-                # try symlink first
                 try:
                     os.symlink(src, dst)
                     return
                 except (FileExistsError, FileNotFoundError):
-                    return  # someone else raced us; it exists now
+                    return
                 except OSError:
-                    # Windows symlink fallback: hard copy
                     try:
                         shutil.copy2(src, dst)
                         return
                     except Exception:
                         pass
 
-            # collision → try "0_[site].mkv", then "0_[site]_2.mkv", ...
             attempt += 1
             site_tag = f"_[{site}]" if site else "_DUP"
             if attempt == 1:
@@ -290,13 +272,6 @@ def ts_streamcopy_postprocess(
     note_cb: Note | None,
     progress_cb: Prog | None = None,
 ):
-    """
-    For raw .TS parts:
-      - rebuild timestamps from 0
-      - ignore/discard corrupt frames
-      - keep streams as copy
-      - REPORT BYTE PROGRESS to GUI
-    """
     note_cb and note_cb(f"ts-postprocess {src_ts.name} → {out_mkv.name}")
 
     try:
@@ -336,10 +311,6 @@ def mkv_streamcopy_postprocess(
     note_cb: Note | None,
     progress_cb: Prog | None = None,
 ):
-    """
-    For a merged temp MKV: force a second pass of streamcopy with genpts & reset.
-    Also REPORT BYTE PROGRESS to GUI.
-    """
     note_cb and note_cb("merge postprocess streamcopy")
 
     try:
@@ -430,7 +401,6 @@ def run_passes_with_validate(
         src_size = 0
 
     def _prog(out_sec: float, written: int, target_bytes: int):
-        # Keep GUI fed, even if ffmpeg progress is sparse
         if progress_cb:
             tgt = target_bytes or src_size or 1
             pct = 100.0 * min(max(written, 0), tgt) / float(tgt)
@@ -445,7 +415,6 @@ def run_passes_with_validate(
         except WorkerFail:
             pass
 
-        # IMPORTANT: for TS inputs, ignore size in validation (duration is king)
         ok, msg, met = validate_against_source(
             folder, src, dst,
             is_ts_to_mux=is_ts,
@@ -465,7 +434,6 @@ def run_passes_with_validate(
                  f"(≤ {human_secs(met.get('tail_allowed',0.0))})" + (f" | {add}" if add else ""))
             )
 
-        # If validator still says not ok but duration is fine for TS, accept.
         if not ok and is_ts and (last_metrics.get("dur_ok") or 0):
             if metric_cb:
                 metric_cb(
@@ -481,7 +449,6 @@ def run_passes_with_validate(
             note_cb and note_cb(f"{stage_prefix} pass{i} OK" + (f" [{met.get('accept_reason')}]" if met and met.get('accept_reason') else ""))
             return True, met
 
-        # cleanup before next attempt
         try:
             (folder / dst.name).unlink(missing_ok=True)
         except Exception:
@@ -562,7 +529,6 @@ def salvage_reencode(
             except Exception: pass
             errs.append(f"[{enc_label}] ffmpeg: {ex.message[:500]}")
 
-    # FINAL SAFETY NET
     try:
         note_cb and note_cb(f"{stage_prefix} fallback reencode [libx264_safe]")
         cmd=[FFMPEG,"-y","-i",src.name,
@@ -692,7 +658,7 @@ def find_work_folders(root: Path) -> list[Path]:
         try:
             has_tmp = any(d.glob("*.tmp.ts")) or any(d.glob("*.tmp.mp4"))
             has_media = any(p.is_file() and p.suffix.lower() in MEDIA_EXTS and p.name != "0.mkv" for p in d.iterdir())
-            has_zero  = (d / "0.mkv").exists()  # include folders with existing 0.mkv so we still symlink
+            has_zero  = (d / "0.mkv").exists()
             return has_tmp or has_media or has_zero
         except Exception:
             return False
@@ -715,11 +681,6 @@ def find_work_folders(root: Path) -> list[Path]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _should_salvage_from_metrics(met: dict | None, is_ts: bool) -> bool:
-    """
-    Decide to salvage based on validator metrics even if SALVAGE_TRIG_RATIO
-    wouldn't normally trigger. If tail overshoots the allowed tolerance,
-    we salvage — this exactly fixes cases like Δtail ~ 283s vs allow 240s.
-    """
     if not met:
         return False
     tail_delta   = float(met.get("tail_delta", 0.0) or 0.0)
@@ -729,17 +690,14 @@ def _should_salvage_from_metrics(met: dict | None, is_ts: bool) -> bool:
 def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False, note_cb: Note|None=None, metric_cb: Metric|None=None):
     purge_temp(folder)
 
-    # Convert *.tmp.* leftovers first
     for patt in ("*.tmp.ts","*.tmp.mp4"):
         for t in folder.glob(patt):
             note_cb and note_cb(f"convert {t.name}")
             clean = t.with_name(t.stem[:-4] + ".mkv")
-            # For *.tmp.ts prefer the same TS streamcopy as normal TS handling
             if t.suffix.lower() == ".ts":
                 ts_streamcopy_postprocess(folder, t, clean, note_cb, progress_cb=gui_cb)
-                ok, _msg, met = validate_against_source(folder, t, clean, True, ignore_size=True)  # ← TS: ignore size
+                ok, _msg, met = validate_against_source(folder, t, clean, True, ignore_size=True)
                 if not ok:
-                    # fall back to remux ladder then salvage
                     ok2, met2 = run_passes_with_validate(folder, t, clean, True, note_cb, metric_cb, stage_prefix="convert", progress_cb=gui_cb)
                     if not ok2:
                         src_dur = (met2 or {}).get("src_dur", ffprobe_best_duration(t, folder))
@@ -784,7 +742,6 @@ def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False,
 
     write_diagnostics(folder, good, merged_mkv.exists())
 
-    # Nothing new: still produce symlink if requested and 0.mkv exists
     if not merged_mkv.exists() and not good:
         note_cb and note_cb("nothing to do")
         if gui_cb: gui_cb(100.0, 0.0, 0, 0)
@@ -798,16 +755,13 @@ def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False,
             gui_cb(100.0, 0.0, sz, sz)
         return
 
-    # Single-file fast path
     if not merged_mkv.exists() and len(good)==1:
         only=good[0]
         if only.suffix.lower()==".ts":
-            # 1) TS postprocess streamcopy first
             rem = only.with_suffix(".remux.mkv")
             ts_streamcopy_postprocess(folder, only, rem, note_cb, progress_cb=gui_cb)
-            ok, _msg, met = validate_against_source(folder, only, rem, True, ignore_size=True)  # ← TS: ignore size
+            ok, _msg, met = validate_against_source(folder, only, rem, True, ignore_size=True)
             if not ok:
-                # 2) fall back to ladder, then salvage
                 ok2, met2 = run_passes_with_validate(folder, only, rem, True, note_cb, metric_cb, stage_prefix="remux", progress_cb=gui_cb)
                 if not ok2:
                     src_dur = (met2 or {}).get("src_dur", ffprobe_best_duration(only, folder))
@@ -839,7 +793,6 @@ def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False,
             if mk_links: make_symlink(folder, cfg or {})
             return
 
-    # Multi-part path
     note_cb and note_cb(f"remux {sum(1 for x in good if x.suffix.lower()=='.ts')} ts parts → MKV")
     parts=[]
     for p in good:
@@ -847,12 +800,9 @@ def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False,
             parts.append(p); continue
 
         rem=p.with_suffix(".remux.mkv")
-
-        # Try the TS streamcopy postprocess first
         ts_streamcopy_postprocess(folder, p, rem, note_cb, progress_cb=gui_cb)
-        ok, _msg, met = validate_against_source(folder, p, rem, True, ignore_size=True)  # ← TS: ignore size
+        ok, _msg, met = validate_against_source(folder, p, rem, True, ignore_size=True)
         if not ok:
-            # fallback to ladder → salvage
             ok2, met2 = run_passes_with_validate(folder, p, rem, True, note_cb, metric_cb, stage_prefix="remux", progress_cb=gui_cb)
             if not ok2:
                 src_dur = (met2 or {}).get("src_dur", ffprobe_best_duration(p, folder))
@@ -889,26 +839,26 @@ def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False,
         elapsed=time.time()-start; speed = sec/elapsed if elapsed>0 else 0; eta = (total_dur-sec)/speed if speed>0 else 0
         gui_cb(pct, eta, written_holder["b"], tgt)
 
-    # Try safest path first: concat demuxer copy
+    used_files_for_concat = []
     try:
         concat_copy_mkv(folder, concat_txt, progress_cb=prog, target_bytes=target_bytes, note_cb=note_cb)
+        used_files_for_concat = parts.copy()
     except WorkerFail:
-        # Normalize parts (audio presence/format) then retry copy concat
         note_cb and note_cb("concat copy failed → normalize parts")
         norm = normalize_parts(parts, folder, note_cb)
         concat_txt2 = write_concat(folder, norm, include_zero=merged_mkv.exists(), fname="concat_list_norm.txt")
         try:
             concat_copy_mkv(folder, concat_txt2, progress_cb=prog, target_bytes=target_bytes, note_cb=note_cb, stage_label="concat copy (normalized) -> MKV")
+            used_files_for_concat = norm.copy() + parts.copy()
         except WorkerFail:
-            # full re-encode concat with hard PTS rebuild
             concat_reencode_filter(norm, folder, note_cb=note_cb, progress_cb=prog)
+            used_files_for_concat = norm.copy() + parts.copy()
 
     tmp = folder/"0~merge.mkv"
     note_cb and note_cb("validate merged output")
     ok,msg,met = validate_merge(folder, tmp, target_bytes, total_dur, is_ts_path=True)
 
     if not ok:
-        # Try merge postprocess streamcopy then re-validate
         tmp2 = folder/".merge2.mkv"
         try:
             mkv_streamcopy_postprocess(folder, tmp, tmp2, note_cb, progress_cb=gui_cb)
@@ -922,27 +872,12 @@ def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False,
                     raise WorkerFail(folder,"merge-validate",msg2 or msg3 or msg)
             os.replace(tmp2, tmp)
         except WorkerFail:
-            pass
+            for junk in ("0~merge.mkv", ".merge2.mkv", "concat_list.txt", "concat_list_norm.txt"):
+                (folder/junk).unlink(missing_ok=True)
+            raise
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Commit with hard cleanup policy:
-    # ─────────────────────────────────────────────────────────────────────────
     note_cb and note_cb("commit merged MKV" + (f" [{met.get('accept_reason')}]" if met and met.get('accept_reason') else ""))
 
-    # Pre-commit sweep: keep tmp only
-    protected = { (folder/"0~merge.mkv").name }
-    for entry in list(folder.iterdir()):
-        try:
-            if entry.name in protected:
-                continue
-            if entry.is_file():
-                entry.unlink(missing_ok=True)
-            else:
-                shutil.rmtree(entry, ignore_errors=True)
-        except Exception:
-            pass
-
-    # Rename tmp → 0.mkv
     if merged_mkv.exists():
         try:
             merged_mkv.unlink(missing_ok=True)
@@ -950,15 +885,15 @@ def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False,
             pass
     os.replace(tmp, merged_mkv)
 
-    # Final sweep: keep ONLY 0.mkv
-    for entry in list(folder.iterdir()):
-        if entry.name == "0.mkv":
-            continue
+    for junk in ("concat_list.txt", "concat_list_norm.txt", ".merge2.mkv"):
+        (folder/junk).unlink(missing_ok=True)
+    for p in folder.glob("*.norm.mkv"):
+        p.unlink(missing_ok=True)
+
+    for f in used_files_for_concat:
         try:
-            if entry.is_file():
-                entry.unlink(missing_ok=True)
-            else:
-                shutil.rmtree(entry, ignore_errors=True)
+            if f.exists() and f.is_file() and f.name != "0.mkv":
+                f.unlink(missing_ok=True)
         except Exception:
             pass
 
