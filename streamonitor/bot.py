@@ -17,6 +17,9 @@ from streamonitor.downloaders.ffmpeg import getVideoFfmpeg
 from streamonitor.models import VideoData
 from threading import Event, Thread
 from streamonitor.utils.cf_session import CFSessionManager
+from urllib.parse import urljoin
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ADDED
 import subprocess  # only used if you later want to enable ffprobe checks (currently not forced)
@@ -371,10 +374,27 @@ class Bot(Thread):
             variant_m3u8 = m3u_data
         elif isinstance(m3u_data, str):
             variant_m3u8 = m3u8.loads(m3u_data)
-        elif not m3u_data or url:
-            result = requests.get(url, headers=self.headers, cookies=self.cookies)
-            m3u8_doc = result.content.decode("utf-8")
+
+        elif not m3u_data and url:
+            # Use curl_cffi with spoofing
+            result = requests.get(
+                url,
+                headers=self.headers,   # keep your existing headers
+                cookies=self.cookies,
+                impersonate="chrome"    # can also try "chrome110", "firefox", "safari15_3"
+            )
+
+            self.logger.info(f"[getPlaylistVariants] HTTP {result.status_code} from {url}")
+            preview = result.text[:200].replace("\n", " ")
+
+            m3u8_doc = result.text
+            if not m3u8_doc.strip().startswith("#EXTM3U"):
+                self.logger.error("[getPlaylistVariants] Invalid M3U8 data, does not start with #EXTM3U: " + preview)
+                return None
+
             variant_m3u8 = m3u8.loads(m3u8_doc)
+
+
         else:
             return sources
 
@@ -393,22 +413,25 @@ class Bot(Thread):
             return None
         return sources  # [(url, (width, height)),...]
 
+
     def getWantedResolutionPlaylist(self, url):
         try:
             sources = self.getPlaylistVariants(url)
-            if sources is None:
-                return None
-            if len(sources) == 0:
+            if not sources:
                 self.logger.error("No available sources")
                 return None
+
+            # calculate resolution diff
             for source in sources:
                 width, height = source['resolution']
                 if width < height:
                     source['resolution_diff'] = width - WANTED_RESOLUTION
                 else:
                     source['resolution_diff'] = height - WANTED_RESOLUTION
+
             sources.sort(key=lambda a: abs(a['resolution_diff']))
             selected_source = None
+
             if WANTED_RESOLUTION_PREFERENCE == 'exact':
                 if sources[0]['resolution_diff'] == 0:
                     selected_source = sources[0]
@@ -427,23 +450,26 @@ class Bot(Thread):
             else:
                 self.logger.error('Invalid value for WANTED_RESOLUTION_PREFERENCE')
                 return None
-            if selected_source is None:
+
+            if not selected_source:
                 self.logger.error("Couldn't select a resolution")
                 return None
-            if selected_source['resolution'][1] != 0:
+
+            w, h = selected_source['resolution']
+            if h != 0:
                 frame_rate = ''
-                if selected_source['frame_rate'] is not None and selected_source['frame_rate'] != 0:
+                if selected_source.get('frame_rate'):
                     frame_rate = f" {selected_source['frame_rate']}fps"
-                self.logger.info(f"Selected {selected_source['resolution'][0]}x{selected_source['resolution'][1]}{frame_rate} resolution")
-            selected_source_url = selected_source['url']
-            if selected_source_url.startswith("https://"):
-                return selected_source_url
-            else:
-                return '/'.join(url.split('.m3u8')[0].split('/')[:-1]) + '/' + selected_source_url
+                self.logger.info(f"Selected {w}x{h}{frame_rate} resolution")
+
+            # FIX: always resolve relative against the master URL
+            return urljoin(url, selected_source['url'])
+
         except BaseException as e:
             self.logger.error("Can't get playlist, got some error: " + str(e))
             traceback.print_tb(e.__traceback__)
             return None
+
 
     def getVideoUrl(self):
         pass
