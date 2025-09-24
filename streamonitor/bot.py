@@ -384,12 +384,10 @@ class Bot(Thread):
                 impersonate="chrome"    # can also try "chrome110", "firefox", "safari15_3"
             )
 
-            self.logger.info(f"[getPlaylistVariants] HTTP {result.status_code} from {url}")
-            preview = result.text[:200].replace("\n", " ")
 
             m3u8_doc = result.text
             if not m3u8_doc.strip().startswith("#EXTM3U"):
-                self.logger.error("[getPlaylistVariants] Invalid M3U8 data, does not start with #EXTM3U: " + preview)
+                self.logger.error("[getPlaylistVariants] Invalid M3U8 data, Response: " + result.text[:200])
                 return None
 
             variant_m3u8 = m3u8.loads(m3u8_doc)
