@@ -6,15 +6,16 @@ from streamonitor.bot import Bot
 # stdlib requests only (stable vs curl_cffi inside threads)
 import requests
 
+TEMP_DIR_NAME = "M3U8_TMP"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Temp root resolver (NO HARDCODED PATHS)
 # Priority:
-#   1) ENV SC_TMP
+#   1) ENV M3U8_TMP
 #   2) parameters.HLS_TMP_DIR (optional)
-#   3) <repo_root>/SC_TMP
-#   4) <downloads_root>/SC_TMP  (same drive as downloads)
-#   5) CWD/SC_TMP
+#   3) <repo_root>/M3U8_TMP
+#   4) <downloads_root>/M3U8_TMP  (same drive as downloads)
+#   5) CWD/M3U8_TMP
 # ─────────────────────────────────────────────────────────────────────────────
 
 try:
@@ -23,10 +24,6 @@ except Exception:
     _HLS_TMP_DIR = None
 
 def _get_tmp_root(self: Bot) -> str:
-    env = os.getenv("SC_TMP")
-    if env:
-        os.makedirs(env, exist_ok=True)
-        return env
 
     if _HLS_TMP_DIR:
         os.makedirs(_HLS_TMP_DIR, exist_ok=True)
@@ -37,7 +34,7 @@ def _get_tmp_root(self: Bot) -> str:
         here = os.path.abspath(__file__)
         repo_root = os.path.abspath(os.path.join(here, "..", ".."))  # …/streamonitor/
         repo_root = os.path.abspath(os.path.join(repo_root, ".."))   # repo root
-        candidate = os.path.join(repo_root, "SC_TMP")
+        candidate = os.path.join(repo_root, TEMP_DIR_NAME)
         os.makedirs(candidate, exist_ok=True)
         return candidate
     except Exception:
@@ -46,14 +43,14 @@ def _get_tmp_root(self: Bot) -> str:
     # near downloads root
     try:
         downloads_parent = os.path.abspath(os.path.join(self.outputFolder, ".."))
-        candidate = os.path.join(downloads_parent, "SC_TMP")
+        candidate = os.path.join(downloads_parent, TEMP_DIR_NAME)
         os.makedirs(candidate, exist_ok=True)
         return candidate
     except Exception:
         pass
 
     # fallback: cwd
-    candidate = os.path.join(os.getcwd(), "SC_TMP")
+    candidate = os.path.join(os.getcwd(), TEMP_DIR_NAME)
     os.makedirs(candidate, exist_ok=True)
     return candidate
 
@@ -291,9 +288,8 @@ def getVideoNativeHLS(self: Bot, url, filename, m3u_processor=None):
     if callable(m3u_processor):
         text1 = m3u_processor(text1)
 
-    # Start rolling writer under SC_TMP/<SITE>_<USER>
     tmp_root = _get_tmp_root(self)
-    model_key = f"{getattr(self,'siteslug','SITE')}_{self.username}"
+    model_key = f"[{getattr(self,'siteslug','SITE')}]{self.username}"
     writer = _RollingM3UWriter(
         media_url=url, sess=sess, headers=headers, m3u_processor=m3u_processor,
         tmp_root=tmp_root, model_key=model_key, poll_sec=1.5
