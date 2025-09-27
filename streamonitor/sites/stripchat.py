@@ -146,76 +146,203 @@ class StripChat(Bot):
         chars += ''.join(chr(i) for i in range(ord('0'), ord('9') + 1))
         return ''.join(random.choice(chars) for _ in range(16))
 
-    # ────────────────────────────────────────────────
-    # Cross-API normalizers
-    # ────────────────────────────────────────────────
     @staticmethod
     def normalizeInfo(raw: dict) -> dict:
-        """Normalize JSON so lastInfo is always a dict."""
+        """
+        Normalize JSON so lastInfo is always a dict.
+        Keep top-level where possible; flatten only obvious wrappers like `item` or single-element lists.
+        """
         if not raw:
             return {}
+        # If it's a list, use first element (common wrapping)
         if isinstance(raw, list):
             return raw[0] if raw else {}
-        if "item" in raw and isinstance(raw["item"], dict):
+        # If it's a dict with 'item' containing the real object
+        if isinstance(raw, dict) and "item" in raw and isinstance(raw["item"], dict):
             return raw["item"]
+        # If it's a dict with a single top wrapper like {"data": {...}} try common keys but avoid dropping cam/user
+        if isinstance(raw, dict) and len(raw) == 1:
+            sole_key = next(iter(raw))
+            if sole_key in ("data", "result", "response") and isinstance(raw[sole_key], dict):
+                return raw[sole_key]
+        # Otherwise return as-is (we'll handle nested shapes in getters)
         return raw
 
+    def _get_by_path(self, data: dict, path: list):
+        """
+        Safely get nested value by path list from dict-like structures.
+        Returns None if any step is missing or type mismatch.
+        """
+        cur = data
+        for p in path:
+            if isinstance(cur, dict) and p in cur:
+                cur = cur[p]
+            else:
+                return None
+        return cur
+
+    def _recursive_find(self, data, key):
+        """
+        Depth-first search for first occurrence of `key` in nested dict/list objects.
+        Returns the value if found, otherwise None.
+        """
+        if isinstance(data, dict):
+            if key in data:
+                return data[key]
+            for v in data.values():
+                found = self._recursive_find(v, key)
+                if found is not None:
+                    return found
+        elif isinstance(data, list):
+            for item in data:
+                found = self._recursive_find(item, key)
+                if found is not None:
+                    return found
+        return None
+
+    def _first_in_paths(self, paths: list):
+        """
+        Try a list of paths (each path is a list of keys). Return first non-None value.
+        """
+        for p in paths:
+            val = self._get_by_path(self.lastInfo, p)
+            if val is not None:
+                return val
+        return None
+
     def getStreamName(self) -> str:
+        """
+        Robust streamName detector: checks multiple common locations and finally
+        performs a recursive search for the key if not found.
+        Raises KeyError if nothing found.
+        """
         if not self.lastInfo:
             raise KeyError("lastInfo is empty, call getStatus() first")
-        if "streamName" in self.lastInfo:
-            return self.lastInfo["streamName"]
-        cam = self.lastInfo.get("cam")
-        if isinstance(cam, dict) and "streamName" in cam:
-            return cam["streamName"]
+
+        # Common paths to check in order
+        paths = [
+            ["streamName"],
+            ["cam", "streamName"],
+            ["user", "streamName"],
+            ["user", "user", "streamName"],
+            ["model", "streamName"],
+            ["user", "user", "userStreamName"],
+            ["cam", "userStreamName"],
+        ]
+        val = self._first_in_paths(paths)
+        if val:
+            return str(val)
+
+        # last resort: recursive find
+        val = self._recursive_find(self.lastInfo, "streamName")
+        if val:
+            return str(val)
+
         raise KeyError(f"No streamName in lastInfo: keys={list(self.lastInfo.keys())}")
 
     def getStatusField(self):
+        """
+        Robust status detector. Tries known paths and falls back to recursive search.
+        Returns the raw status value or None.
+        """
         if not self.lastInfo:
             return None
-        if "status" in self.lastInfo:
-            return self.lastInfo["status"]
-        cam = self.lastInfo.get("cam")
-        if isinstance(cam, dict) and "streamStatus" in cam:
-            return cam["streamStatus"]
-        model = self.lastInfo.get("model")
-        if isinstance(model, dict) and "status" in model:
-            return model["status"]
+
+        # explicit candidate paths (ordered)
+        paths = [
+            ["status"],
+            ["cam", "streamStatus"],
+            ["cam", "status"],
+            ["model", "status"],
+            ["user", "status"],
+            ["user", "user", "status"],
+            ["user", "user", "state"],
+            ["user", "user", "broadcastStatus"],
+        ]
+        status = self._first_in_paths(paths)
+        if status is not None:
+            return status
+
+        # recursive fallback — but prefer strings that match expected status tokens
+        found = self._recursive_find(self.lastInfo, "status")
+        if isinstance(found, str):
+            return found
         return None
 
     def getIsLive(self) -> bool:
+        """
+        Robust isLive detector. Checks multiple locations and returns boolean.
+        """
         if not self.lastInfo:
             return False
-        if "isLive" in self.lastInfo:
-            return bool(self.lastInfo["isLive"])
-        cam = self.lastInfo.get("cam")
-        if isinstance(cam, dict) and "isCamActive" in cam:
-            return bool(cam["isCamActive"])
+
+        # Try direct root flag
+        val = self._get_by_path(self.lastInfo, ["isLive"])
+        if val is not None:
+            return bool(val)
+
+        # Common locations
+        paths = [
+            ["cam", "isCamActive"],
+            ["cam", "isLive"],
+            ["model", "isLive"],
+            ["user", "isLive"],
+            ["user", "user", "isLive"],
+            ["user", "user", "isCamActive"],
+            ["broadcastSettings", "isLive"],
+            ["cam", "broadcastSettings", "isCamActive"],
+            ["cam", "broadcastSettings", "isLive"],
+        ]
+        val = self._first_in_paths(paths)
+        if val is not None:
+            return bool(val)
+
+        # recursive fallback for any key named isLive or isCamActive
+        for k in ("isLive", "isCamActive"):
+            found = self._recursive_find(self.lastInfo, k)
+            if found is not None:
+                return bool(found)
+
         return False
 
     def getIsMobile(self) -> bool:
+        """
+        Robust isMobile detector. Checks multiple locations and returns boolean.
+        """
         if not self.lastInfo:
             return False
-        if "isMobile" in self.lastInfo:
-            return bool(self.lastInfo["isMobile"])
-        model = self.lastInfo.get("model")
-        if isinstance(model, dict) and "isMobile" in model:
-            return bool(model["isMobile"])
-        bs = self.lastInfo.get("broadcastSettings")
-        if isinstance(bs, dict) and "isMobile" in bs:
-            return bool(bs["isMobile"])
-        cam = self.lastInfo.get("cam")
-        if isinstance(cam, dict):
-            bs2 = cam.get("broadcastSettings")
-            if isinstance(bs2, dict) and "isMobile" in bs2:
-                return bool(bs2["isMobile"])
+
+        # direct
+        val = self._get_by_path(self.lastInfo, ["isMobile"])
+        if val is not None:
+            return bool(val)
+
+        # common paths
+        paths = [
+            ["model", "isMobile"],
+            ["user", "isMobile"],
+            ["user", "user", "isMobile"],
+            ["broadcastSettings", "isMobile"],
+            ["cam", "broadcastSettings", "isMobile"],
+            ["cam", "isMobile"],
+            ["broadcastSettings", "isMobile"],
+        ]
+        val = self._first_in_paths(paths)
+        if val is not None:
+            return bool(val)
+
+        # recursive fallback
+        found = self._recursive_find(self.lastInfo, "isMobile")
+        if found is not None:
+            return bool(found)
+
         return False
 
     # ────────────────────────────────────────────────
     # Status + playlist
     # ────────────────────────────────────────────────
     def getStatus(self):
-        url = f'https://stripchat.com/api/front/v1/broadcasts/{self.username}?uniq={StripChat.uniq()}'
+        url = f'https://stripchat.com/api/front/v2/models/username/{self.username}/cam?uniq={StripChat.uniq()}',
         r = self.session.get(url, headers=self.headers)
 
         ct = (r.headers.get("content-type") or "").lower()
