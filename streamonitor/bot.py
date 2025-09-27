@@ -586,12 +586,10 @@ class Bot(Thread):
                     except Exception as e:
                         self.logger.warning(f"Failed to remove zero-byte final '{candidate}': {e}")
                 else:
-                    self.logger.info(f"{self.username}: Non-zero final present {candidate}, skipping N={n} to avoid append")
                     blocked = True
             # If any sidecar blocks, skip
             reason = block_reason(n)
             if reason is not None:
-                self.logger.info(f"{self.username}: {reason}, skipping N={n} to avoid append")
                 blocked = True
             if not blocked:
                 # Double check: if file was deleted above, recheck existence

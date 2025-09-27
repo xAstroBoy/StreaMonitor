@@ -269,11 +269,26 @@ class CFSessionManager:
             return self._hosts[key]
 
     async def _request_async(self, method: str, url: str, **kwargs):
-        parsed = urlparse(url)
+        # Debug: Check what we're actually getting
+
+        
+        # Additional safety check
+        if not isinstance(url, str):
+            error_msg = f"URL must be a string, got {type(url)}: {repr(url)}"
+            if self.logger:
+                self.logger.error(f"{self.bot_id} {error_msg}")
+            raise TypeError(error_msg)
+        
+        try:
+            parsed = urlparse(url)
+        except Exception as e:
+            print(f"DEBUG: urlparse failed with: {e}")
+            print(f"DEBUG: url that failed: {repr(url)}")
+            raise
+            
         domain = parsed.hostname or "default"
         bucket = kwargs.pop("bucket", None) or _infer_bucket(domain, parsed.path or "/")
         hs = await self._ensure_host(domain, bucket)
-
         if self.logger and DEBUG:
             self.logger.debug(f"{self.bot_id} [{domain}/{bucket}] {method} {url}")
 
@@ -321,23 +336,54 @@ class CFSessionManager:
         return r
 
     # --- sync wrappers for Bot ---
-    def request(self, method: str, url: str, **kwargs):
+    def request(self, method: str, url_or_tuple, **kwargs):
+        if isinstance(url_or_tuple, tuple):
+            url = url_or_tuple[0]
+        else:
+            url = url_or_tuple
+        url = str(url)
         return _run(self._request_async(method, url, **kwargs))
 
-    def get(self, url: str, **kwargs):
+    def get(self, url_or_tuple, **kwargs):
+        if isinstance(url_or_tuple, tuple):
+            url = url_or_tuple[0]
+        else:
+            url = url_or_tuple
+        url = str(url)
         return self.request("GET", url, **kwargs)
 
-    def post(self, url: str, **kwargs):
+    def post(self, url_or_tuple, **kwargs):
+        if isinstance(url_or_tuple, tuple):
+            url = url_or_tuple[0]
+        else:
+            url = url_or_tuple
+        url = str(url)
         return self.request("POST", url, **kwargs)
 
     # --- async API if needed ---
-    async def arequest(self, method: str, url: str, **kwargs):
+    async def arequest(self, method: str, url_or_tuple, **kwargs):
+        if isinstance(url_or_tuple, tuple):
+            url = url_or_tuple[0]
+        else:
+            url = url_or_tuple
+        url = str(url)
         return await self._request_async(method, url, **kwargs)
 
-    async def aget(self, url: str, **kwargs):
+    async def aget(self, url_or_tuple, **kwargs):
+        if isinstance(url_or_tuple, tuple):
+            url = url_or_tuple[0]
+        else:
+            url = url_or_tuple
+        url = str(url)
         return await self._request_async("GET", url, **kwargs)
 
-    async def apost(self, url: str, **kwargs):
+    async def apost(self, url_or_tuple, **kwargs):
+        if isinstance(url_or_tuple, tuple):
+            url = url_or_tuple[0]
+        else:
+            url = url_or_tuple
+        url = str(url)
         return await self._request_async("POST", url, **kwargs)
+
 
 
