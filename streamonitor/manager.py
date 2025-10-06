@@ -117,6 +117,7 @@ class Manager(Thread):
 
 {colored("ℹ️ Other:", "yellow", attrs=["bold"])}
   {colored("help", "green")}                      - Show this help message
+  {colored("cls", "cyan")}                       - Clear console screen
   {colored("quit", "red")}                      - Exit the application
 
 {colored("💡 Notes:", "green", attrs=["bold"])}
@@ -127,6 +128,12 @@ class Manager(Thread):
   • {colored("VR streamers", "cyan", attrs=["bold", "underline"])} are specially highlighted! 🥽
 """
         return help_text.strip()
+
+    def do_cls(self) -> str:
+        """Clear the console screen."""
+        import os
+        os.system('cls' if os.name == 'nt' else 'clear')
+        return ""  # Return empty string to avoid extra output
 
     def do_add(self, streamer: Optional[Bot], username: str, site: str) -> str:
         """Add a new streamer to monitor. Use sc* to add both SC and SCVR."""
@@ -263,10 +270,9 @@ class Manager(Thread):
                 
                 for s in streamers_copy:
                     try:
-                        if not s.is_alive():
-                            s.start()
-                        s.restart()
-                        started_count += 1
+                        success = self._ensure_streamer_running(s)
+                        if success:
+                            started_count += 1
                     except Exception as e:
                         self.logger.error(f"Failed to start {s.username}: {e}")
                 
@@ -276,11 +282,12 @@ class Manager(Thread):
                 return "Streamer not found"
         else:
             try:
-                if not streamer.is_alive():
-                    streamer.start()
-                streamer.restart()
-                self.saveConfig()
-                return f"Started [{streamer.siteslug}] {streamer.username}"
+                success = self._ensure_streamer_running(streamer)
+                if success:
+                    self.saveConfig()
+                    return f"Started [{streamer.siteslug}] {streamer.username}"
+                else:
+                    return f"Failed to start [{streamer.siteslug}] {streamer.username}"
             except Exception as e:
                 self.logger.error(f"Failed to start streamer: {e}")
                 return f"Failed to start: {e}"
@@ -438,36 +445,26 @@ class Manager(Thread):
                 
                 # If public and downloadable, force restart to begin download
                 if new_status == Status.PUBLIC:
-                    if not streamer.running:
-                        streamer.start()
-                    streamer.restart()
+                    self._ensure_streamer_running(streamer)
                     return f"✅ Resynced and started download (PUBLIC)"
                 elif new_status == Status.PRIVATE:
-                    if not streamer.running:
-                        streamer.start()
-                    streamer.restart()
+                    self._ensure_streamer_running(streamer)
                     return f"🔒 Resynced - in private show"
                 elif new_status == Status.OFFLINE:
-                    if not streamer.running:
-                        streamer.start()
-                    streamer.restart()
+                    self._ensure_streamer_running(streamer)
                     return f"🟡 Resynced - model offline"
                 elif new_status == Status.DELETED:
                     return f"🗑️ Model account deleted - will be auto-removed"
                 elif new_status == Status.NOTEXIST:
                     return f"❌ Model does not exist - will be auto-removed"
                 else:
-                    if not streamer.running:
-                        streamer.start()
-                    streamer.restart()
+                    self._ensure_streamer_running(streamer)
                     return f"🔄 Resynced - status: {new_status.name}"
                     
             except Exception as status_error:
                 self.logger.error(f"Error getting status during resync for {streamer.username}: {status_error}")
                 # Still try to restart
-                if not streamer.running:
-                    streamer.start()
-                streamer.restart()
+                self._ensure_streamer_running(streamer)
                 return f"⚠️ Resynced with status error: {status_error}"
                 
         except Exception as e:
@@ -563,7 +560,7 @@ class Manager(Thread):
             
             if not os.path.exists(dest_folder):
                 shutil.move(source_folder, dest_folder)
-                os.makedirs(source_folder, exist_ok=True)
+                # Don't recreate folder - bot will make it when needed
             else:
                 for item in os.listdir(source_folder):
                     src_path = os.path.join(source_folder, item)
