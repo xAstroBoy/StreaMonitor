@@ -145,24 +145,6 @@ def encoder_argsets_ordered_fast() -> list[tuple[list[str], str]]:
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Diagnostics & temp
-# ─────────────────────────────────────────────────────────────────────────────
-
-def write_diagnostics(folder: Path, parts: list[Path], merged_exists: bool):
-    try:
-        rows=[]
-        for p in parts:
-            sig=probe_signature(p, folder); dur=ffprobe_best_duration(p, folder)
-            rows.append({"file":p.name, "sig":sig, "duration":dur, "size":p.stat().st_size})
-        if merged_exists:
-            m=folder/"0.mkv"
-            if m.exists():
-                rows.append({"file":"0.mkv (existing)", "sig":probe_signature(m, folder),
-                            "duration":ffprobe_best_duration(m, folder), "size":m.stat().st_size})
-        (folder/"diagnostics.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
-    except Exception:
-        pass
 
 
 def purge_temp(folder: Path):
@@ -740,7 +722,6 @@ def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False,
             note_cb and note_cb(f"drop unreadable {f.name}")
             f.unlink(missing_ok=True)
 
-    write_diagnostics(folder, good, merged_mkv.exists())
 
     if not merged_mkv.exists() and not good:
         note_cb and note_cb("nothing to do")
