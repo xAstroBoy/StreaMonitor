@@ -111,7 +111,6 @@ class Manager(Thread):
 
 {colored("🔧 Debugging:", "yellow", attrs=["bold"])}
   {colored("debug", "white", attrs=["bold"])}                     - Toggle debug logging on/off
-  {colored("enabledebug", "white")}               - Enable debug logging (legacy)
   {colored("cleanup", "red", attrs=["bold"])}                   - Kill StreamMonitor FFmpeg processes (safe)
   {colored("getjson", "magenta", attrs=["bold"])} <username> <site> - Debug: Print raw JSON response from model
   {colored("getjson", "magenta", attrs=["bold"])} <username> <site> {colored("edit", "cyan")} - Open JSON in editor
@@ -514,7 +513,7 @@ class Manager(Thread):
             result = self._move_streamer_files(streamer, unprocessed_dir)
             return f"[{streamer.siteslug}] {streamer.username}: {result}"
 
-    def f_move_streamer_files(self, streamer: Bot, unprocessed_dir: str) -> str:
+    def _move_streamer_files(self, streamer: Bot, unprocessed_dir: str) -> str:
         """Helper method to move files for a single streamer."""
         try:
             source_folder = streamer.outputFolder
@@ -792,20 +791,7 @@ class Manager(Thread):
         status = "enabled" if parameters.DEBUG else "disabled"
         return f"Debug logging {status}"
 
-    def do_enabledebug(self) -> str:
-        """Enable debug logging (legacy command)"""
-        import parameters
-        parameters.DEBUG = True
-        
-        import logging
-        
-        with self._streamers_lock:
-            for s in self.streamers:
-                if hasattr(s, 'logger'):
-                    s.logger.setLevel(logging.DEBUG)
-        
-        self.logger.get_logger().setLevel(logging.DEBUG)
-        return "Debug logging enabled"
+
 
     def do_cleanup(self) -> str:
         """

@@ -371,7 +371,7 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
     text0, code0 = fetch_text(url)
     if text0 is None:
         self.logger.warning(f"Master fetch failed ({code0}), trying direct FFmpeg")
-        ok = _ffmpeg_dump_to_ts(self, url, headers, final_path, ffmpeg_proc_ref)
+        ok = _ffmpeg_dump_to_ts(self, url, headers, output_path, ffmpeg_proc_ref)
         try:
             sess.close()
         except Exception:
@@ -395,7 +395,7 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
     text1, code1 = fetch_text(url)
     if text1 is None:
         self.logger.warning(f"Media fetch failed ({code1}), trying direct FFmpeg")
-        ok = _ffmpeg_dump_to_ts(self, url, headers, final_path, ffmpeg_proc_ref)
+        ok = _ffmpeg_dump_to_ts(self, url, headers, output_path, ffmpeg_proc_ref)
         try:
             sess.close()
         except Exception:
@@ -443,20 +443,20 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
 
     # Validate output (.tmp.ts file - no rename)
     try:
-        if not os.path.exists(final_path):
+        if not os.path.exists(output_path):
             self.logger.error("Output file does not exist")
             return False
         
-        size = os.path.getsize(final_path)
+        size = os.path.getsize(output_path)
         if size == 0:
             self.logger.error("Output file is empty")
-            os.remove(final_path)
+            os.remove(output_path)
             return False
         
         if size < 1024:  # Less than 1KB is suspicious
             self.logger.warning(f"Output file is very small ({_format_bytes(size)})")
         
-        self.logger.info(f"Captured {_format_bytes(size)} to {os.path.basename(final_path)}")
+        self.logger.info(f"Captured {_format_bytes(size)} to {os.path.basename(output_path)}")
         return bool(ok) or (size > 0)
     
     except Exception as e:
