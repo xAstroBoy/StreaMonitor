@@ -14,4 +14,3 @@ class CloudflareDetection:
 def looks_like_cf_html(text: str) -> bool:
     return CloudflareDetection.looks_like_cf_html(text)
 
-__all__ = ["CloudflareDetection", "looks_like_cf_html"]

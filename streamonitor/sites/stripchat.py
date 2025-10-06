@@ -346,6 +346,26 @@ class StripChat(Bot):
         found = self._recursive_find(self.lastInfo, "isGeoBanned")
         return bool(found) if found is not None else False
 
+    def getIsDeleted(self) -> bool:
+        """Check if the model account has been deleted."""
+        if not self.lastInfo:
+            return False
+
+        # Try common paths where isDeleted might be found
+        paths = [
+            ["isDeleted"],
+            ["user", "isDeleted"],
+            ["user", "user", "isDeleted"],
+            ["model", "isDeleted"],
+        ]
+        val = self._first_in_paths(paths)
+        if val is not None:
+            return bool(val)
+
+        # Recursive fallback
+        found = self._recursive_find(self.lastInfo, "isDeleted")
+        return bool(found) if found is not None else False
+
     def getStatus(self):
         """Check the current status of the model's stream."""
         url = f'https://stripchat.com/api/front/v2/models/username/{self.username}/cam?uniq={StripChat.uniq()}'
@@ -390,6 +410,11 @@ class StripChat(Bot):
         # Check for geo-ban
         if self.getIsGeoBanned():
             return Status.RESTRICTED
+
+        # Check if model account has been deleted
+        if self.getIsDeleted():
+            self.logger.warning(f'⚠️ Model account {self.username} has been deleted - this model will be auto-deregistered')
+            return Status.DELETED
 
         # Determine status
         status = self.getStatusField()

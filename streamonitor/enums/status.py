@@ -11,5 +11,6 @@ class Status(Enum):
     PRIVATE = 403
     OFFLINE = 404
     LONG_OFFLINE = 410
+    DELETED = 444  # Model account has been deleted
     RATELIMIT = 429
     CLOUDFLARE = 503

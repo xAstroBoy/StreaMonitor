@@ -32,6 +32,9 @@ class Manager(Thread):
         
         # Thread safety for streamer list modifications
         self._streamers_lock = RLock()
+        
+        # Register this manager instance for auto-removal functionality
+        Bot.register_manager(self)
 
     def execCmd(self, line: str) -> str:
         parts = str(line).strip().split(' ')
@@ -740,16 +743,41 @@ class Manager(Thread):
                 delete=False, 
                 encoding='utf-8'
             ) as temp_file:
-                header = f"// StreamMonitor JSON Debug - [{site}] {username}\n// Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                header = f"// StreamMonitor JSON Debug - [{site}] {username}\n// Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n// Use Ctrl+Shift+P -> 'Format Document' to format JSON\n\n"
                 temp_file.write(header + json_content)
                 temp_path = temp_file.name
             
+            # Try VS Code with common installation paths
+            vscode_paths = [
+                'code',  # In PATH
+                r'C:\Program Files\Microsoft VS Code\Code.exe',
+                r'C:\Program Files (x86)\Microsoft VS Code\Code.exe',
+                r'C:\Users\{}\AppData\Local\Programs\Microsoft VS Code\Code.exe'.format(os.getenv('USERNAME', '')),
+                r'C:\Program Files\Microsoft VS Code\bin\code.cmd',
+                r'C:\Program Files (x86)\Microsoft VS Code\bin\code.cmd'
+            ]
+            
+            for vscode_path in vscode_paths:
+                try:
+                    if vscode_path != 'code' and not os.path.exists(vscode_path):
+                        continue
+                    
+                    subprocess.Popen([vscode_path, temp_path], 
+                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                    return colored(f"📝 JSON opened in VS Code: {temp_path}", "green", attrs=["bold"])
+                except (FileNotFoundError, OSError):
+                    continue
+            
+            # Fallback: try to open with default system editor
             try:
-                subprocess.Popen(['code', temp_path], 
-                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-                return colored(f"📝 JSON opened in VS Code: {temp_path}", "green", attrs=["bold"])
-            except FileNotFoundError:
-                return colored(f"❌ VS Code not found. JSON saved to: {temp_path}\n💡 Install VS Code or open manually", "yellow")
+                if os.name == 'nt':  # Windows
+                    os.startfile(temp_path)
+                    return colored(f"📝 JSON opened with default editor: {temp_path}", "green", attrs=["bold"])
+                else:  # Unix/Linux/Mac
+                    subprocess.call(['open' if sys.platform == 'darwin' else 'xdg-open', temp_path])
+                    return colored(f"📝 JSON opened with default editor: {temp_path}", "green", attrs=["bold"])
+            except Exception:
+                return colored(f"❌ Could not open editor. JSON saved to: {temp_path}\n💡 You can open this file manually", "yellow")
                     
         except Exception as e:
             return colored(f"❌ Error creating temporary file: {e}", "red")

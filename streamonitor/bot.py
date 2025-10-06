@@ -63,6 +63,9 @@ class Bot(Thread):
     long_offline_timeout: int = 600
     previous_status: Optional[Status] = None
 
+    # Manager registry for auto-removal of deleted models
+    _manager_instance = None
+
     headers: Dict[str, str] = {
         "User-Agent": HTTP_USER_AGENT
     }
@@ -73,6 +76,7 @@ class Bot(Thread):
         Status.OFFLINE: colored("No stream", "yellow"),
         Status.LONG_OFFLINE: colored("No stream for a while", "yellow"),
         Status.PRIVATE: colored("Private show", "magenta"),
+        Status.DELETED: colored("Model account deleted", "red", attrs=["bold"]),
         Status.RATELIMIT: colored("Rate limited", "red", attrs=["bold"]),
         Status.NOTEXIST: colored("Nonexistent user", "red"),
         Status.NOTRUNNING: colored("Not running", "white"),
@@ -479,7 +483,23 @@ class Bot(Thread):
                         continue
 
                     elif self.sc == Status.NOTEXIST:
-                        self.logger.error("User does not exist, stopping bot")
+                        self.logger.error(f"❌ User {self.username} does not exist - auto-removing from configuration")
+                        # Auto-remove the non-existent model from configuration
+                        if Bot.auto_remove_model(self.username, self.site, "non-existent"):
+                            self.logger.info(f"✅ Successfully auto-removed non-existent model [{self.siteslug}] {self.username}")
+                        else:
+                            self.logger.warning(f"⚠️ Failed to auto-remove non-existent model [{self.siteslug}] {self.username}")
+                        with self._state_lock:
+                            self.running = False
+                        break
+
+                    elif self.sc == Status.DELETED:
+                        self.logger.error(f"🗑️ Model account {self.username} has been DELETED - auto-removing from configuration")
+                        # Auto-remove the model from configuration
+                        if Bot.auto_remove_model(self.username, self.site, "deleted"):
+                            self.logger.info(f"✅ Successfully auto-removed deleted model [{self.siteslug}] {self.username}")
+                        else:
+                            self.logger.warning(f"⚠️ Failed to auto-remove deleted model [{self.siteslug}] {self.username}")
                         with self._state_lock:
                             self.running = False
                         break
@@ -816,3 +836,36 @@ class Bot(Thread):
             if site_cls:
                 return site_cls(username)
         return None
+
+    @staticmethod
+    def register_manager(manager):
+        """Register the manager instance for auto-removal functionality"""
+        Bot._manager_instance = manager
+
+    @staticmethod
+    def auto_remove_model(username: str, site: str, reason: str = "deleted"):
+        """Auto-remove a deleted/invalid model from the configuration"""
+        if Bot._manager_instance is None:
+            return False
+        
+        try:
+            # Find the specific streamer to remove
+            with Bot._manager_instance._streamers_lock:
+                streamer_to_remove = None
+                for streamer in Bot._manager_instance.streamers:
+                    if (streamer.username.lower() == username.lower() and 
+                        streamer.site.lower() == site.lower()):
+                        streamer_to_remove = streamer
+                        break
+            
+            if streamer_to_remove:
+                # Use the existing removal logic from the manager
+                result = Bot._manager_instance.do_remove(streamer_to_remove, username, site)
+                Bot._manager_instance.logger.warning(f"🗑️ Auto-removed {reason} model [{site}] {username}")
+                return True
+            return False
+            
+        except Exception as e:
+            if Bot._manager_instance:
+                Bot._manager_instance.logger.error(f"Failed to auto-remove model {username}: {e}")
+            return False
