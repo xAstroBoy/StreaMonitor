@@ -1,4 +1,5 @@
 from urllib.parse import urlparse, parse_qs
+from typing import Tuple, List
 
 from parameters import VR_FORMAT_SUFFIX
 from streamonitor.bot import Bot
@@ -12,6 +13,11 @@ class DreamCamVR(DreamCam):
     siteslug = 'DCVR'
 
     _stream_type = 'video3D'
+
+    def get_site_color(self) -> Tuple[str, List[str]]:
+        """Return the color scheme for this VR site."""
+        return ("light_cyan", ["bold"])
+
     vr_frame_format_map = {
         'FISHEYE': 'F',
         'PANORAMIC': 'P',

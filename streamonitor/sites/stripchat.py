@@ -4,6 +4,7 @@ import requests
 import base64
 import hashlib
 import random
+import itertools
 
 from streamonitor.bot import Bot
 from streamonitor.downloaders.hls import getVideoNativeHLS
@@ -36,6 +37,10 @@ class StripChat(Bot):
         self.vr = False
         self.url = self.getWebsiteURL()
         self.getVideo = lambda _, url, filename: getVideoNativeHLS(self, url, filename, StripChat.m3u_decoder)
+    
+    def get_site_color(self):
+        """Return the color scheme for this site"""
+        return ("green", [])
 
     @classmethod
     def getInitialData(cls):
@@ -62,40 +67,41 @@ class StripChat(Bot):
 
     @classmethod
     def m3u_decoder(cls, content):
+        """Decode M3U8 playlists with Mouflon encryption using optimized XOR cipher."""
         def _decode(encrypted_b64: str, key: str) -> str:
             if cls._cached_keys is None:
                 cls._cached_keys = {}
-            if key not in cls._cached_keys:
-                cls._cached_keys[key] = hashlib.sha256(key.encode("utf-8")).digest()
-            hash_bytes = cls._cached_keys[key]
-            hash_len = len(hash_bytes)
-
+            hash_bytes = cls._cached_keys.get(key)
+            if hash_bytes is None:
+                hash_bytes = hashlib.sha256(key.encode("utf-8")).digest()
+                cls._cached_keys[key] = hash_bytes
+            
             encrypted_data = base64.b64decode(encrypted_b64 + "==")
+            # Use itertools.cycle for efficient XOR operation
+            decrypted = bytes(a ^ b for a, b in zip(encrypted_data, itertools.cycle(hash_bytes)))
+            return decrypted.decode("utf-8")
 
-            decrypted_bytes = bytearray()
-            for i, cipher_byte in enumerate(encrypted_data):
-                key_byte = hash_bytes[i % hash_len]
-                decrypted_byte = cipher_byte ^ key_byte
-                decrypted_bytes.append(decrypted_byte)
-
-            plaintext = decrypted_bytes.decode("utf-8")
-            return plaintext
-
-        _, pkey = StripChat._getMouflonFromM3U(content)
+        _, pkey = cls._getMouflonFromM3U(content)
+        if not pkey:
+            return content
 
         decoded = []
         lines = content.splitlines()
         for idx, line in enumerate(lines):
             if line.startswith("#EXT-X-MOUFLON:FILE:"):
                 dec = _decode(line[20:], cls.getMouflonDecKey(pkey))
-                decoded.append(lines[idx + 1].replace("media.mp4", dec))
-            else:
+                # Replace media.mp4 in next line with decoded filename
+                if idx + 1 < len(lines):
+                    decoded.append(lines[idx + 1].replace("media.mp4", dec))
+            elif not (idx > 0 and lines[idx - 1].startswith("#EXT-X-MOUFLON:FILE:")):
                 decoded.append(line)
+        
         return "\n".join(decoded)
 
     @classmethod
     def getMouflonDecKey(cls, pkey):
-        if not cls._mouflon_keys:
+        """Get or fetch the decryption key for a given pkey from cached JS data."""
+        if cls._mouflon_keys is None:
             cls._mouflon_keys = {}
 
         if pkey in cls._mouflon_keys:
@@ -107,41 +113,26 @@ class StripChat(Bot):
 
     @staticmethod
     def _getMouflonFromM3U(m3u8_doc):
+        """Extract Mouflon encryption parameters from M3U8 playlist."""
         if '#EXT-X-MOUFLON:' in m3u8_doc:
             _mouflon_start = m3u8_doc.find('#EXT-X-MOUFLON:')
-            if _mouflon_start > 0:
+            if _mouflon_start >= 0:
                 _mouflon = m3u8_doc[_mouflon_start:m3u8_doc.find('\n', _mouflon_start)].strip().split(':')
-                psch = _mouflon[2]
-                pkey = _mouflon[3]
-                return psch, pkey
+                if len(_mouflon) >= 4:
+                    psch = _mouflon[2]
+                    pkey = _mouflon[3]
+                    return psch, pkey
         return None, None
 
     def getWebsiteURL(self):
-        return "https://stripchat.com/" + self.username
+        return f"https://stripchat.com/{self.username}"
 
     def getVideoUrl(self):
         return self.getWantedResolutionPlaylist(None)
 
-
-    def getPlaylistVariants(self, url):
-        stream_id = self.getStreamName()    
-        url = "https://edge-hls.{host}/hls/{id}{vr}/master/{id}{vr}{auto}.m3u8".format(
-                host='doppiocdn.com',
-                id=stream_id,
-                vr='_vr' if self.vr else '',
-                auto='_auto' if not self.vr else ''
-            )
-        result = requests.get(url, headers=self.headers, cookies=self.cookies)
-        m3u8_doc = result.content.decode("utf-8")
-        psch, pkey = StripChat._getMouflonFromM3U(m3u8_doc)
-        variants = super().getPlaylistVariants(m3u_data=m3u8_doc)
-        return [variant | {'url': f'{variant["url"]}{"&" if "?" in variant["url"] else "?"}psch={psch}&pkey={pkey}'}
-                for variant in variants]
-
-
-
     @staticmethod
     def uniq():
+        """Generate a random unique string for API requests."""
         chars = ''.join(chr(i) for i in range(ord('a'), ord('z') + 1))
         chars += ''.join(chr(i) for i in range(ord('0'), ord('9') + 1))
         return ''.join(random.choice(chars) for _ in range(16))
@@ -233,7 +224,7 @@ class StripChat(Bot):
         if val:
             return str(val)
 
-        # last resort: recursive find
+        # Last resort: recursive find
         val = self._recursive_find(self.lastInfo, "streamName")
         if val:
             return str(val)
@@ -248,7 +239,7 @@ class StripChat(Bot):
         if not self.lastInfo:
             return None
 
-        # explicit candidate paths (ordered)
+        # Explicit candidate paths (ordered)
         paths = [
             ["status"],
             ["cam", "streamStatus"],
@@ -263,7 +254,7 @@ class StripChat(Bot):
         if status is not None:
             return status
 
-        # recursive fallback — but prefer strings that match expected status tokens
+        # Recursive fallback — but prefer strings that match expected status tokens
         found = self._recursive_find(self.lastInfo, "status")
         if isinstance(found, str):
             return found
@@ -284,6 +275,7 @@ class StripChat(Bot):
         # Common locations
         paths = [
             ["cam", "isCamActive"],
+            ["cam", "isCamAvailable"],
             ["cam", "isLive"],
             ["model", "isLive"],
             ["user", "isLive"],
@@ -297,8 +289,8 @@ class StripChat(Bot):
         if val is not None:
             return bool(val)
 
-        # recursive fallback for any key named isLive or isCamActive
-        for k in ("isLive", "isCamActive"):
+        # Recursive fallback for any key named isLive or isCamActive
+        for k in ("isLive", "isCamActive", "isCamAvailable"):
             found = self._recursive_find(self.lastInfo, k)
             if found is not None:
                 return bool(found)
@@ -312,12 +304,12 @@ class StripChat(Bot):
         if not self.lastInfo:
             return False
 
-        # direct
+        # Direct
         val = self._get_by_path(self.lastInfo, ["isMobile"])
         if val is not None:
             return bool(val)
 
-        # common paths
+        # Common paths
         paths = [
             ["model", "isMobile"],
             ["user", "isMobile"],
@@ -325,29 +317,44 @@ class StripChat(Bot):
             ["broadcastSettings", "isMobile"],
             ["cam", "broadcastSettings", "isMobile"],
             ["cam", "isMobile"],
-            ["broadcastSettings", "isMobile"],
         ]
         val = self._first_in_paths(paths)
         if val is not None:
             return bool(val)
 
-        # recursive fallback
+        # Recursive fallback
         found = self._recursive_find(self.lastInfo, "isMobile")
         if found is not None:
             return bool(found)
 
         return False
 
-    # ────────────────────────────────────────────────
-    # Status + playlist
-    # ────────────────────────────────────────────────
+    def getIsGeoBanned(self) -> bool:
+        """Check if user is geo-banned from viewing this model."""
+        if not self.lastInfo:
+            return False
+
+        paths = [
+            ["isGeoBanned"],
+            ["user", "isGeoBanned"],
+            ["user", "user", "isGeoBanned"],
+        ]
+        val = self._first_in_paths(paths)
+        if val is not None:
+            return bool(val)
+
+        found = self._recursive_find(self.lastInfo, "isGeoBanned")
+        return bool(found) if found is not None else False
+
     def getStatus(self):
-        url = f'https://stripchat.com/api/front/v2/models/username/{self.username}/cam?uniq={StripChat.uniq()}',
-        r = self.session.get(url, headers=self.headers)
+        """Check the current status of the model's stream."""
+        url = f'https://stripchat.com/api/front/v2/models/username/{self.username}/cam?uniq={StripChat.uniq()}'
+        r = self.session.get(url, headers=self.headers, bucket='api')
 
         ct = (r.headers.get("content-type") or "").lower()
         body = r.text or ""
 
+        # Handle HTTP errors
         if r.status_code == 404:
             return Status.NOTEXIST
         if r.status_code == 403:
@@ -365,17 +372,26 @@ class StripChat(Bot):
             self.logger.error(f'Server error {r.status_code} for {self.username}')
             return Status.UNKNOWN
 
+        # Validate JSON response
         if "application/json" not in ct or not body.strip():
+            self.logger.warning(f'Non-JSON response for {self.username}')
             return Status.UNKNOWN
 
         try:
             raw = r.json()
-        except Exception:
+        except Exception as e:
+            self.logger.error(f'Failed to parse JSON for {self.username}: {e}')
             return Status.UNKNOWN
 
+        # Normalize and store info
         self.lastInfo = self.normalizeInfo(raw)
         self.isMobileBroadcast = self.getIsMobile()
 
+        # Check for geo-ban
+        if self.getIsGeoBanned():
+            return Status.RESTRICTED
+
+        # Determine status
         status = self.getStatusField()
         is_live = self.getIsLive()
 
@@ -386,29 +402,42 @@ class StripChat(Bot):
         if not is_live or status in ["off", "idle"]:
             return Status.OFFLINE
 
-        self.logger.warning(f"Unknown status: {status}")
+        self.logger.warning(f"Unknown status '{status}' for {self.username}")
         return Status.UNKNOWN
 
     def isMobile(self):
+        """Check if the current broadcast is from a mobile device."""
         return self.isMobileBroadcast
 
     def getPlaylistVariants(self, url):
+        """Get available video quality variants from the HLS master playlist."""
+        stream_id = self.getStreamName()
+        # Use random host selection for load balancing
+        host = f'doppiocdn.{random.choice(["org", "com", "net"])}'
+        
         url = "https://edge-hls.{host}/hls/{id}{vr}/master/{id}{vr}{auto}.m3u8".format(
-            host='doppiocdn.com',
-            id=self.getStreamName(),
+            host=host,
+            id=stream_id,
             vr='_vr' if self.vr else '',
             auto='_auto' if not self.vr else ''
         )
+        
         result = requests.get(url, headers=self.headers, cookies=self.cookies)
         m3u8_doc = result.content.decode("utf-8")
         psch, pkey = StripChat._getMouflonFromM3U(m3u8_doc)
+        
         variants = super().getPlaylistVariants(m3u_data=m3u8_doc)
-        return [
-            variant | {
-                'url': f'{variant["url"]}{"&" if "?" in variant["url"] else "?"}psch={psch}&pkey={pkey}'
-            }
-            for variant in variants
-        ]
+        
+        # Add psch and pkey parameters to each variant URL
+        if psch and pkey:
+            return [
+                variant | {
+                    'url': f'{variant["url"]}{"&" if "?" in variant["url"] else "?"}psch={psch}&pkey={pkey}'
+                }
+                for variant in variants
+            ]
+        
+        return variants
 
 
 Bot.loaded_sites.add(StripChat)

@@ -1,5 +1,9 @@
+# streamonitor/managers/httpmanager.py
+# Improved Flask web interface with type hints and better error handling
+
 from itertools import islice
-from typing import cast, Union
+from typing import cast, Union, Optional, Tuple, Dict, Any, List
+from functools import wraps
 
 from flask import Flask, make_response, render_template, request, send_from_directory, Response
 import os
@@ -8,7 +12,6 @@ import logging
 
 from parameters import WEBSERVER_HOST, WEBSERVER_PORT, WEBSERVER_PASSWORD, WEB_LIST_FREQUENCY, WEB_STATUS_FREQUENCY
 import streamonitor.log as log
-from functools import wraps
 from secrets import compare_digest
 from streamonitor.bot import Bot
 from streamonitor.enums import Status
@@ -23,60 +26,146 @@ from .utils import confirm_deletes, streamer_list, get_recording_query_params, g
 
 
 class HTTPManager(Manager):
-    def __init__(self, streamers):
+    """Flask-based web interface for managing stream recordings."""
+    
+    def __init__(self, streamers: List[Bot]) -> None:
+        """
+        Initialize HTTP manager with list of streamer bots.
+        
+        Args:
+            streamers: List of Bot instances to manage
+        """
         super().__init__(streamers)
         self.logger = log.Logger("manager")
-        self.loaded_site_names = [site.site for site in Bot.loaded_sites]
+        self.loaded_site_names: List[str] = [site.site for site in Bot.loaded_sites]
         self.loaded_site_names.sort()
+        self.app: Optional[Flask] = None
 
-    def run(self):
+    def _check_auth(self, username: str, password: str) -> bool:
+        """
+        Verify basic auth credentials.
+        
+        Args:
+            username: Provided username (must be 'admin')
+            password: Provided password
+            
+        Returns:
+            True if auth is disabled or credentials match
+        """
+        return WEBSERVER_PASSWORD == "" or (
+            username == 'admin' and compare_digest(password, WEBSERVER_PASSWORD)
+        )
+
+    def _login_required(self, f):
+        """
+        Decorator to require authentication on routes.
+        
+        Args:
+            f: Flask route function to wrap
+            
+        Returns:
+            Wrapped function that checks auth
+        """
+        @wraps(f)
+        def wrapped_view(**kwargs):
+            auth = request.authorization
+            if WEBSERVER_PASSWORD != "" and not (
+                auth and self._check_auth(auth.username, auth.password)
+            ):
+                return ('Unauthorized', 401, {
+                    'WWW-Authenticate': 'Basic realm="Login Required"'
+                })
+            return f(**kwargs)
+        return wrapped_view
+
+    def _get_streamer_safe(self, user: str, site: str) -> Tuple[Optional[Bot], bool, str]:
+        """
+        Safely get streamer with error handling.
+        
+        Args:
+            user: Username
+            site: Site slug
+            
+        Returns:
+            Tuple of (streamer, has_error, error_message)
+        """
+        try:
+            streamer = self.getStreamer(user, site)
+            if streamer is None:
+                return None, True, f"Streamer {user} on {site} not found"
+            return streamer, False, ""
+        except Exception as e:
+            self.logger.error(f"Error getting streamer {user}/{site}: {e}")
+            return None, True, str(e)
+
+    def _make_json_response(self, data: Dict[str, Any], status: int = 200) -> Response:
+        """
+        Create JSON response with proper headers.
+        
+        Args:
+            data: Dict to serialize to JSON
+            status: HTTP status code
+            
+        Returns:
+            Flask Response object
+        """
+        return Response(
+            json.dumps(data),
+            status=status,
+            mimetype='application/json'
+        )
+
+    def run(self) -> None:
+        """Start the Flask web server."""
         app = Flask(__name__, "")
+        self.app = app
+        
+        # Disable werkzeug logging (too verbose)
         werkzeug_logger = logging.getLogger('werkzeug')
         werkzeug_logger.disabled = True
 
+        # Register template filters
         app.add_template_filter(human_file_size, name='tohumanfilesize')
         app.add_template_filter(status_icon, name='status_icon_class')
         app.add_template_filter(status_text, name='status_text')
 
-        def check_auth(username, password):
-            return WEBSERVER_PASSWORD == "" or (username == 'admin' and compare_digest(password, WEBSERVER_PASSWORD))
-
-        def login_required(f):
-            @wraps(f)
-            def wrapped_view(**kwargs):
-                auth = request.authorization
-                if WEBSERVER_PASSWORD != "" and not (auth and check_auth(auth.username, auth.password)):
-                    return ('Unauthorized', 401, {
-                        'WWW-Authenticate': 'Basic realm="Login Required"'
-                    })
-
-                return f(**kwargs)
-
-            return wrapped_view
+        # ====================================================================
+        # STATIC & DASHBOARD ROUTES
+        # ====================================================================
 
         @app.route('/dashboard')
-        @login_required
-        def mainSite():
+        @self._login_required
+        def mainSite() -> Response:
+            """Main dashboard page."""
             return app.send_static_file('index.html')
 
+        # ====================================================================
+        # API ROUTES
+        # ====================================================================
+
         @app.route('/api/basesettings')
-        @login_required
-        def apiBaseSettings():
-            json_sites = {}
+        @self._login_required
+        def apiBaseSettings() -> Response:
+            """Get site and status configuration."""
+            json_sites: Dict[str, str] = {}
             for site in Bot.loaded_sites:
                 json_sites[site.siteslug] = site.site
-            json_status = {}
+
+            json_status: Dict[int, str] = {}
             for status in Status:
                 json_status[status.value] = Bot.status_messages[status]
-            return Response(json.dumps({
+
+            return self._make_json_response({
                 "sites": json_sites,
                 "status": json_status,
-            }), mimetype='application/json')
+            })
 
         @app.route('/api/data')
-        @login_required
-        def apiData():
-            json_streamer = []
+        @self._login_required
+        def apiData() -> Response:
+            """Get current streamer data and disk space."""
+            json_streamer: List[Dict[str, Any]] = []
+            
             for streamer in self.streamers:
                 json_stream = {
                     "site": streamer.siteslug,
@@ -88,359 +177,543 @@ class HTTPManager(Manager):
                     "username": streamer.username
                 }
                 json_streamer.append(json_stream)
-            return Response(json.dumps({
+
+            try:
+                free_space_pct = OOSDetector.free_space()
+                space_usage = OOSDetector.space_usage()
+            except Exception as e:
+                self.logger.error(f"Error getting disk space: {e}")
+                free_space_pct = 0.0
+                space_usage = type('obj', (object,), {'free': 0})()
+
+            return self._make_json_response({
                 "streamers": json_streamer,
                 "freeSpace": {
-                    "percentage": str(round(OOSDetector.free_space(), 3)),
-                    "absolute": human_file_size(OOSDetector.space_usage().free)
+                    "percentage": str(round(free_space_pct, 3)),
+                    "absolute": human_file_size(space_usage.free)
                 }
-            }), mimetype='application/json')
+            })
 
         @app.route('/api/command')
-        @login_required
-        def execApiCommand():
-            return self.execCmd(request.args.get("command"))
+        @self._login_required
+        def execApiCommand() -> str:
+            """Execute management command via API."""
+            command = request.args.get("command")
+            if not command:
+                return "Missing command parameter", 400
+            
+            try:
+                return self.execCmd(command)
+            except Exception as e:
+                self.logger.error(f"Command execution error: {e}")
+                return str(e), 500
+
+        # ====================================================================
+        # MAIN LIST VIEW ROUTES
+        # ====================================================================
 
         @app.route('/', methods=['GET'])
-        @login_required
-        def status():
-            usage = OOSDetector.space_usage()
-            streamers, filter_context = streamer_list(self.streamers, request)
-            context = {
-                'streamers': streamers,
-                'sites': self.loaded_site_names,
-                'unique_sites': set(map(lambda x: x.site, self.streamers)),
-                'streamer_statuses': web_status_lookup,
-                'free_space': human_file_size(usage.free),
-                'total_space': human_file_size(usage.total),
-                'percentage_free': round(usage.free / usage.total * 100, 3),
-                'refresh_freq': WEB_LIST_FREQUENCY,
-                'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
-            } | filter_context
-            return render_template('index.html.jinja', **context)
+        @self._login_required
+        def status() -> str:
+            """Main streamer list page."""
+            try:
+                usage = OOSDetector.space_usage()
+                streamers, filter_context = streamer_list(self.streamers, request)
+                
+                context = {
+                    'streamers': streamers,
+                    'sites': self.loaded_site_names,
+                    'unique_sites': set(map(lambda x: x.site, self.streamers)),
+                    'streamer_statuses': web_status_lookup,
+                    'free_space': human_file_size(usage.free),
+                    'total_space': human_file_size(usage.total),
+                    'percentage_free': round(usage.free / usage.total * 100, 3),
+                    'refresh_freq': WEB_LIST_FREQUENCY,
+                    'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
+                } | filter_context
+                
+                return render_template('index.html.jinja', **context)
+            except Exception as e:
+                self.logger.error(f"Error rendering status page: {e}")
+                return f"Internal server error: {e}", 500
 
         @app.route('/refresh/streamers', methods=['GET'])
-        @login_required
-        def refresh_streamers():
-            streamers, filter_context = streamer_list(self.streamers, request)
-            context = {
-                'streamers': streamers,
-                'sites': Bot.loaded_sites,
-                'refresh_freq': WEB_LIST_FREQUENCY,
-                'toast_status': "hide",
-                'toast_message': "",
-                'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
-            } | filter_context
-            response = make_response(render_template('streamers_result.html.jinja', **context))
-            set_streamer_list_cookies(filter_context, request, response)
-            return response
+        @self._login_required
+        def refresh_streamers() -> Response:
+            """Refresh streamer list (HTMX endpoint)."""
+            try:
+                streamers, filter_context = streamer_list(self.streamers, request)
+                
+                context = {
+                    'streamers': streamers,
+                    'sites': Bot.loaded_sites,
+                    'refresh_freq': WEB_LIST_FREQUENCY,
+                    'toast_status': "hide",
+                    'toast_message': "",
+                    'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
+                } | filter_context
+                
+                response = make_response(render_template('streamers_result.html.jinja', **context))
+                set_streamer_list_cookies(filter_context, request, response)
+                return response
+            except Exception as e:
+                self.logger.error(f"Error refreshing streamers: {e}")
+                return f"Error: {e}", 500
+
+        # ====================================================================
+        # RECORDING/VIDEO ROUTES
+        # ====================================================================
 
         @app.route('/recordings/<user>/<site>', methods=['GET'])
-        @login_required
-        def recordings(user, site):
+        @self._login_required
+        def recordings(user: str, site: str) -> Tuple[str, int]:
+            """Recording list page for specific streamer."""
             video = request.args.get("play_video")
             sort_by_size = bool(request.args.get("sorted", False))
-            streamer = cast(Union[Bot, None], self.getStreamer(user, site))
-            streamer.cache_file_list()
-            context = get_streamer_context(streamer, sort_by_size, video, request.headers.get('User-Agent'))
-            status_code = 500 if context['has_error'] else 200
-            if video is None and streamer.recording and len(context['videos']) > 1:
-                # It might not always be safe to grab the biggest file if sorting by size, but good enough for now
-                video_index = 0 if sort_by_size else 1
-                context['video_to_play'] = next(islice(context['videos'].values(), video_index, video_index + 1))
-            elif video is None and len(context['videos']) > 0 and not streamer.recording:
-                context['video_to_play'] = next(islice(context['videos'].values(), 0, 1))
-            return render_template('recordings.html.jinja', **context), status_code
+            
+            streamer, has_error, error_msg = self._get_streamer_safe(user, site)
+            if has_error or streamer is None:
+                return f"Error: {error_msg}", 500
+
+            try:
+                streamer.cache_file_list()
+                context = get_streamer_context(
+                    streamer, sort_by_size, video, 
+                    request.headers.get('User-Agent')
+                )
+                
+                status_code = 500 if context['has_error'] else 200
+                
+                # Auto-select video to play
+                if video is None and streamer.recording and len(context['videos']) > 1:
+                    video_index = 0 if sort_by_size else 1
+                    context['video_to_play'] = next(
+                        islice(context['videos'].values(), video_index, video_index + 1)
+                    )
+                elif video is None and len(context['videos']) > 0 and not streamer.recording:
+                    context['video_to_play'] = next(islice(context['videos'].values(), 0, 1))
+                
+                return render_template('recordings.html.jinja', **context), status_code
+            except Exception as e:
+                self.logger.error(f"Error loading recordings for {user}/{site}: {e}")
+                return f"Internal error: {e}", 500
 
         @app.route('/video/<user>/<site>/<path:filename>', methods=['GET'])
-        def get_video(user, site, filename):
-            streamer = cast(Union[Bot, None], self.getStreamer(user, site))
-            return send_from_directory(
-                os.path.abspath(streamer.outputFolder),
-                filename
-            )
+        def get_video(user: str, site: str, filename: str) -> Response:
+            """Serve video file (no auth for video playback)."""
+            streamer, has_error, error_msg = self._get_streamer_safe(user, site)
+            if has_error or streamer is None:
+                return f"Error: {error_msg}", 404
+
+            try:
+                return send_from_directory(
+                    os.path.abspath(streamer.outputFolder),
+                    filename
+                )
+            except FileNotFoundError:
+                return "Video not found", 404
+            except Exception as e:
+                self.logger.error(f"Error serving video {filename}: {e}")
+                return f"Error: {e}", 500
 
         @app.route('/videos/watch/<user>/<site>/<path:play_video>', methods=['GET'])
-        @login_required
-        def watch_video(user, site, play_video):
+        @self._login_required
+        def watch_video(user: str, site: str, play_video: str) -> Tuple[Response, int]:
+            """Watch specific video (HTMX endpoint)."""
             sort_by_size = bool(request.args.get("sorted", False))
-            streamer = cast(Union[Bot, None], self.getStreamer(user, site))
-            context = get_streamer_context(streamer, sort_by_size, play_video, request.headers.get('User-Agent'))
-            status_code = 500 if context['video_to_play'] is None or context['has_error'] else 200
-            response = make_response(render_template('recordings_content.html.jinja', **context), status_code)
-            query_param = get_recording_query_params(sort_by_size, play_video)
-            response.headers['HX-Replace-Url'] = f"/recordings/{user}/{site}{query_param}"
-            return response
+            
+            streamer, has_error, error_msg = self._get_streamer_safe(user, site)
+            if has_error or streamer is None:
+                return make_response(f"Error: {error_msg}"), 500
+
+            try:
+                context = get_streamer_context(
+                    streamer, sort_by_size, play_video,
+                    request.headers.get('User-Agent')
+                )
+                
+                status_code = 500 if context['video_to_play'] is None or context['has_error'] else 200
+                response = make_response(
+                    render_template('recordings_content.html.jinja', **context),
+                    status_code
+                )
+                
+                query_param = get_recording_query_params(sort_by_size, play_video)
+                response.headers['HX-Replace-Url'] = f"/recordings/{user}/{site}{query_param}"
+                return response, status_code
+            except Exception as e:
+                self.logger.error(f"Error watching video {play_video}: {e}")
+                return make_response(f"Error: {e}"), 500
 
         @app.route('/videos/<user>/<site>', methods=['GET'])
-        @login_required
-        def sort_videos(user, site):
-            streamer = cast(Union[Bot, None], self.getStreamer(user, site))
+        @self._login_required
+        def sort_videos(user: str, site: str) -> Tuple[Response, int]:
+            """Sort video list (HTMX endpoint)."""
             sort_by_size = bool(request.args.get("sorted", False))
             play_video = request.args.get("play_video", None)
-            context = get_streamer_context(streamer, sort_by_size, play_video, request.headers.get('User-Agent'))
-            status_code = 500 if context['has_error'] else 200
-            response = make_response(render_template('video_list.html.jinja', **context), status_code)
-            query_param = get_recording_query_params(sort_by_size, play_video)
-            response.headers['HX-Replace-Url'] = f"/recordings/{user}/{site}{query_param}"
-            return response
+            
+            streamer, has_error, error_msg = self._get_streamer_safe(user, site)
+            if has_error or streamer is None:
+                return make_response(f"Error: {error_msg}"), 500
+
+            try:
+                context = get_streamer_context(
+                    streamer, sort_by_size, play_video,
+                    request.headers.get('User-Agent')
+                )
+                
+                status_code = 500 if context['has_error'] else 200
+                response = make_response(
+                    render_template('video_list.html.jinja', **context),
+                    status_code
+                )
+                
+                query_param = get_recording_query_params(sort_by_size, play_video)
+                response.headers['HX-Replace-Url'] = f"/recordings/{user}/{site}{query_param}"
+                return response, status_code
+            except Exception as e:
+                self.logger.error(f"Error sorting videos: {e}")
+                return make_response(f"Error: {e}"), 500
 
         @app.route('/videos/<user>/<site>/<path:filename>', methods=['DELETE'])
-        @login_required
-        def delete_video(user, site, filename):
-            streamer = cast(Union[Bot, None], self.getStreamer(user, site))
+        @self._login_required
+        def delete_video(user: str, site: str, filename: str) -> Tuple[Response, int]:
+            """Delete video file."""
             sort_by_size = bool(request.args.get("sorted", False))
             play_video = request.args.get("play_video", None)
-            context = get_streamer_context(streamer, sort_by_size, play_video, request.headers.get('User-Agent'))
-            status_code = 200
-            match = context['videos'].pop(filename, None)
-            if match is not None:
-                try:
-                    os.remove(match.abs_path)
-                    streamer.cache_file_list()
-                    context['total_size'] = context['total_size'] - match.filesize
-                    if context['video_to_play'] is not None and filename == context['video_to_play'].filename:
-                        context['video_to_play'] = None
-                except Exception as e:
-                    status_code = 500
+            
+            streamer, has_error, error_msg = self._get_streamer_safe(user, site)
+            if has_error or streamer is None:
+                return make_response(f"Error: {error_msg}"), 500
+
+            try:
+                context = get_streamer_context(
+                    streamer, sort_by_size, play_video,
+                    request.headers.get('User-Agent')
+                )
+                
+                status_code = 200
+                match = context['videos'].pop(filename, None)
+                
+                if match is not None:
+                    try:
+                        os.remove(match.abs_path)
+                        streamer.cache_file_list()
+                        context['total_size'] = context['total_size'] - match.filesize
+                        
+                        if context['video_to_play'] is not None and \
+                           filename == context['video_to_play'].filename:
+                            context['video_to_play'] = None
+                    except OSError as e:
+                        status_code = 500
+                        context['has_error'] = True
+                        context['recordings_error_message'] = f"Failed to delete file: {e}"
+                        self.logger.error(f"Failed to delete {filename}: {e}")
+                else:
+                    status_code = 404
                     context['has_error'] = True
-                    context['recordings_error_message'] = repr(e)
-                    self.logger.error(e)
-            else:
-                status_code = 404
-                context['has_error'] = True
-                context['recordings_error_message'] = f'Could not find {filename}, so no file removed'
-            response = make_response(render_template('video_list.html.jinja', **context), status_code)
-            query_param = get_recording_query_params(sort_by_size, play_video)
-            response.headers['HX-Replace-Url'] = f"/recordings/{user}/{site}{query_param}"
-            return response
+                    context['recordings_error_message'] = f'Could not find {filename}'
+                
+                response = make_response(
+                    render_template('video_list.html.jinja', **context),
+                    status_code
+                )
+                
+                query_param = get_recording_query_params(sort_by_size, play_video)
+                response.headers['HX-Replace-Url'] = f"/recordings/{user}/{site}{query_param}"
+                return response, status_code
+            except Exception as e:
+                self.logger.error(f"Error deleting video {filename}: {e}")
+                return make_response(f"Error: {e}"), 500
+
+        # ====================================================================
+        # STREAMER MANAGEMENT ROUTES
+        # ====================================================================
 
         @app.route("/add", methods=['POST'])
-        @login_required
-        def add():
-            user = request.form["username"]
-            site = request.form["site"]
-            update_site_options = site not in map(lambda x: x.site, self.streamers)
-            toast_status = "success"
-            status_code = 200
-            streamer = self.getStreamer(user, site)
-            res = self.do_add(streamer, user, site)
-            streamers, filter_context = streamer_list(self.streamers, request)
-            if res == 'Streamer already exists' or res == "Missing value(s)" or res == "Failed to add":
-                toast_status = "error"
-                status_code = 500
-            context = {
-                'streamers': streamers,
-                'unique_sites': set(map(lambda x: x.site, self.streamers)),
-                'update_filter_site_options': update_site_options,
-                'refresh_freq': WEB_LIST_FREQUENCY,
-                'toast_status': toast_status,
-                'toast_message': res,
-                'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
-            } | filter_context
-            return render_template('streamers_result.html.jinja', **context), status_code
+        @self._login_required
+        def add() -> Tuple[str, int]:
+            """Add new streamer."""
+            user = request.form.get("username", "").strip()
+            site = request.form.get("site", "").strip()
+            
+            if not user or not site:
+                return "Missing username or site", 400
 
-        @app.route("/recording/nav/<user>/<site>", methods=['GET'])
-        @login_required
-        def get_streamer_navbar(user, site):
-            streamer = self.getStreamer(user, site)
-            sort_by_size = bool(request.args.get("sorted", False))
-            play_video = request.args.get("play_video", None)
-            previous_state = request.args.get("prev_state", False)
-            streamer_context = {}
-            # need this from the UI perspective to know whether to update due to polling windows
-            if previous_state != streamer.sc:
-                streamer_context = get_streamer_context(
-                    streamer, sort_by_size, play_video, request.headers.get('User-Agent'))
-            status_code = 200
-            has_error = False
-            if streamer is None:
-                status_code = 500
-                streamer = InvalidStreamer(user, site)
-                has_error = True
-            context = {
-                **streamer_context,
-                'update_content': False if len(streamer_context) == 0 else True,
-                'streamer': streamer,
-                'has_error': has_error,
-                'refresh_freq': WEB_STATUS_FREQUENCY,
-            }
-            return render_template('streamer_nav_bar.html.jinja', **context), status_code
-
-        @app.route("/streamer-info/<user>/<site>", methods=['GET'])
-        @login_required
-        def get_streamer_info(user, site):
-            streamer = self.getStreamer(user, site)
-            res = None
-            status_code = 200
-            has_error = False
-            if streamer is None:
-                status_code = 500
-                res = f"Could not get info for {user} on site {site}"
-                has_error = True
-            streamer.cache_file_list()
-            context = {
-                'streamer': streamer,
-                'streamer_has_error': has_error,
-                'streamer_error_message': res,
-                'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
-            }
-            return render_template('streamer_record.html.jinja', **context), status_code
+            try:
+                update_site_options = site not in map(lambda x: x.site, self.streamers)
+                toast_status = "success"
+                status_code = 200
+                
+                streamer = self.getStreamer(user, site)
+                res = self.do_add(streamer, user, site)
+                
+                streamers, filter_context = streamer_list(self.streamers, request)
+                
+                if res in ('Streamer already exists', "Missing value(s)", "Failed to add"):
+                    toast_status = "error"
+                    status_code = 500
+                
+                context = {
+                    'streamers': streamers,
+                    'unique_sites': set(map(lambda x: x.site, self.streamers)),
+                    'update_filter_site_options': update_site_options,
+                    'refresh_freq': WEB_LIST_FREQUENCY,
+                    'toast_status': toast_status,
+                    'toast_message': res,
+                    'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
+                } | filter_context
+                
+                return render_template('streamers_result.html.jinja', **context), status_code
+            except Exception as e:
+                self.logger.error(f"Error adding streamer {user}/{site}: {e}")
+                return f"Error: {e}", 500
 
         @app.route("/remove/<user>/<site>", methods=['DELETE'])
-        @login_required
-        def remove_streamer(user, site):
-            streamer = self.getStreamer(user, site)
-            res = self.do_remove(streamer, user, site)
-            status_code = 204
-            if res == "Failed to remove streamer" or res == "Streamer not found":
-                status_code = 404
-                context = {
-                    'streamer_error_message': res,
-                }
-                response = make_response(render_template('streamer_record_error.html.jinja', **context), status_code)
-                response.headers['HX-Retarget'] = "#error-container"
-                return response
-            return '', status_code
-
-        @app.route("/clear", methods=['DELETE'])
-        def clear_modal():
-            return '', 204
+        @self._login_required
+        def remove_streamer(user: str, site: str) -> Tuple[Union[str, Response], int]:
+            """Remove streamer."""
+            try:
+                streamer = self.getStreamer(user, site)
+                res = self.do_remove(streamer, user, site)
+                
+                if res in ("Failed to remove streamer", "Streamer not found"):
+                    status_code = 404
+                    context = {'streamer_error_message': res}
+                    response = make_response(
+                        render_template('streamer_record_error.html.jinja', **context),
+                        status_code
+                    )
+                    response.headers['HX-Retarget'] = "#error-container"
+                    return response, status_code
+                
+                return '', 204
+            except Exception as e:
+                self.logger.error(f"Error removing streamer {user}/{site}: {e}")
+                return f"Error: {e}", 500
 
         @app.route("/toggle/<user>/<site>", methods=['PATCH'])
-        @login_required
-        def toggle_streamer(user, site):
-            streamer = self.getStreamer(user, site)
-            status_code = 500
-            res = "Streamer not found"
-            has_error = True
-            if streamer is None:
+        @self._login_required
+        def toggle_streamer(user: str, site: str) -> Tuple[str, int]:
+            """Toggle streamer running state."""
+            streamer, has_error, error_msg = self._get_streamer_safe(user, site)
+            
+            if has_error or streamer is None:
                 status_code = 500
+                res = error_msg
             elif streamer.running:
                 res = self.do_stop(streamer, user, site)
+                has_error = res != "OK"
+                status_code = 200 if not has_error else 500
             else:
                 res = self.do_start(streamer, user, site)
-            if res == "OK":
-                has_error = False
-                status_code = 200
+                has_error = res != "OK"
+                status_code = 200 if not has_error else 500
+            
             context = {
-                'streamer': streamer,
+                'streamer': streamer or InvalidStreamer(user, site),
                 'streamer_has_error': has_error,
-                'streamer_error_message': res,
+                'streamer_error_message': res if has_error else "",
                 'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
             }
+            
             return render_template('streamer_record.html.jinja', **context), status_code
 
         @app.route("/toggle/<user>/<site>/recording", methods=['PATCH'])
-        @login_required
-        def toggle_streamer_recording_page(user, site):
-            streamer = self.getStreamer(user, site)
-            status_code = 500
-            res = "Streamer not found"
-            has_error = True
-            if streamer is None:
+        @self._login_required
+        def toggle_streamer_recording_page(user: str, site: str) -> Tuple[str, int]:
+            """Toggle streamer from recording page."""
+            streamer, has_error, error_msg = self._get_streamer_safe(user, site)
+            
+            if has_error or streamer is None:
                 status_code = 500
+                res = error_msg
             elif streamer.running:
                 res = self.do_stop(streamer, user, site)
+                has_error = res != "OK"
+                status_code = 200 if not has_error else 500
             else:
                 res = self.do_start(streamer, user, site)
-            if res == "OK":
-                has_error = False
-                status_code = 200
+                has_error = res != "OK"
+                status_code = 200 if not has_error else 500
+            
             context = {
-                'streamer': streamer,
+                'streamer': streamer or InvalidStreamer(user, site),
                 'streamer_has_error': has_error,
-                'streamer_error_message': res,
+                'streamer_error_message': res if has_error else "",
             }
+            
             return render_template('streamer_toggle.html.jinja', **context), status_code
 
         @app.route("/start/streamers", methods=['PATCH'])
-        @login_required
-        def start_streamers():
-            status_code = 500
-            toast_status = "error"
-            streamers, filter_context = streamer_list(self.streamers, request)
-            res = ""
-            error_message = ""
+        @self._login_required
+        def start_streamers() -> Tuple[str, int]:
+            """Start all or filtered streamers."""
             try:
+                streamers, filter_context = streamer_list(self.streamers, request)
+                status_code = 500
+                toast_status = "error"
+                res = ""
+                error_message = ""
+                
                 if not filter_context.get('filtered') or len(streamers) == len(self.streamers):
                     res = self.do_start(None, '*', None)
                     if res == "Started all":
                         status_code = 200
                         toast_status = "success"
                 else:
-                    error = []
+                    errors: List[str] = []
                     if len(streamers) > 0:
                         for streamer in streamers:
                             partial_res = self.do_start(streamer, None, None)
                             if partial_res != "OK":
-                                error.append(streamer.username)
+                                errors.append(streamer.username)
                         res = "Started All Shown"
                     else:
                         res = 'no matching streamers'
-                    if len(error) > 0:
+                    
+                    if len(errors) > 0:
                         toast_status = "warning"
                         res = "Some Failed to Start"
-                        error_message = "The following streamers failed to start:\n " + '\n'.join(error)
+                        error_message = "Failed to start:\n" + '\n'.join(errors)
                     else:
                         status_code = 200
                         toast_status = "success"
+                
+                context = {
+                    'streamers': streamers,
+                    'refresh_freq': WEB_LIST_FREQUENCY,
+                    'toast_status': toast_status,
+                    'toast_message': res,
+                    'error_message': error_message,
+                    'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
+                } | filter_context
+                
+                return render_template('streamers_result.html.jinja', **context), status_code
             except Exception as e:
-                self.logger.warning(e)
-                res = str(e)
-            context = {
-                'streamers': streamers,
-                'refresh_freq': WEB_LIST_FREQUENCY,
-                'toast_status': toast_status,
-                'toast_message': res,
-                'error_message': error_message,
-                'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
-            } | filter_context
-            return render_template('streamers_result.html.jinja', **context), status_code
+                self.logger.error(f"Error starting streamers: {e}")
+                return f"Error: {e}", 500
 
         @app.route("/stop/streamers", methods=['PATCH'])
-        @login_required
-        def stop_streamers():
-            status_code = 500
-            toast_status = "error"
-            streamers, filter_context = streamer_list(self.streamers, request)
-            res = ""
-            error_message = ""
+        @self._login_required
+        def stop_streamers() -> Tuple[str, int]:
+            """Stop all or filtered streamers."""
             try:
+                streamers, filter_context = streamer_list(self.streamers, request)
+                status_code = 500
+                toast_status = "error"
+                res = ""
+                error_message = ""
+                
                 if not filter_context.get('filtered') or len(streamers) == len(self.streamers):
                     res = self.do_stop(None, '*', None)
                     if res == "Stopped all":
                         status_code = 200
                         toast_status = "success"
                 else:
-                    error = []
+                    errors: List[str] = []
                     if len(streamers) > 0:
                         for streamer in streamers:
                             partial_res = self.do_stop(streamer, None, None)
                             if partial_res != "OK":
-                                error.append(streamer.username)
+                                errors.append(streamer.username)
                         res = "Stopped All Shown"
                     else:
                         res = 'no matching streamers'
-                    if len(error) > 0:
+                    
+                    if len(errors) > 0:
                         toast_status = "warning"
                         res = "Some Failed to Stop"
-                        error_message = "The following streamers failed to stop:\n" + '\n'.join(error)
+                        error_message = "Failed to stop:\n" + '\n'.join(errors)
                     else:
                         status_code = 200
                         toast_status = "success"
+                
+                context = {
+                    'streamers': streamers,
+                    'refresh_freq': WEB_LIST_FREQUENCY,
+                    'toast_status': toast_status,
+                    'toast_message': res,
+                    'error_message': error_message,
+                    'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
+                } | filter_context
+                
+                return render_template('streamers_result.html.jinja', **context), status_code
             except Exception as e:
-                self.logger.warning(e)
-                res = str(e)
+                self.logger.error(f"Error stopping streamers: {e}")
+                return f"Error: {e}", 500
 
+        # ====================================================================
+        # UTILITY ROUTES
+        # ====================================================================
+
+        @app.route("/clear", methods=['DELETE'])
+        def clear_modal() -> Tuple[str, int]:
+            """Clear modal (HTMX utility)."""
+            return '', 204
+
+        @app.route("/recording/nav/<user>/<site>", methods=['GET'])
+        @self._login_required
+        def get_streamer_navbar(user: str, site: str) -> Tuple[str, int]:
+            """Get streamer navbar for polling (HTMX endpoint)."""
+            sort_by_size = bool(request.args.get("sorted", False))
+            play_video = request.args.get("play_video", None)
+            previous_state = request.args.get("prev_state", None)
+            
+            streamer, has_error, error_msg = self._get_streamer_safe(user, site)
+            
+            streamer_context: Dict[str, Any] = {}
+            
+            if streamer and not has_error:
+                # Only update if state changed
+                if previous_state != streamer.sc:
+                    streamer_context = get_streamer_context(
+                        streamer, sort_by_size, play_video,
+                        request.headers.get('User-Agent')
+                    )
+            
+            status_code = 200 if not has_error else 500
+            
             context = {
-                'streamers': streamers,
-                'refresh_freq': WEB_LIST_FREQUENCY,
-                'toast_status': toast_status,
-                'toast_message': res,
-                'error_message': error_message,
-                'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
-            } | filter_context
-            return render_template('streamers_result.html.jinja', **context), status_code
+                **streamer_context,
+                'update_content': len(streamer_context) > 0,
+                'streamer': streamer or InvalidStreamer(user, site),
+                'has_error': has_error,
+                'refresh_freq': WEB_STATUS_FREQUENCY,
+            }
+            
+            return render_template('streamer_nav_bar.html.jinja', **context), status_code
 
-        app.run(host=WEBSERVER_HOST, port=WEBSERVER_PORT)
+        @app.route("/streamer-info/<user>/<site>", methods=['GET'])
+        @self._login_required
+        def get_streamer_info(user: str, site: str) -> Tuple[str, int]:
+            """Get streamer info card (HTMX endpoint)."""
+            streamer, has_error, error_msg = self._get_streamer_safe(user, site)
+            
+            if not has_error and streamer:
+                try:
+                    streamer.cache_file_list()
+                except Exception as e:
+                    self.logger.error(f"Error caching file list for {user}/{site}: {e}")
+            
+            status_code = 200 if not has_error else 500
+            
+            context = {
+                'streamer': streamer or InvalidStreamer(user, site),
+                'streamer_has_error': has_error,
+                'streamer_error_message': error_msg if has_error else None,
+                'confirm_deletes': confirm_deletes(request.headers.get('User-Agent')),
+            }
+            
+            return render_template('streamer_record.html.jinja', **context), status_code
+
+        # ====================================================================
+        # START SERVER
+        # ====================================================================
+        
+        try:
+            self.logger.info(f"Starting web server on {WEBSERVER_HOST}:{WEBSERVER_PORT}")
+            app.run(host=WEBSERVER_HOST, port=WEBSERVER_PORT)
+        except Exception as e:
+            self.logger.error(f"Failed to start web server: {e}")
+            raise

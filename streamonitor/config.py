@@ -3,6 +3,8 @@ import sys
 import time
 
 from streamonitor.bot import Bot
+# Import all sites to register them with Bot.loaded_sites
+import streamonitor.sites
 
 config_loc = "config.json"
 

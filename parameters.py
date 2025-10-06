@@ -73,3 +73,5 @@ WEB_CONFIRM_DELETES = env.str("STRMNTR_CONFIRM_DEL", "MOBILE")
 # Password for the web server
 # If empty no auth required, else username admin and choosen password
 WEBSERVER_PASSWORD = env.str("STRMNTR_PASSWORD", "admin")
+
+VERIFY_SSL = env.bool("STRMNTR_VERIFY_SSL", True)

@@ -3,6 +3,13 @@ from streamonitor.manager import Manager
 from streamonitor.clean_exit import CleanExit
 import streamonitor.log as log
 
+# Initialize colorama for Windows color support
+try:
+    from colorama import init
+    init(autoreset=True)
+except ImportError:
+    pass
+
 if sys.platform != "win32":
     import readline
 
@@ -22,7 +29,9 @@ class CLIManager(Manager):
             reply = self.execCmd(line)
             if line == "quit":
                 return
-            self.logger.info(reply)
+            # Print directly to preserve colors and avoid logger clutter
+            if reply:
+                print(reply)
 
     def do_quit(self, _=None, __=None, ___=None):
         CleanExit(self.streamers)()
