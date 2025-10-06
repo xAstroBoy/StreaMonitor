@@ -185,6 +185,22 @@ class Bot(Thread):
                 self.logger.verbose("Starting bot...")
                 self._consecutive_errors = 0
             self.running = True
+            
+            # Ensure the thread is actually alive
+            if not self.is_alive():
+                try:
+                    self.logger.warning("Thread was dead during restart, starting new thread")
+                    # Reset thread state
+                    self.quitting = False
+                    # Start the thread if it's not alive
+                    self.start()
+                except RuntimeError as e:
+                    if "threads can only be started once" in str(e):
+                        self.logger.error("Cannot restart dead thread - this bot needs to be recreated")
+                    else:
+                        self.logger.error(f"Error starting thread: {e}")
+                except Exception as e:
+                    self.logger.error(f"Unexpected error starting thread: {e}")
 
     def stop(self, a: Any = None, b: Any = None, thread_too: bool = False) -> None:
         with self._state_lock:

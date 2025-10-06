@@ -236,21 +236,23 @@ def getVideoWSSVR(self: 'Bot', url: str, filename: str) -> bool:
         # Build FFmpeg command
         cmd = [FFMPEG_PATH, '-hide_banner', '-loglevel', 'error']
         
+        # CRITICAL FIX: Add fflags to ignore broken timestamps
+        cmd.extend(['-fflags', '+igndts+genpts'])
+        
         # Input
         cmd.extend(['-i', tmpfilename, '-ignore_editlist', '1'])
         
         # Stream copy
         cmd.extend(['-c:a', 'copy', '-c:v', 'copy'])
         
-        # Timestamp handling for live streams
-        cmd.extend(['-reset_timestamps', '1'])  # Reset to 0 when joining mid-stream
+        # Timestamp handling - avoid_negative_ts only (no reset_timestamps with igndts+genpts)
+        cmd.extend(['-avoid_negative_ts', 'make_zero'])
         
         # Output format
         if SEGMENT_TIME is not None:
             # Segmented output
             cmd.extend([
                 '-f', 'segment',
-                '-reset_timestamps', '1',
                 '-segment_time', str(SEGMENT_TIME)
             ])
             

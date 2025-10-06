@@ -55,6 +55,8 @@ class Manager(Thread):
                     return command(username, site, extra_param)
                 else:
                     return command()
+            elif command_name == 'resync':
+                return self.do_resync(username, site)
             else:
                 return command(streamer, username, site)
 
@@ -98,6 +100,7 @@ class Manager(Thread):
   {colored("start", "green")} <username|*> [site] - Start monitoring (use {colored("*", "yellow", attrs=["bold"])} for all)
   {colored("stop", "red")} <username|*> [site]  - Stop monitoring (use {colored("*", "yellow", attrs=["bold"])} for all)
   {colored("restart", "cyan")} <username> [site] - Restart specific streamer
+  {colored("resync", "blue", attrs=["bold"])} <username|*> [site|*] - Force status recheck and restart downloads
 
 {colored("📊 Status & Monitoring:", "yellow", attrs=["bold"])}
   {colored("status", "blue")} [username] [site]  - Show detailed status table
@@ -321,6 +324,156 @@ class Manager(Thread):
         start_result = self.do_start(streamer, username, site)
         return f"Restarted [{streamer.siteslug}] {streamer.username}" if "Failed" not in start_result else start_result
 
+    def do_resync(self, username: str, site: str) -> str:
+        """Force status recheck and restart downloads for streamer(s)"""
+        if not username:
+            return colored("⚠️ Missing username. Usage: resync <username|*> [site|*]", "yellow")
+        
+        # Handle * username (all streamers)
+        if username == '*':
+            resynced_count = 0
+            results = []
+            
+            with self._streamers_lock:
+                streamers_copy = list(self.streamers)
+            
+            # Filter by site if specified
+            if site and site != "*":
+                site_cls = Bot.str2site(site)
+                if site_cls:
+                    target_site = site_cls.site
+                    streamers_copy = [s for s in streamers_copy if s.site == target_site]
+                else:
+                    return colored(f"❌ Unknown site: {site}", "red")
+            
+            for s in streamers_copy:
+                try:
+                    result = self._resync_streamer(s)
+                    results.append(f"[{s.siteslug}] {s.username}: {result}")
+                    if "resynced" in result.lower():
+                        resynced_count += 1
+                except Exception as e:
+                    results.append(f"[{s.siteslug}] {s.username}: Error - {e}")
+                    self.logger.error(f"Failed to resync {s.username}: {e}")
+            
+            self.saveConfig()
+            header = colored(f"🔄 Resync Results ({resynced_count} successful):", "blue", attrs=["bold"])
+            colored_results = []
+            for result in results:
+                if "resynced" in result.lower():
+                    colored_results.append(colored(result, "green"))
+                elif "error" in result.lower():
+                    colored_results.append(colored(result, "red"))
+                else:
+                    colored_results.append(colored(result, "yellow"))
+            return f"{header}\n" + "\n".join(colored_results)
+        
+        # Handle specific username
+        # Find matching streamers
+        matching_streamers = []
+        with self._streamers_lock:
+            for s in self.streamers:
+                if s.username.lower() == username.lower():
+                    if site and site != "*":
+                        site_cls = Bot.str2site(site)
+                        if site_cls and s.site == site_cls.site:
+                            matching_streamers.append(s)
+                    else:
+                        matching_streamers.append(s)
+        
+        if not matching_streamers:
+            return colored(f"❌ No streamers found matching: {username}" + (f" on {site}" if site and site != "*" else ""), "red")
+        
+        results = []
+        for s in matching_streamers:
+            try:
+                result = self._resync_streamer(s)
+                results.append(f"[{s.siteslug}] {s.username}: {result}")
+            except Exception as e:
+                results.append(f"[{s.siteslug}] {s.username}: Error - {e}")
+                self.logger.error(f"Failed to resync {s.username}: {e}")
+        
+        self.saveConfig()
+        
+        if len(results) == 1:
+            return results[0]
+        else:
+            header = colored("🔄 Resync Results:", "blue", attrs=["bold"])
+            colored_results = []
+            for result in results:
+                if "resynced" in result.lower():
+                    colored_results.append(colored(result, "green"))
+                elif "error" in result.lower():
+                    colored_results.append(colored(result, "red"))
+                else:
+                    colored_results.append(colored(result, "yellow"))
+            return f"{header}\n" + "\n".join(colored_results)
+
+    def _resync_streamer(self, streamer: Bot) -> str:
+        """Force resync a single streamer - reset status and restart downloads if public"""
+        try:
+            # Force stop any current recording
+            if streamer.recording:
+                self.logger.info(f"Force stopping [{streamer.siteslug}] {streamer.username} for resync...")
+                streamer.stop(None, None)
+                
+                # Wait for recording to stop
+                wait_count = 0
+                max_wait = 15  # 15 seconds timeout for resync
+                while streamer.recording and wait_count < max_wait:
+                    time.sleep(1)
+                    wait_count += 1
+                
+                if streamer.recording:
+                    return f"⚠️ Timeout stopping recording for resync"
+            
+            # Reset bot status to force fresh check
+            streamer.sc = Status.UNKNOWN
+            streamer.previous_status = None
+            streamer.lastInfo = {}
+            
+            # Force a fresh status check
+            try:
+                new_status = streamer.getStatus()
+                self.logger.info(f"[{streamer.siteslug}] {streamer.username} resync status: {new_status.name}")
+                
+                # If public and downloadable, force restart to begin download
+                if new_status == Status.PUBLIC:
+                    if not streamer.running:
+                        streamer.start()
+                    streamer.restart()
+                    return f"✅ Resynced and started download (PUBLIC)"
+                elif new_status == Status.PRIVATE:
+                    if not streamer.running:
+                        streamer.start()
+                    streamer.restart()
+                    return f"🔒 Resynced - in private show"
+                elif new_status == Status.OFFLINE:
+                    if not streamer.running:
+                        streamer.start()
+                    streamer.restart()
+                    return f"🟡 Resynced - model offline"
+                elif new_status == Status.DELETED:
+                    return f"🗑️ Model account deleted - will be auto-removed"
+                elif new_status == Status.NOTEXIST:
+                    return f"❌ Model does not exist - will be auto-removed"
+                else:
+                    if not streamer.running:
+                        streamer.start()
+                    streamer.restart()
+                    return f"🔄 Resynced - status: {new_status.name}"
+                    
+            except Exception as status_error:
+                self.logger.error(f"Error getting status during resync for {streamer.username}: {status_error}")
+                # Still try to restart
+                if not streamer.running:
+                    streamer.start()
+                streamer.restart()
+                return f"⚠️ Resynced with status error: {status_error}"
+                
+        except Exception as e:
+            return f"❌ Resync failed: {e}"
+
     def do_move(self, streamer: Optional[Bot], username: str, site: str) -> str:
         """Move completed files to unprocessed folder."""
         unprocessed_dir = os.path.join(os.path.dirname(DOWNLOADS_DIR), "unprocessed")
@@ -361,7 +514,7 @@ class Manager(Thread):
             result = self._move_streamer_files(streamer, unprocessed_dir)
             return f"[{streamer.siteslug}] {streamer.username}: {result}"
 
-    def _move_streamer_files(self, streamer: Bot, unprocessed_dir: str) -> str:
+    def f_move_streamer_files(self, streamer: Bot, unprocessed_dir: str) -> str:
         """Helper method to move files for a single streamer."""
         try:
             source_folder = streamer.outputFolder
@@ -372,8 +525,29 @@ class Manager(Thread):
                 return "No files to move"
             
             was_running = streamer.running
-            if streamer.recording:
+            was_recording = streamer.recording
+            
+            # Stop the streamer if it's recording
+            if was_recording:
+                self.logger.info(f"Stopping [{streamer.siteslug}] {streamer.username} for file move...")
                 streamer.stop(None, None)
+                
+                # Wait for recording to actually stop with timeout
+                wait_count = 0
+                max_wait = 30  # 30 seconds timeout
+                while streamer.recording and wait_count < max_wait:
+                    time.sleep(1)
+                    wait_count += 1
+                    if wait_count % 5 == 0:  # Log every 5 seconds
+                        self.logger.info(f"Waiting for [{streamer.siteslug}] {streamer.username} to stop recording... ({wait_count}s)")
+                
+                if streamer.recording:
+                    self.logger.warning(f"[{streamer.siteslug}] {streamer.username} didn't stop recording after {max_wait}s timeout")
+                    if was_running:
+                        self._ensure_streamer_running(streamer)
+                    return f"Timeout waiting for recording to stop (waited {max_wait}s)"
+                else:
+                    self.logger.info(f"[{streamer.siteslug}] {streamer.username} stopped successfully")
                 
             folder_name = f"{streamer.username} [{streamer.siteslug}]"
             dest_folder = os.path.join(unprocessed_dir, folder_name)
@@ -385,7 +559,7 @@ class Manager(Thread):
                 
                 if conflicts:
                     if was_running:
-                        streamer.restart()
+                        self._ensure_streamer_running(streamer)
                     return f"Unable to move - conflicts detected: {', '.join(list(conflicts)[:3])}{'...' if len(conflicts) > 3 else ''}"
             
             if not os.path.exists(dest_folder):
@@ -396,9 +570,23 @@ class Manager(Thread):
                     src_path = os.path.join(source_folder, item)
                     dst_path = os.path.join(dest_folder, item)
                     shutil.move(src_path, dst_path)
+                
+                # Remove empty source folder after moving all files
+                try:
+                    if os.path.exists(source_folder) and not os.listdir(source_folder):
+                        os.rmdir(source_folder)
+                        self.logger.info(f"Removed empty folder: {source_folder}")
+                except OSError as e:
+                    self.logger.warning(f"Could not remove empty folder {source_folder}: {e}")
             
+            # Restart the streamer if it was running before
             if was_running:
-                streamer.restart()
+                self.logger.info(f"Restarting [{streamer.siteslug}] {streamer.username}...")
+                success = self._ensure_streamer_running(streamer)
+                if success:
+                    self.logger.info(f"[{streamer.siteslug}] {streamer.username} restarted successfully")
+                else:
+                    self.logger.warning(f"[{streamer.siteslug}] {streamer.username} failed to restart - may need manual intervention")
             
             return "Files moved successfully"
                 
@@ -406,10 +594,53 @@ class Manager(Thread):
             self.logger.error(f"Error moving files for {streamer.username}: {e}")
             if was_running:
                 try:
-                    streamer.restart()
-                except:
-                    pass
+                    self.logger.info(f"Attempting emergency restart for [{streamer.siteslug}] {streamer.username}")
+                    self._ensure_streamer_running(streamer)
+                except Exception as restart_error:
+                    self.logger.error(f"Emergency restart failed for {streamer.username}: {restart_error}")
             return f"Error: {e}"
+
+    def _ensure_streamer_running(self, streamer: Bot) -> bool:
+        """Ensure a streamer is properly running, recreating if necessary"""
+        try:
+            # If thread is dead, we need to recreate the streamer
+            if not streamer.is_alive():
+                self.logger.warning(f"Thread is dead for [{streamer.siteslug}] {streamer.username}, recreating...")
+                
+                # Create new streamer instance
+                new_streamer = Bot.createInstance(streamer.username, streamer.siteslug)
+                if not new_streamer:
+                    self.logger.error(f"Failed to recreate [{streamer.siteslug}] {streamer.username}")
+                    return False
+                
+                # Replace in streamers list
+                with self._streamers_lock:
+                    try:
+                        old_index = self.streamers.index(streamer)
+                        self.streamers[old_index] = new_streamer
+                        
+                        # Clean up old logger
+                        logger_key = f"[{streamer.siteslug}] {streamer.username}"
+                        Bot.cleanup_logger_cache(logger_key)
+                        
+                    except ValueError:
+                        self.logger.error(f"Could not find old streamer in list for {streamer.username}")
+                        return False
+                
+                # Start the new streamer
+                new_streamer.start()
+                new_streamer.restart()
+                
+                self.logger.info(f"Successfully recreated [{new_streamer.siteslug}] {new_streamer.username}")
+                return True
+            else:
+                # Thread is alive, just restart
+                streamer.restart()
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Error ensuring streamer running for {streamer.username}: {e}")
+            return False
         
     def do_status(self, streamer: Optional[Bot], username: str, site: str) -> str:
         """Show detailed status table of streamers"""

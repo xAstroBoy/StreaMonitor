@@ -181,13 +181,19 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
         if hls_supports('m3u8_hold_counters'):
             cmd.extend(['-m3u8_hold_counters', '30'])
         
-        # FFmpeg flags
+        # FFmpeg flags - CRITICAL FIX: Combine all fflags into ONE argument
+        fflags_parts = []
         if FFSettings.ENABLE_FFLAGS_NOBUFFER:
-            cmd.extend(['-fflags', 'nobuffer'])
+            fflags_parts.append('nobuffer')
         if FFSettings.ENABLE_FFLAGS_DISCARDCORRUPT:
-            cmd.extend(['-fflags', '+discardcorrupt'])
+            fflags_parts.append('+discardcorrupt')
         if FFSettings.USE_GENPTS:
-            cmd.extend(['-fflags', '+genpts'])
+            fflags_parts.append('+genpts')
+        # CRITICAL: Always add +igndts to ignore broken DTS from long-running live streams
+        fflags_parts.append('+igndts')
+        
+        if fflags_parts:
+            cmd.extend(['-fflags', ''.join(fflags_parts)])
         
         cmd.extend(['-probesize', FFSettings.PROBESIZE, '-analyzeduration', FFSettings.ANALYSEDURATION_US])
         
@@ -208,9 +214,9 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
             cmd.extend(['-bsf:a', 'aac_adtstoasc'])
         
         # Common muxer tuning for MKV and MP4
+        # NOTE: Removed -reset_timestamps since +igndts+genpts handles it better
         if MUX in ('mkv', 'mp4'):
             cmd.extend([
-                '-reset_timestamps', '1',  # REQUIRED: resets to 0 when joining live stream
                 '-avoid_negative_ts', 'make_zero',
                 '-muxpreload', '0',
                 '-muxdelay', '0',
@@ -227,7 +233,6 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
             cmd.extend([
                 '-f', 'segment',
                 '-segment_format', SEGMENT_FMT,
-                '-reset_timestamps', '1',
                 '-segment_time', str(SEGMENT_TIME),
                 '-strftime', '1'
             ])

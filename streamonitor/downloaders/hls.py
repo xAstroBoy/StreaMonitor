@@ -310,8 +310,8 @@ def _format_bytes(size: int) -> str:
 
 def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Optional[Callable[[str], str]] = None) -> bool:
     """
-    Robust HLS capture that writes growing .tmp.ts during live show.
-    Fixed to prevent corrupted/empty files.
+    Robust HLS capture that writes to .tmp.ts for post-processing.
+    NO RENAME - file stays as .tmp.ts for external post-processing.
     """
     self.stopDownloadFlag = False
     writer_ref = {"w": None}
@@ -332,9 +332,10 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
 
     self.stopDownload = _stop_both
 
-    # Output: use the final filename directly, not .tmp.ts
-    final_path = filename
-    out_dir = os.path.dirname(final_path)
+    # CRITICAL: Always write to .tmp.ts - NO RENAME, leave for post-processing
+    base_name = os.path.splitext(filename)[0]
+    output_path = base_name + '.tmp.ts'
+    out_dir = os.path.dirname(output_path)
     os.makedirs(out_dir, exist_ok=True)
 
     # Headers
@@ -427,8 +428,8 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
             pass
         return False
 
-    # Start FFmpeg with local playlist
-    ok = _ffmpeg_dump_to_ts(self, writer.path, headers, final_path, ffmpeg_proc_ref, local_m3u=True)
+    # Start FFmpeg with local playlist - WRITE TO .tmp.ts (NO RENAME - for post-processing)
+    ok = _ffmpeg_dump_to_ts(self, writer.path, headers, output_path, ffmpeg_proc_ref, local_m3u=True)
 
     # Cleanup
     try:
@@ -440,7 +441,7 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
     except Exception:
         pass
 
-    # Validate output
+    # Validate output (.tmp.ts file - no rename)
     try:
         if not os.path.exists(final_path):
             self.logger.error("Output file does not exist")
@@ -478,16 +479,14 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
         hdrs["Cookie"] = headers["Cookie"]
     hdr_blob = "\r\n".join(f"{k}: {v}" for k, v in hdrs.items()) + "\r\n"
 
-    # Base command - FIXED FLAGS
+    # Base command - FIXED FLAGS (CRITICAL: All fflags combined into ONE argument)
     cmd = [
         FFMPEG_PATH,
         "-hide_banner", "-loglevel", "info", "-nostdin",
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,pipe",
-        "-fflags", "nobuffer",
-        "-fflags", "+discardcorrupt",
-        "-fflags", "+genpts",
-        "-probesize", "4M",  # REDUCED from 64M
-        "-analyzeduration", "10000000",  # REDUCED from 120M (10 seconds)
+        "-fflags", "+igndts+genpts+discardcorrupt+nobuffer",  # COMBINED: ignore broken DTS, generate PTS, discard corrupt, no buffer
+        "-probesize", "4M",
+        "-analyzeduration", "10000000",  # 10 seconds
     ]
 
     # Network options for remote URLs
@@ -519,7 +518,6 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
 
     # Timestamp handling for live streams
     cmd.extend([
-        "-reset_timestamps", "1",  # REQUIRED: resets to 0 when joining mid-stream
         "-avoid_negative_ts", "make_zero",
         "-muxpreload", "0",
         "-muxdelay", "0",
