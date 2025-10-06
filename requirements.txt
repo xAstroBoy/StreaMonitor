@@ -3,13 +3,14 @@ terminaltables
 pyzmq
 flask
 termcolor
+colorama
 beautifulsoup4
 websocket-client
 ffmpy
 m3u8
+curl_cffi
 fake-useragent
 python-environ
 pycurl
 pycurl-requests
-playwright
-curl_cffi
+filelock
