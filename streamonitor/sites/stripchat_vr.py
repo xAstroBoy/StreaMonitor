@@ -124,7 +124,7 @@ class StripChatVR(StripChat):
         if not self.lastInfo:
             return False
 
-        # Check 1: Explicit isVr flags
+        # Check 1: Explicit isVr flags - MOST IMPORTANT CHECK
         paths = [
             ["isVr"],
             ["model", "isVr"],
@@ -133,12 +133,21 @@ class StripChatVR(StripChat):
             ["cam", "isVr"],
         ]
         val = self._first_in_paths(paths)
-        if val is not None and bool(val):
-            return True
+        if val is not None:
+            # If isVr is explicitly False, model is NOT VR-capable
+            if val is False:
+                return False
+            # If isVr is explicitly True, model IS VR-capable
+            if val is True:
+                return True
 
-        # Check 2: VR camera settings exist
+        # Check 2: VR camera settings exist AND are not empty
         vr_cam_settings = self._find_vr_cam_settings()
         if isinstance(vr_cam_settings, dict) and vr_cam_settings:
+            # For VR settings to be valid, they must be a non-empty dict/list with actual VR data
+            if isinstance(vr_cam_settings, list) and len(vr_cam_settings) == 0:
+                return False  # Empty array means no VR settings
+            
             # Valid VR settings should have at least one of these keys
             vr_keys = ("frameFormat", "stereoPacking", "horizontalAngle", "verticalAngle", 
                       "frame_format", "stereo_packing", "horizontal_angle", "vertical_angle",
@@ -146,27 +155,25 @@ class StripChatVR(StripChat):
             if any(k in vr_cam_settings for k in vr_keys):
                 return True
 
-        # Check 3: Broadcast settings indicate VR
+        # Check 3: Broadcast settings indicate VR (but be careful of default configs)
         broadcast_settings = self._find_broadcast_settings()
         if isinstance(broadcast_settings, dict) and broadcast_settings:
             # Check for VR-specific fields in broadcast settings
-            if "vrCameraSettings" in broadcast_settings:
-                return True
-            if broadcast_settings.get("isVr"):
-                return True
-
-        # Check 4: Recursive search for VR indicators
-        for key in ("isVr", "vrCameraSettings", "frameFormat", "stereoPacking"):
-            found = self._recursive_find(self.lastInfo, key)
-            if found is not None:
-                # For boolean flags, check the value
-                if key == "isVr":
-                    if bool(found):
-                        return True
-                else:
-                    # For settings/objects, presence is enough
+            vr_settings = broadcast_settings.get("vrCameraSettings")
+            if vr_settings:
+                # Must be non-empty and contain actual VR data
+                if isinstance(vr_settings, list) and len(vr_settings) > 0:
                     return True
+                elif isinstance(vr_settings, dict) and vr_settings:
+                    # Check if it has actual VR data, not just default config
+                    vr_keys = ("frameFormat", "stereoPacking", "horizontalAngle", "verticalAngle")
+                    if any(k in vr_settings for k in vr_keys):
+                        return True
+            
+            if broadcast_settings.get("isVr") is True:
+                return True
 
+        # If we reach here, no VR indicators found
         return False
 
     def getIsVrModel(self) -> bool:

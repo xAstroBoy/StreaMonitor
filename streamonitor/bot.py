@@ -362,11 +362,20 @@ class Bot(Thread):
     def _post_download_cleanup(self, final_path: str, ok: bool) -> bool:
         """Verify final file and clean up temporary files on failure."""
         try:
-            if ok and self._is_zero_or_missing(final_path):
-                self.logger.error(f"Output file is 0 KB or missing: {final_path}")
-                if os.path.exists(final_path):
+            # For HLS downloads, check the actual .tmp.ts file instead of .mkv
+            actual_file = final_path
+            stem, ext = os.path.splitext(final_path)
+            tmp_ts_file = stem + '.tmp.ts'
+            
+            # If .tmp.ts file exists, that's the actual output file for HLS
+            if os.path.exists(tmp_ts_file) and not os.path.exists(final_path):
+                actual_file = tmp_ts_file
+            
+            if ok and self._is_zero_or_missing(actual_file):
+                self.logger.error(f"Output file is 0 KB or missing: {actual_file}")
+                if os.path.exists(actual_file):
                     try:
-                        os.remove(final_path)
+                        os.remove(actual_file)
                         self.logger.info("Removed zero-byte output file")
                     except Exception as e:
                         self.logger.warning(f"Failed to remove zero-byte file: {e}")
@@ -374,9 +383,10 @@ class Bot(Thread):
                 self.isRetryingDownload = True
 
             if not ok and self.clean_failed_temp:
-                if os.path.exists(final_path) and self._is_zero_or_missing(final_path):
+                # Clean up the actual file that was created
+                if os.path.exists(actual_file) and self._is_zero_or_missing(actual_file):
                     try:
-                        os.remove(final_path)
+                        os.remove(actual_file)
                         self.logger.info("Removed failed output file")
                     except Exception as e:
                         self.logger.warning(f"Failed to remove failed output: {e}")

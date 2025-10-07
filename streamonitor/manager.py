@@ -603,11 +603,23 @@ class Manager(Thread):
             if not streamer.is_alive():
                 self.logger.warning(f"Thread is dead for [{streamer.siteslug}] {streamer.username}, recreating...")
                 
+                # Store previous state to preserve offline timing
+                previous_status = getattr(streamer, 'sc', None)
+                previous_last_seen = getattr(streamer, 'last_seen_online', None)
+                
                 # Create new streamer instance
                 new_streamer = Bot.createInstance(streamer.username, streamer.siteslug)
                 if not new_streamer:
                     self.logger.error(f"Failed to recreate [{streamer.siteslug}] {streamer.username}")
                     return False
+                
+                # Preserve important state to prevent immediate "No stream for a while" messages
+                if previous_status and previous_status.name in ['OFFLINE', 'LONG_OFFLINE']:
+                    # Set status to UNKNOWN to force fresh check instead of inheriting old offline state
+                    new_streamer.sc = Status.UNKNOWN
+                    # Preserve last seen time if available
+                    if previous_last_seen:
+                        new_streamer.last_seen_online = previous_last_seen
                 
                 # Replace in streamers list
                 with self._streamers_lock:
