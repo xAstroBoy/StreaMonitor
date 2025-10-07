@@ -74,7 +74,6 @@ class Bot(Thread):
         Status.UNKNOWN: colored("Unknown error", "red"),
         Status.PUBLIC: colored("Channel online", "green", attrs=["bold"]),
         Status.OFFLINE: colored("No stream", "yellow"),
-        Status.LONG_OFFLINE: colored("No stream for a while", "yellow"),
         Status.PRIVATE: colored("Private show", "magenta"),
         Status.DELETED: colored("Model account deleted", "red", attrs=["bold"]),
         Status.RATELIMIT: colored("Rate limited", "red", attrs=["bold"]),
