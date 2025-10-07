@@ -57,10 +57,10 @@ class Bot(Thread):
     recording: bool = False
     sleep_on_private: int = 5
     sleep_on_offline: int = 5
-    sleep_on_long_offline: int = 300
+    sleep_on_long_offline: int = 15  # Further reduced from 30 to 15 seconds
     sleep_on_error: int = 20
     sleep_on_ratelimit: int = 180
-    long_offline_timeout: int = 600
+    long_offline_timeout: int = 180  # Reduced from 300 to 180 seconds (3min instead of 5min)
     previous_status: Optional[Status] = None
 
     # Manager registry for auto-removal of deleted models
@@ -184,7 +184,19 @@ class Bot(Thread):
             if not self.running:
                 self.logger.verbose("Starting bot...")
                 self._consecutive_errors = 0
+                
+            # If model was offline before restart, reset to force fresh check
+            if self.sc == Status.OFFLINE:
+                self.sc = Status.UNKNOWN
+                self.logger.verbose("Previous state was offline, forcing fresh status check")
+                
             self.running = True
+            
+            # Reset previous_status to ensure fresh status logging after restart
+            self.previous_status = None
+            
+            # Reset offline timing on restart
+            self._last_restart_time = datetime.now().timestamp()
             
             # Ensure the thread is actually alive
             if not self.is_alive():
@@ -542,10 +554,17 @@ class Bot(Thread):
 
                     elif self.sc == Status.OFFLINE:
                         offline_time += self.sleep_on_offline
-                        if offline_time > self.long_offline_timeout:
-                            self.sc = Status.LONG_OFFLINE
-                            self.log(self.status())
-                        self._sleep(self.sleep_on_offline if offline_time <= self.long_offline_timeout else self.sleep_on_long_offline)
+                        
+                        # Smart offline detection - if just restarted, reset offline timer
+                        if hasattr(self, '_last_restart_time'):
+                            time_since_restart = datetime.now().timestamp() - self._last_restart_time
+                            if time_since_restart < 60:  # Less than 1 minute since restart
+                                offline_time = 0  # Reset offline timer on fresh restart
+                                self.logger.verbose("Reset offline timer due to recent restart")
+                        
+                        # Just sleep longer after timeout, but don't change status or spam logs
+                        sleep_time = self.sleep_on_long_offline if offline_time > self.long_offline_timeout else self.sleep_on_offline
+                        self._sleep(sleep_time)
                         continue
 
                     elif self.sc == Status.PRIVATE:

@@ -8,9 +8,10 @@ import psutil
 import json
 import sys
 import time
+from datetime import datetime
 from logging import INFO, WARN, ERROR
 from threading import Thread, RLock
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from termcolor import colored
 import terminaltables.terminal_io
 from terminaltables import AsciiTable
@@ -33,6 +34,16 @@ class Manager(Thread):
         # Thread safety for streamer list modifications
         self._streamers_lock = RLock()
         
+        # Bot pooling for efficient reuse
+        self._bot_pool: Dict[str, Bot] = {}  # key: "username_site", value: Bot instance
+        self._pool_lock = RLock()
+        
+        # Initialize pool with existing bots
+        with self._streamers_lock:
+            for bot in self.streamers:
+                pool_key = f"{bot.username}_{bot.siteslug}"
+                self._bot_pool[pool_key] = bot
+        
         # Register this manager instance for auto-removal functionality
         Bot.register_manager(self)
 
@@ -50,7 +61,7 @@ class Manager(Thread):
             extra_param = parts[3] if len(parts) > 3 else ""
             streamer = self.getStreamer(username, site)
             
-            if command_name in ['help', 'enabledebug', 'debug', 'cleanup', 'getjson']:
+            if command_name in ['help', 'enabledebug', 'debug', 'cleanup', 'getjson', 'cls']:
                 if command_name == 'getjson':
                     return command(username, site, extra_param)
                 else:
@@ -152,7 +163,8 @@ class Manager(Thread):
                     continue
                 
                 try:
-                    new_streamer = Bot.createInstance(username, site_code)
+                    # Use pooled bot instead of creating new
+                    new_streamer = self._get_pooled_bot(username, site_code)
                     if not new_streamer:
                         results.append(colored(f"❌ Failed to create [{site_code}] {username}", "red"))
                         continue
@@ -160,7 +172,8 @@ class Manager(Thread):
                     with self._streamers_lock:
                         self.streamers.append(new_streamer)
                     
-                    new_streamer.start()
+                    if not new_streamer.is_alive():
+                        new_streamer.start()
                     new_streamer.restart()
                     
                     if "VR" in new_streamer.siteslug:
@@ -178,14 +191,16 @@ class Manager(Thread):
             return colored('⚠️ Streamer already exists', 'yellow')
         
         try:
-            streamer = Bot.createInstance(username, site)
+            # Use pooled bot instead of creating new
+            streamer = self._get_pooled_bot(username, site)
             if not streamer:
                 return colored(f"❌ Failed to create streamer instance for site: {site}", "red")
             
             with self._streamers_lock:
                 self.streamers.append(streamer)
             
-            streamer.start()
+            if not streamer.is_alive():
+                streamer.start()
             streamer.restart()
             self.saveConfig()
             
@@ -217,7 +232,8 @@ class Manager(Thread):
                 try:
                     s.stop(None, None, thread_too=True)
                     
-                    # Clean up logger to prevent memory leak
+                    # Remove from pool and clean up logger
+                    self._remove_from_pool(s.username, s.siteslug)
                     logger_key = f"[{s.siteslug}] {s.username}"
                     Bot.cleanup_logger_cache(logger_key)
                     
@@ -243,7 +259,8 @@ class Manager(Thread):
         try:
             streamer.stop(None, None, thread_too=True)
             
-            # Clean up logger to prevent memory leak
+            # Remove from pool and clean up logger
+            self._remove_from_pool(streamer.username, streamer.siteslug)
             logger_key = f"[{streamer.siteslug}] {streamer.username}"
             Bot.cleanup_logger_cache(logger_key)
             
@@ -494,7 +511,7 @@ class Manager(Thread):
                 if moved_count == 0:
                     return colored("📁 No files to move", "yellow")
                 elif results:
-                    header = colored(f"📦 Moved files for {moved_count} streamer(s):", "green", attrs=["bold"])
+                    header = colored(f"📦 Moved files for {moved_count} moved streamer(s):", "green", attrs=["bold"])
                     colored_results = []
                     for result in results:
                         if "Files moved successfully" in result:
@@ -596,51 +613,123 @@ class Manager(Thread):
                     self.logger.error(f"Emergency restart failed for {streamer.username}: {restart_error}")
             return f"Error: {e}"
 
+    def _get_pooled_bot(self, username: str, site: str) -> Optional[Bot]:
+        """Get an existing bot from the pool or create a new one"""
+        # Normalize site name
+        site_cls = Bot.str2site(site)
+        if site_cls:
+            site = site_cls.siteslug
+        
+        pool_key = f"{username}_{site}"
+        
+        with self._pool_lock:
+            # Check if we have a bot in the pool
+            if pool_key in self._bot_pool:
+                existing_bot = self._bot_pool[pool_key]
+                
+                # Check if the bot is still valid and usable
+                if existing_bot and hasattr(existing_bot, 'username'):
+                    self.logger.debug(f"Reusing pooled bot for {pool_key}")
+                    return existing_bot
+                else:
+                    # Remove invalid bot from pool
+                    del self._bot_pool[pool_key]
+            
+            # Create new bot if not in pool
+            new_bot = Bot.createInstance(username, site)
+            if new_bot:
+                self._bot_pool[pool_key] = new_bot
+                self.logger.debug(f"Created new bot for {pool_key}")
+                return new_bot
+            
+            return None
+
+    def _remove_from_pool(self, username: str, site: str) -> None:
+        """Remove a bot from the pool when it's being deleted"""
+        site_cls = Bot.str2site(site)
+        if site_cls:
+            site = site_cls.siteslug
+        
+        pool_key = f"{username}_{site}"
+        
+        with self._pool_lock:
+            if pool_key in self._bot_pool:
+                del self._bot_pool[pool_key]
+                self.logger.debug(f"Removed {pool_key} from bot pool")
+
     def _ensure_streamer_running(self, streamer: Bot) -> bool:
-        """Ensure a streamer is properly running, recreating if necessary"""
+        """Ensure a streamer is properly running, reusing from pool if possible"""
         try:
-            # If thread is dead, we need to recreate the streamer
+            # If thread is dead, try to reuse from pool first
             if not streamer.is_alive():
-                self.logger.warning(f"Thread is dead for [{streamer.siteslug}] {streamer.username}, recreating...")
+                self.logger.warning(f"Thread is dead for [{streamer.siteslug}] {streamer.username}, checking pool...")
                 
-                # Store previous state to preserve offline timing
-                previous_status = getattr(streamer, 'sc', None)
-                previous_last_seen = getattr(streamer, 'last_seen_online', None)
+                # Try to get from pool
+                pooled_bot = self._get_pooled_bot(streamer.username, streamer.siteslug)
                 
-                # Create new streamer instance
-                new_streamer = Bot.createInstance(streamer.username, streamer.siteslug)
-                if not new_streamer:
-                    self.logger.error(f"Failed to recreate [{streamer.siteslug}] {streamer.username}")
-                    return False
+                if pooled_bot and pooled_bot != streamer:
+                    # We got a different bot from pool, use it
+                    self.logger.info(f"Reusing pooled bot for [{streamer.siteslug}] {streamer.username}")
+                    
+                    # Replace in streamers list
+                    with self._streamers_lock:
+                        try:
+                            old_index = self.streamers.index(streamer)
+                            self.streamers[old_index] = pooled_bot
+                            
+                            # Clean up old logger
+                            logger_key = f"[{streamer.siteslug}] {streamer.username}"
+                            Bot.cleanup_logger_cache(logger_key)
+                            
+                        except ValueError:
+                            self.logger.error(f"Could not find old streamer in list for {streamer.username}")
+                            return False
+                    
+                    # Start the pooled bot if needed
+                    if not pooled_bot.is_alive():
+                        pooled_bot.start()
+                    pooled_bot.restart()
+                    
+                    self.logger.info(f"Successfully reused pooled bot for [{pooled_bot.siteslug}] {pooled_bot.username}")
+                    return True
                 
-                # Preserve important state to prevent immediate "No stream for a while" messages
-                if previous_status and previous_status.name in ['OFFLINE', 'LONG_OFFLINE']:
-                    # Set status to UNKNOWN to force fresh check instead of inheriting old offline state
-                    new_streamer.sc = Status.UNKNOWN
-                    # Preserve last seen time if available
-                    if previous_last_seen:
-                        new_streamer.last_seen_online = previous_last_seen
-                
-                # Replace in streamers list
-                with self._streamers_lock:
-                    try:
-                        old_index = self.streamers.index(streamer)
-                        self.streamers[old_index] = new_streamer
-                        
-                        # Clean up old logger
-                        logger_key = f"[{streamer.siteslug}] {streamer.username}"
-                        Bot.cleanup_logger_cache(logger_key)
-                        
-                    except ValueError:
-                        self.logger.error(f"Could not find old streamer in list for {streamer.username}")
+                elif pooled_bot == streamer:
+                    # Same bot, but thread is dead - need to recreate
+                    self.logger.warning(f"Pooled bot thread also dead, recreating [{streamer.siteslug}] {streamer.username}")
+                    
+                    # Remove dead bot from pool
+                    self._remove_from_pool(streamer.username, streamer.siteslug)
+                    
+                    # Create fresh bot
+                    new_streamer = self._get_pooled_bot(streamer.username, streamer.siteslug)
+                    if not new_streamer:
+                        self.logger.error(f"Failed to create fresh bot for [{streamer.siteslug}] {streamer.username}")
                         return False
+                    
+                    # Replace in streamers list
+                    with self._streamers_lock:
+                        try:
+                            old_index = self.streamers.index(streamer)
+                            self.streamers[old_index] = new_streamer
+                            
+                            # Clean up old logger
+                            logger_key = f"[{streamer.siteslug}] {streamer.username}"
+                            Bot.cleanup_logger_cache(logger_key)
+                            
+                        except ValueError:
+                            self.logger.error(f"Could not find old streamer in list for {streamer.username}")
+                            return False
+                    
+                    # Start the new bot
+                    new_streamer.start()
+                    new_streamer.restart()
+                    
+                    self.logger.info(f"Successfully recreated bot for [{new_streamer.siteslug}] {new_streamer.username}")
+                    return True
                 
-                # Start the new streamer
-                new_streamer.start()
-                new_streamer.restart()
-                
-                self.logger.info(f"Successfully recreated [{new_streamer.siteslug}] {new_streamer.username}")
-                return True
+                else:
+                    self.logger.error(f"Failed to get bot from pool for [{streamer.siteslug}] {streamer.username}")
+                    return False
             else:
                 # Thread is alive, just restart
                 streamer.restart()
@@ -1007,3 +1096,148 @@ class Manager(Thread):
                     
         except Exception as e:
             return colored(f"❌ Error creating temporary file: {e}", "red")
+
+    def do_refresh(self, streamer: Optional[Bot], username: str, site: str) -> str:
+        """Force status recheck and start recording if model is live - use * for all"""
+        if not streamer:
+            if username == '*':
+                # Batch processing for better performance
+                refreshed_count = 0
+                started_recording = 0
+                results = []
+                
+                with self._streamers_lock:
+                    streamers_copy = list(self.streamers)
+                
+                # Group streamers by site for potential batch API calls
+                site_groups = {}
+                for s in streamers_copy:
+                    site_key = s.site
+                    if site_key not in site_groups:
+                        site_groups[site_key] = []
+                    site_groups[site_key].append(s)
+                
+                # Process each site group
+                for site_name, streamers_list in site_groups.items():
+                    self.logger.info(f"Refreshing {len(streamers_list)} streamers on {site_name}")
+                    
+                    for s in streamers_list:
+                        try:
+                            # Ensure bot thread is running
+                            if not s.is_alive():
+                                s.start()
+                            if not s.running:
+                                s.restart()
+                            
+                            # Force immediate status check
+                            old_status = s.sc
+                            new_status = s.getStatus()
+                            s.sc = new_status
+                            
+                            refreshed_count += 1
+                            
+                            # Log status if changed or if PUBLIC (potentially recording)
+                            if old_status != new_status or new_status == Status.PUBLIC:
+                                s.log(s.status())
+                                if new_status == Status.PUBLIC:
+                                    started_recording += 1
+                                    if "VR" in s.siteslug:
+                                        results.append(f"🥽 [{s.siteslug}] {s.username}: {s.status()}")
+                                    else:
+                                        results.append(f"📺 [{s.siteslug}] {s.username}: {s.status()}")
+                        
+                        except Exception as e:
+                            self.logger.error(f"Failed to refresh {s.username}: {e}")
+                            results.append(f"❌ [{s.siteslug}] {s.username}: Error - {e}")
+                    
+                    # Small delay between site groups to avoid overwhelming servers
+                    if len(site_groups) > 1:
+                        time.sleep(0.5)
+                
+                header = colored(f"🔄 Refreshed {refreshed_count} streamer(s)", "blue", attrs=["bold"])
+                if started_recording > 0:
+                    header += colored(f" - {started_recording} started recording!", "green", attrs=["bold"])
+                
+                if results:
+                    return f"{header}\n" + "\n".join(results)
+                else:
+                    return header
+        else:
+            try:
+                # Ensure bot thread is running
+                if not streamer.is_alive():
+                    streamer.start()
+                if not streamer.running:
+                    streamer.restart()
+                
+                # Force immediate status check
+                old_status = streamer.sc
+                new_status = streamer.getStatus()
+                streamer.sc = new_status
+                
+                # Log status if changed or if PUBLIC (potentially recording)
+                if old_status != new_status or new_status == Status.PUBLIC:
+                    streamer.log(streamer.status())
+                    if new_status == Status.PUBLIC:
+                        return f"🥽 [{streamer.siteslug}] {streamer.username} is now live and recording!"
+                
+                return f"Status refreshed for [{streamer.siteslug}] {streamer.username}"
+            except Exception as e:
+                return f"Error refreshing status: {e}"
+
+    def do_smart_check(self) -> str:
+        """Smart status check - prioritize likely-to-be-online models"""
+        current_hour = datetime.now().hour
+        
+        with self._streamers_lock:
+            streamers_copy = list(self.streamers)
+        
+        # Categorize streamers by priority
+        high_priority = []  # Currently recording or recently online
+        medium_priority = []  # Online in last 24h during this time
+        low_priority = []  # Long offline or never seen online
+        
+        for s in streamers_copy:
+            if s.recording or s.sc == Status.PUBLIC:
+                high_priority.append(s)
+            elif s.sc == Status.PRIVATE:
+                medium_priority.append(s)
+            else:
+                low_priority.append(s)
+        
+        results = []
+        total_checked = 0
+        
+        # Check high priority first (immediate)
+        for s in high_priority:
+            old_status = s.sc
+            new_status = s.getStatus()
+            if old_status != new_status:
+                results.append(f"🔥 [{s.siteslug}] {s.username}: {old_status.name} → {new_status.name}")
+            total_checked += 1
+        
+        # Check medium priority (small delay)
+        for i, s in enumerate(medium_priority):
+            if i > 0 and i % 5 == 0:  # Small delay every 5 checks
+                time.sleep(0.1)
+            old_status = s.sc
+            new_status = s.getStatus()
+            if old_status != new_status:
+                results.append(f"🟡 [{s.siteslug}] {s.username}: {old_status.name} → {new_status.name}")
+            total_checked += 1
+        
+        # Check low priority (longer delays, sample only)
+        sample_size = min(10, len(low_priority))  # Check max 10 low priority
+        for i, s in enumerate(low_priority[:sample_size]):
+            time.sleep(0.2)  # Longer delay for low priority
+            old_status = s.sc
+            new_status = s.getStatus()
+            if old_status != new_status:
+                results.append(f"🔵 [{s.siteslug}] {s.username}: {old_status.name} → {new_status.name}")
+            total_checked += 1
+        
+        header = colored(f"🧠 Smart check completed - {total_checked} streamers checked", "cyan", attrs=["bold"])
+        if results:
+            return f"{header}\n" + "\n".join(results)
+        else:
+            return f"{header}\nNo status changes detected"
