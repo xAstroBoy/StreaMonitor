@@ -118,38 +118,6 @@ class StripChat(Bot):
             _start += _mouflon_start + len(_needle)
         return None, None, None
 
-    def getWebsiteURL(self):
-        return "https://stripchat.com/" + self.username
-
-    def getVideoUrl(self):
-        return self.getWantedResolutionPlaylist(None)
-
-    def getPlaylistVariants(self, url):
-        url = "https://edge-hls.{host}/hls/{id}{vr}/master/{id}{vr}{auto}.m3u8".format(
-                host='doppiocdn.' + random.choice(['org', 'com', 'net']),
-                id=self.lastInfo["streamName"],
-                vr='_vr' if self.vr else '',
-                auto='_auto' if not self.vr else ''
-            )
-        result = requests.get(url, headers=self.headers, cookies=self.cookies)
-        m3u8_doc = result.content.decode("utf-8")
-        psch, pkey, pdkey = StripChat._getMouflonFromM3U(m3u8_doc)
-        variants = super().getPlaylistVariants(m3u_data=m3u8_doc)
-        return [variant | {'url': f'{variant["url"]}{"&" if "?" in variant["url"] else "?"}psch={psch}&pkey={pkey}'}
-                for variant in variants]
-
-    @staticmethod
-    def uniq(length=16):
-        chars = ''.join(chr(i) for i in range(ord('a'), ord('z')+1))
-        chars += ''.join(chr(i) for i in range(ord('0'), ord('9')+1))
-        return ''.join(random.choice(chars) for _ in range(length))
-
-    def getWebsiteURL(self):
-        return f"https://stripchat.com/{self.username}"
-
-    def getVideoUrl(self):
-        return self.getWantedResolutionPlaylist(None)
-
     @staticmethod
     def uniq():
         """Generate a random unique string for API requests."""
@@ -220,6 +188,13 @@ class StripChat(Bot):
             if val is not None:
                 return val
         return None
+    
+
+    def getWebsiteURL(self):
+        return "https://stripchat.com/" + self.username
+
+    def getVideoUrl(self):
+        return self.getWantedResolutionPlaylist(None)
 
     def getStreamName(self) -> str:
         """
@@ -449,7 +424,7 @@ class StripChat(Bot):
         self.logger.warning(f"Unknown status '{status}' for {self.username}")
         return Status.UNKNOWN
 
-    def isMobile(self):
+    def isMobile(self: 'StripChat') -> bool:
         """Check if the current broadcast is from a mobile device."""
         return self.getIsMobile()
 

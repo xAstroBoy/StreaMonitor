@@ -275,13 +275,13 @@ def ts_streamcopy_postprocess(
         "-fflags", "+genpts+discardcorrupt",
         "-analyzeduration", "2147483647", "-probesize", "2147483647",
         "-err_detect", "+ignore_err",
-        "-i", src_ts.name,
+        "-i", f"./{src_ts.name}",
         "-map", "0",
         "-c", "copy", "-copyinkf",
         "-avoid_negative_ts", "make_zero",
         "-reset_timestamps", "1",
         "-muxpreload", "0", "-muxdelay", "0", "-max_interleave_delta", "0",
-        out_mkv.name
+        f"./{out_mkv.name}"
     ]
     run_ffmpeg(cmd, folder, f"ts streamcopy [{src_ts.name} → {out_mkv.name}]",
                _prog, src_size, note_cb)
@@ -314,12 +314,12 @@ def mkv_streamcopy_postprocess(
         "-fflags", "+genpts+discardcorrupt",
         "-analyzeduration", "2147483647", "-probesize", "2147483647",
         "-err_detect", "+ignore_err",
-        "-i", src_mkv.name,
+        "-i", f"./{src_mkv.name}",
         "-map", "0", "-c", "copy", "-copyinkf",
         "-avoid_negative_ts", "make_zero",
         "-reset_timestamps", "1",
         "-muxpreload", "0", "-muxdelay", "0", "-max_interleave_delta", "0",
-        out_mkv.name
+        f"./{out_mkv.name}"
     ]
     run_ffmpeg(cmd, folder, f"merge postprocess [{src_mkv.name} → {out_mkv.name}]",
                _prog, src_size, note_cb)
@@ -482,7 +482,7 @@ def salvage_reencode(
             note_cb and note_cb(f"{stage_prefix} reencode [{enc_label}] ~{fps}fps (hard PTS rebuild)")
             cmd=[FFMPEG,"-y","-hide_banner","-loglevel","error",
                  "-fflags","+genpts+discardcorrupt","-err_detect","+ignore_err",
-                 "-analyzeduration","2147483647","-probesize","2147483647","-i",src.name]
+                 "-analyzeduration","2147483647","-probesize","2147483647","-i",f"./{src.name}"]
 
             if have_audio:
                 cmd+=["-map","0:v:0?","-map","0:a:0?"]
@@ -494,7 +494,7 @@ def salvage_reencode(
             cmd+=vfix+afix+["-vsync","cfr","-r",str(fps)]
             cmd+=enc_args+["-c:a",_aac_encoder_name(),"-ar",str(TARGET_AUDIO_SR),"-ac",str(TARGET_AUDIO_CH)]
             cmd+=["-avoid_negative_ts","make_zero","-reset_timestamps","1",
-                  "-muxpreload","0","-muxdelay","0","-max_interleave_delta","0",dst.name]
+                  "-muxpreload","0","-muxdelay","0","-max_interleave_delta","0",f"./{dst.name}"]
 
             run_ffmpeg(cmd, folder, f"{stage_prefix} -> [{enc_label}]", _prog, src_size, note_cb)
 
@@ -513,10 +513,10 @@ def salvage_reencode(
 
     try:
         note_cb and note_cb(f"{stage_prefix} fallback reencode [libx264_safe]")
-        cmd=[FFMPEG,"-y","-i",src.name,
+        cmd=[FFMPEG,"-y","-i",f"./{src.name}",
              "-c:v","libx264","-preset","superfast","-crf","23",
              "-c:a","aac","-ar",str(TARGET_AUDIO_SR),"-ac",str(TARGET_AUDIO_CH),
-             dst.name]
+             f"./{dst.name}"]
         run_ffmpeg(cmd,folder,f"{stage_prefix} -> [libx264_safe]",_prog,src_size,note_cb)
         return True
     except Exception as ex:
@@ -544,11 +544,11 @@ def write_concat(folder: Path, parts, include_zero: bool, fname="concat_list.txt
 def concat_copy_mkv(folder: Path, concat_txt: Path, progress_cb=None, target_bytes=0, note_cb=None, stage_label="concat copy -> MKV"):
     tmp=folder/"0~merge.mkv"
     cmd=[FFMPEG,"-y","-hide_banner","-loglevel","error",
-         "-f","concat","-safe","0","-i",concat_txt.name,
+         "-f","concat","-safe","0","-i",f"./{concat_txt.name}",
          "-c","copy","-map","0","-copyinkf",
          "-avoid_negative_ts","make_zero","-reset_timestamps","1",
          "-muxpreload","0","-muxdelay","0","-max_interleave_delta","0",
-         tmp.name]
+         f"./{tmp.name}"]
     run_ffmpeg(cmd, folder, stage_label, progress_cb, target_bytes, note_cb)
 
 
@@ -559,21 +559,21 @@ def normalize_parts(parts, folder: Path, note_cb=None):
         out=p.with_suffix(".norm.mkv")
         note_cb and note_cb(f"normalize {p.name} → AAC stereo{' + silence' if not sig.get('has_a') else ''}")
         if sig.get("has_a"):
-            cmd=[FFMPEG,"-y","-hide_banner","-loglevel","error","-i",p.name,
+            cmd=[FFMPEG,"-y","-hide_banner","-loglevel","error","-i",f"./{p.name}",
                  "-map","0:v:0","-map","0:a:0","-dn","-sn",
                  "-c:v","copy","-c:a",_aac_encoder_name(),"-ar",str(TARGET_AUDIO_SR),"-ac",str(TARGET_AUDIO_CH),
                  "-avoid_negative_ts","make_zero","-reset_timestamps","1",
                  "-muxpreload","0","-muxdelay","0","-max_interleave_delta","0",
-                 out.name]
+                 f"./{out.name}"]
         else:
             dur = max(ffprobe_best_duration(p, folder), 0.1)
-            cmd=[FFMPEG,"-y","-hide_banner","-loglevel","error","-i",p.name,
+            cmd=[FFMPEG,"-y","-hide_banner","-loglevel","error","-i",f"./{p.name}",
                  "-f","lavfi","-t",f"{dur:.3f}","-i",f"anullsrc=r={TARGET_AUDIO_SR}:cl=stereo",
                  "-map","0:v:0","-map","1:a:0","-dn","-sn",
                  "-c:v","copy","-c:a",_aac_encoder_name(),
                  "-avoid_negative_ts","make_zero","-reset_timestamps","1",
                  "-muxpreload","0","-muxdelay","0","-max_interleave_delta","0",
-                 out.name]
+                 f"./{out.name}"]
         run_ffmpeg(cmd, folder, f"normalize {p.name}", None, 0, note_cb)
         norm.append(out)
     return norm
@@ -617,13 +617,13 @@ def concat_reencode_filter(parts, folder: Path, note_cb=None, progress_cb=None):
         try:
             note_cb and note_cb(f"concat reencode [{enc_label}] {w}x{h}@{fps}fps (PTS rebuild)")
             tmp=folder/"0~merge.mkv"
-            cmd=[FFMPEG,"-y"]; [cmd.extend(["-i", p.name]) for p in parts]
+            cmd=[FFMPEG,"-y"]; [cmd.extend(["-i", f"./{p.name}"]) for p in parts]
             cmd += ["-filter_complex", filt, "-map","[v]","-map","[a]"] + enc_args + \
                    ["-vsync","cfr","-r", str(fps),
                     "-pix_fmt","yuv420p","-c:a", _aac_encoder_name(), "-b:a","160k",
                     "-avoid_negative_ts","make_zero","-reset_timestamps","1",
                     "-muxpreload","0","-muxdelay","0","-max_interleave_delta","0",
-                    tmp.name]
+                    f"./{tmp.name}"]
             run_ffmpeg(cmd, folder, f"concat reencode -> MKV [{enc_label}]", progress_cb, 0, note_cb)
             return True
         except WorkerFail as e:
@@ -671,45 +671,64 @@ def _should_salvage_from_metrics(met: dict | None, is_ts: bool) -> bool:
 
 def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False, note_cb: Note|None=None, metric_cb: Metric|None=None):
     purge_temp(folder)
+    conversion_failed = False
 
     for patt in ("*.tmp.ts","*.tmp.mp4"):
         for t in folder.glob(patt):
-            note_cb and note_cb(f"convert {t.name}")
-            clean = t.with_name(t.stem[:-4] + ".mkv")
-            if t.suffix.lower() == ".ts":
-                ts_streamcopy_postprocess(folder, t, clean, note_cb, progress_cb=gui_cb)
-                ok, _msg, met = validate_against_source(folder, t, clean, True, ignore_size=True)
-                if not ok:
-                    ok2, met2 = run_passes_with_validate(folder, t, clean, True, note_cb, metric_cb, stage_prefix="convert", progress_cb=gui_cb)
-                    if not ok2:
-                        src_dur = (met2 or {}).get("src_dur", ffprobe_best_duration(t, folder))
-                        out_dur = (met2 or {}).get("out_dur", ffprobe_best_duration(clean, folder) if clean.exists() else 0.0)
+            try:
+                note_cb and note_cb(f"convert {t.name}")
+                clean = t.with_name(t.stem[:-4] + ".mkv")
+                if t.suffix.lower() == ".ts":
+                    try:
+                        ts_streamcopy_postprocess(folder, t, clean, note_cb, progress_cb=gui_cb)
+                        ok, _msg, met = validate_against_source(folder, t, clean, True, ignore_size=True)
+                        if not ok:
+                            ok2, met2 = run_passes_with_validate(folder, t, clean, True, note_cb, metric_cb, stage_prefix="convert", progress_cb=gui_cb)
+                            if not ok2:
+                                src_dur = (met2 or {}).get("src_dur", ffprobe_best_duration(t, folder))
+                                out_dur = (met2 or {}).get("out_dur", ffprobe_best_duration(clean, folder) if clean.exists() else 0.0)
+                                need_salvage = (
+                                    (src_dur>0 and (src_dur - out_dur) >= SALVAGE_MIN_DELTA_SEC and out_dur < src_dur*SALVAGE_TRIG_RATIO) or
+                                    _should_salvage_from_metrics(met2, True)
+                                )
+                                if need_salvage:
+                                    note_cb and note_cb("convert short → salvage reencode")
+                                    clean.unlink(missing_ok=True)
+                                    salvage_reencode(folder, t, clean, True, note_cb, metric_cb, stage_prefix="convert-salvage", progress_cb=gui_cb)
+                                else:
+                                    note_cb and note_cb(f"⚠ convert FAILED [{t.name}]: copy-remux failed and salvage not triggered")
+                                    clean.unlink(missing_ok=True)
+                                    conversion_failed = True
+                        t.unlink(missing_ok=True)
+                    except Exception as ex:
+                        note_cb and note_cb(f"⚠ convert ERROR [{t.name}]: {str(ex)[:200]}")
+                        clean.unlink(missing_ok=True)
+                        conversion_failed = True
+                else:
+                    ok, met = run_passes_with_validate(folder, t, clean, t.suffix.lower()==".ts", note_cb, metric_cb, stage_prefix="convert", progress_cb=gui_cb)
+                    if not ok:
+                        src_dur = (met or {}).get("src_dur", ffprobe_best_duration(t, folder))
+                        out_dur = (met or {}).get("out_dur", ffprobe_best_duration(clean, folder) if clean.exists() else 0.0)
                         need_salvage = (
                             (src_dur>0 and (src_dur - out_dur) >= SALVAGE_MIN_DELTA_SEC and out_dur < src_dur*SALVAGE_TRIG_RATIO) or
-                            _should_salvage_from_metrics(met2, True)
+                            _should_salvage_from_metrics(met, t.suffix.lower()==".ts")
                         )
                         if need_salvage:
                             note_cb and note_cb("convert short → salvage reencode")
                             clean.unlink(missing_ok=True)
-                            salvage_reencode(folder, t, clean, True, note_cb, metric_cb, stage_prefix="convert-salvage", progress_cb=gui_cb)
+                            salvage_reencode(folder, t, clean, t.suffix.lower()==".ts", note_cb, metric_cb, stage_prefix="convert-salvage", progress_cb=gui_cb)
                         else:
                             raise WorkerFail(folder,"convert-validate","copy-remux failed and salvage not triggered")
-            else:
-                ok, met = run_passes_with_validate(folder, t, clean, t.suffix.lower()==".ts", note_cb, metric_cb, stage_prefix="convert", progress_cb=gui_cb)
-                if not ok:
-                    src_dur = (met or {}).get("src_dur", ffprobe_best_duration(t, folder))
-                    out_dur = (met or {}).get("out_dur", ffprobe_best_duration(clean, folder) if clean.exists() else 0.0)
-                    need_salvage = (
-                        (src_dur>0 and (src_dur - out_dur) >= SALVAGE_MIN_DELTA_SEC and out_dur < src_dur*SALVAGE_TRIG_RATIO) or
-                        _should_salvage_from_metrics(met, t.suffix.lower()==".ts")
-                    )
-                    if need_salvage:
-                        note_cb and note_cb("convert short → salvage reencode")
-                        clean.unlink(missing_ok=True)
-                        salvage_reencode(folder, t, clean, t.suffix.lower()==".ts", note_cb, metric_cb, stage_prefix="convert-salvage", progress_cb=gui_cb)
-                    else:
-                        raise WorkerFail(folder,"convert-validate","copy-remux failed and salvage not triggered")
-            t.unlink(missing_ok=True)
+                    t.unlink(missing_ok=True)
+            except Exception as ex:
+                note_cb and note_cb(f"⚠ conversion aborted: {str(ex)[:200]}")
+                conversion_failed = True
+                continue
+
+    if conversion_failed:
+        note_cb and note_cb("❌ ABORTED: conversion had failures - skipping final merge")
+        if gui_cb: gui_cb(100.0, 0.0, 0, 0)
+        raise WorkerFail(folder, "conversion", "One or more files failed to convert - merge skipped")
 
     merged_mkv = folder/"0.mkv"
     (folder/"0.mp4").unlink(missing_ok=True)
@@ -765,10 +784,10 @@ def merge_folder(folder: Path, gui_cb: Prog|None=None, cfg=None, mk_links=False,
             if only.suffix.lower()==".mkv":
                 os.replace(only, merged_mkv)
             else:
-                cmd=[FFMPEG,"-y","-i",only.name,"-map","0","-c","copy","-copyinkf",
+                cmd=[FFMPEG,"-y","-i",f"./{only.name}","-map","0","-c","copy","-copyinkf",
                      "-avoid_negative_ts","make_zero","-reset_timestamps","1",
                      "-muxpreload","0","-muxdelay","0","-max_interleave_delta","0",
-                     "0.mkv"]
+                     "./0.mkv"]
                 run_ffmpeg(cmd, folder, "finalize → MKV", None, 0, note_cb)
                 only.unlink(missing_ok=True)
             if mk_links: make_symlink(folder, cfg or {})

@@ -762,8 +762,12 @@ class Bot(Thread):
     @property
     def outputFolder(self) -> str:
         base_folder = os.path.join(DOWNLOADS_DIR, f"{self.username} [{self.siteslug}]")
-        if self.siteslug == 'SC' and hasattr(self, 'isMobileBroadcast') and self.isMobileBroadcast:
-            base_folder = os.path.join(base_folder, 'Mobile')
+        if hasattr(self, 'isMobile') and callable(getattr(self, 'isMobile', None)):
+            try:
+                if self.isMobile():
+                    base_folder = os.path.join(base_folder, 'Mobile')
+            except Exception:
+                pass
         return base_folder
 
     def genOutFilename(self, create_dir: bool = True) -> str:
