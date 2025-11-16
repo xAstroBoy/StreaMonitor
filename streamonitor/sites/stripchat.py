@@ -293,38 +293,6 @@ class StripChat(Bot):
 
         return False
 
-    def getIsMobile(self) -> bool:
-        """
-        Robust isMobile detector. Checks multiple locations and returns boolean.
-        """
-        if not self.lastInfo:
-            return False
-
-        # Direct
-        val = self._get_by_path(self.lastInfo, ["isMobile"])
-        if val is not None:
-            return bool(val)
-
-        # Common paths
-        paths = [
-            ["model", "isMobile"],
-            ["user", "isMobile"],
-            ["user", "user", "isMobile"],
-            ["broadcastSettings", "isMobile"],
-            ["cam", "broadcastSettings", "isMobile"],
-            ["cam", "isMobile"],
-        ]
-        val = self._first_in_paths(paths)
-        if val is not None:
-            return bool(val)
-
-        # Recursive fallback
-        found = self._recursive_find(self.lastInfo, "isMobile")
-        if found is not None:
-            return bool(found)
-
-        return False
-
     def getIsGeoBanned(self) -> bool:
         """Check if user is geo-banned from viewing this model."""
         if not self.lastInfo:
@@ -424,10 +392,6 @@ class StripChat(Bot):
 
         self.logger.warning(f"Unknown status '{status}' for {self.username}")
         return Status.UNKNOWN
-
-    def isMobile(self: 'StripChat') -> bool:
-        """Check if the current broadcast is from a mobile device."""
-        return self.getIsMobile()
 
     def getPlaylistVariants(self, url):
         url = "https://edge-hls.{host}/hls/{id}{vr}/master/{id}{vr}{auto}.m3u8".format(
