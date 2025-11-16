@@ -7,6 +7,9 @@ if os.path.exists('.env'):
     environ.Env.read_env('.env')
 
 
+CONFIG_FILE = env.str("STRMNTR_CONFIG_FILE", "config.json")
+LOCK_FILE = env.str("STRMNTR_LOCK_FILE", "streammonitor.lock")
+
 DOWNLOADS_DIR = env.str("STRMNTR_DOWNLOAD_DIR", "downloads")
 MIN_FREE_DISK_PERCENT = env.float("STRMNTR_MIN_FREE_SPACE", 5.0)  # in %
 DEBUG = env.bool("STRMNTR_DEBUG", False)
@@ -71,7 +74,7 @@ WEB_THEATER_MODE = env.bool("STRMNTR_THEATER_MODE", False)
 WEB_CONFIRM_DELETES = env.str("STRMNTR_CONFIRM_DEL", "MOBILE")
 
 # Password for the web server
-# If empty no auth required, else username admin and choosen password
+# If empty no auth required, else username admin and chosen password
 WEBSERVER_PASSWORD = env.str("STRMNTR_PASSWORD", "admin")
 
 VERIFY_SSL = env.bool("STRMNTR_VERIFY_SSL", True)

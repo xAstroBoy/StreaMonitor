@@ -2,19 +2,18 @@ import json
 import sys
 import time
 
+from parameters import CONFIG_FILE
 from streamonitor.bot import Bot
 # Import all sites to register them with Bot.loaded_sites
 import streamonitor.sites
 
-config_loc = "config.json"
-
 
 def load_config():
     try:
-        with open(config_loc, "r+") as f:
+        with open(CONFIG_FILE, "r+") as f:
             return json.load(f)
     except FileNotFoundError:
-        with open(config_loc, "w+") as f:
+        with open(CONFIG_FILE, "w+") as f:
             json.dump([], f, indent=4)
             return []
     except Exception as e:
@@ -24,7 +23,7 @@ def load_config():
 
 def save_config(config):
     try:
-        with open(config_loc, "w+") as f:
+        with open(CONFIG_FILE, "w+") as f:
             json.dump(config, f, indent=4)
 
         return True

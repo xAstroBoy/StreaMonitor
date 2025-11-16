@@ -15,7 +15,7 @@ def filter_streamers(streamer: Bot, username_filter: Union[str, None], site_filt
     elif status_filter and status_filter == 'rec':
         result = result and streamer.recording
     elif status_filter and status_filter != 'all':
-        status = Status.OFFLINE.value if streamer.sc.value == Status.LONG_OFFLINE.value else streamer.sc.value
+        status = Status.OFFLINE.value == streamer.sc.value
         result = result and status == int(status_filter)
     return result
 

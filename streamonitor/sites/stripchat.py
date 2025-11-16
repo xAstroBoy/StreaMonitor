@@ -33,6 +33,7 @@ class StripChat(Bot):
             time.sleep(1)
         super().__init__(username)
         self.vr = False
+        self.url = self.getWebsiteURL()
         self.getVideo = lambda _, url, filename: getVideoNativeHLS(self, url, filename, StripChat.m3u_decoder)
 
     def get_site_color(self):

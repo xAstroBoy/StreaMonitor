@@ -4,6 +4,10 @@ import time
 import atexit
 import psutil
 import streamonitor.config as config
+
+# Lock file to prevent multiple instances
+from parameters import LOCK_FILE
+
 from streamonitor.managers.httpmanager import HTTPManager
 from streamonitor.managers.climanager import CLIManager
 from streamonitor.managers.zmqmanager import ZMQManager
@@ -12,9 +16,6 @@ from streamonitor.clean_exit import CleanExit
 import streamonitor.sites  # must have
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Lock file to prevent multiple instances
-LOCK_FILE = "streammonitor.lock"
 
 def cleanup_ffmpeg_processes():
     """Manual cleanup function to kill only StreamMonitor-related FFmpeg processes."""
