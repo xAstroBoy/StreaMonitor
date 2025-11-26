@@ -18,7 +18,7 @@ class StripChat(Bot):
     _static_data = None
     _main_js_data = None
     _doppio_js_data = None
-    _mouflon_keys: dict = None
+    _mouflon_keys: dict = {"Zeechoej4aleeshi": "ubahjae7goPoodi6"}
     _cached_keys: dict[str, bytes] = None
 
     def __init__(self, username):
@@ -56,9 +56,12 @@ class StripChat(Bot):
             raise Exception("Failed to fetch main.js from StripChat")
         StripChat._main_js_data = r.content.decode('utf-8')
 
-        doppio_js_name = re.findall('require[(]"./(Doppio.*?[.]js)"[)]', StripChat._main_js_data)[0]
+        doppio_js_index = re.findall('([0-9]+):"Doppio"', StripChat._main_js_data)[0]
+        doppio_js_hash = re.findall(f'{doppio_js_index}:\\"([a-zA-Z0-9]{{20}})\\"', StripChat._main_js_data)[0]
 
-        r = requests.get(f"{mmp_base}/{doppio_js_name}", headers=cls.headers)
+        r = requests.get(
+            f"{mmp_base}/chunk-Doppio-{doppio_js_hash}.js", headers=cls.headers
+        )
         if r.status_code != 200:
             raise Exception("Failed to fetch doppio.js from StripChat")
         StripChat._doppio_js_data = r.content.decode('utf-8')
@@ -71,10 +74,17 @@ class StripChat(Bot):
         def _decode(encrypted_b64: str, key: str) -> str:
             if cls._cached_keys is None:
                 cls._cached_keys = {}
-            hash_bytes = cls._cached_keys[key] if key in cls._cached_keys \
-                else cls._cached_keys.setdefault(key, hashlib.sha256(key.encode("utf-8")).digest())
+            hash_bytes = (
+                cls._cached_keys[key]
+                if key in cls._cached_keys
+                else cls._cached_keys.setdefault(
+                    key, hashlib.sha256(key.encode("utf-8")).digest()
+                )
+            )
             encrypted_data = base64.b64decode(encrypted_b64 + "==")
-            return bytes(a ^ b for (a, b) in zip(encrypted_data, itertools.cycle(hash_bytes))).decode("utf-8")
+            return bytes(
+                a ^ b for (a, b) in zip(encrypted_data, itertools.cycle(hash_bytes))
+            ).decode("utf-8")
 
         psch, pkey, pdkey = StripChat._getMouflonFromM3U(content)
 
@@ -110,7 +120,11 @@ class StripChat(Bot):
         while _needle in (_doc := m3u8_doc[_start:]):
             _mouflon_start = _doc.find(_needle)
             if _mouflon_start > 0:
-                _mouflon = _doc[_mouflon_start:m3u8_doc.find('\n', _mouflon_start)].strip().split(':')
+                _mouflon = (
+                    _doc[_mouflon_start: m3u8_doc.find("\n", _mouflon_start)]
+                    .strip()
+                    .split(":")
+                )
                 psch = _mouflon[2]
                 pkey = _mouflon[3]
                 pdkey = StripChat.getMouflonDecKey(pkey)
@@ -120,11 +134,10 @@ class StripChat(Bot):
         return None, None, None
 
     @staticmethod
-    def uniq():
-        """Generate a random unique string for API requests."""
-        chars = ''.join(chr(i) for i in range(ord('a'), ord('z') + 1))
-        chars += ''.join(chr(i) for i in range(ord('0'), ord('9') + 1))
-        return ''.join(random.choice(chars) for _ in range(16))
+    def uniq(length=16):
+        chars = "".join(chr(i) for i in range(ord("a"), ord("z") + 1))
+        chars += "".join(chr(i) for i in range(ord("0"), ord("9") + 1))
+        return "".join(random.choice(chars) for _ in range(length))
 
     @staticmethod
     def normalizeInfo(raw: dict) -> dict:
@@ -403,6 +416,7 @@ class StripChat(Bot):
         result = requests.get(url, headers=self.headers, cookies=self.cookies)
         m3u8_doc = result.content.decode("utf-8")
         psch, pkey, pdkey = StripChat._getMouflonFromM3U(m3u8_doc)
+        self.debug(f"Extracted key {psch}, {pkey}, {pdkey}")
         variants = super().getPlaylistVariants(m3u_data=m3u8_doc)
         return [variant | {'url': f'{variant["url"]}{"&" if "?" in variant["url"] else "?"}psch={psch}&pkey={pkey}'}
                 for variant in variants]
