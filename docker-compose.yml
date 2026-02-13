@@ -1,0 +1,35 @@
+services:
+  streamonitor:
+# If you want to build locally, use this instead the image line below:
+#    build: ./
+#    image: streamonitor:latest
+
+    image: ghcr.io/lossless1024/streamonitor:latest
+
+    restart: unless-stopped
+    environment:
+      # set timzeone
+      #TZ: Etc/UTC
+      # unset password (admin by default)
+      #STRMNTR_PASSWORD: ''
+      # unbind web interface (bound to 127.0.0.1 by default)
+      STRMNTR_HOST: '0.0.0.0'
+      # change confirm delete behavior: disable
+      #STRMNTR_CONFIRM_DEL: ""
+      # change confirm delete behavior: always-on
+      #STRMNTR_CONFIRM_DEL: "True"
+      STRMNTR_CONFIRM_DEL: "MOBILE"
+      # enable theater mode
+      #STRMNTR_THEATER_MODE: "True
+      # set refresh frequency on streamer page
+      STRMNTR_STATUS_FREQ: "5"
+      # set refresh frequency on list page
+      STRMNTR_LIST_FREQ: "30"
+    volumes:
+      - ./downloads:/app/downloads
+      - ./config.json:/app/config.json
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - '5000:5000'
+

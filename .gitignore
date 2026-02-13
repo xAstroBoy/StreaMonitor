@@ -1,0 +1,23 @@
+__pycache__/
+downloads/
+*.log
+.env
+.venv
+venv*/
+.idea/
+.vscode/
+config.json
+
+# Personal/local files
+fuck timestamoa.py
+doppio_v2.1.3.js
+
+# Local working folders
+cookies/
+To Check/
+to export/
+To Save/
+To Process/
+M3U8_TMP/
+unprocessed/
+web/
