@@ -17,6 +17,11 @@ HTTP_USER_AGENT = env.str("STRMNTR_USER_AGENT", "Mozilla/5.0 (X11; Ubuntu; Linux
 # Specify the full path to the ffmpeg binary. By default, ffmpeg found on PATH is used.
 FFMPEG_PATH = env.str("STRMNTR_FFMPEG_PATH", 'ffmpeg')
 
+# Read rate for ffmpeg. This can be used to limit the rate at which ffmpeg reads input.
+# An integer value represents the rate limit (in bytes per second). 
+# True means ffmpeg native rate (typically real-time). False means unlimited.
+FFMPEG_READRATE = env.str("STRMNTR_FFMPEG_READRATE", False)
+
 # You can enter a number to select a specific height.
 # Use a huge number here and closest match to get the highest resolution variant
 # Eg: 240, 360, 480, 720, 1080, 1440, 99999
@@ -69,6 +74,12 @@ WEB_THEATER_MODE = env.bool("STRMNTR_THEATER_MODE", False)
 # set to "MOBILE" to explicitly confirm deletes only on mobile
 # set to any other non-falsy value to always check
 WEB_CONFIRM_DELETES = env.str("STRMNTR_CONFIRM_DEL", "MOBILE")
+
+# Web UI skin
+# - kseen715 - 2nd skin, currently broken
+# - truck-kun (default) - 3rd skin, row oriented
+# - shaftoverflow - 4th skin, card layout, links in menus
+WEBSERVER_SKIN = env.str("STRMNTR_SKIN", "truck-kun")
 
 # Password for the web server
 # If empty no auth required, else username admin and choosen password

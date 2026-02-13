@@ -2,19 +2,20 @@ import json
 from typing import Optional, Dict, Any, Union, Tuple, List
 
 import requests
-from streamonitor.bot import Bot
+from streamonitor.bot import RoomIdBot
 from streamonitor.enums import Status
 
 
 # Site of Hungarian group AdultPerformerNetwork
-class Flirt4Free(Bot):
+class Flirt4Free(RoomIdBot):
     site: str = 'Flirt4Free'
     siteslug: str = 'F4F'
     models: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self, username: str, room_id: Optional[int] = None) -> None:
-        self.room_id = room_id if room_id else self.getRoomId(username)
-        super().__init__(username)
+        if not room_id:
+            room_id = self.getRoomId(username)
+        super().__init__(username, room_id=str(room_id) if room_id else None)
         self.url = self.getWebsiteURL()
 
     def get_site_color(self) -> Tuple[str, List[str]]:
@@ -155,6 +156,3 @@ class Flirt4Free(Bot):
     def isMobile(self) -> bool:
         """Check if this is a mobile broadcast."""
         return False
-
-
-Bot.loaded_sites.add(Flirt4Free)

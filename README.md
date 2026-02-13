@@ -13,11 +13,12 @@ Inspired by [Recordurbate](https://github.com/oliverjrose99/Recordurbate)
 | Chaturbate    | `CB`         |                             |                        | Yes                   |
 | DreamCam      | `DC`         |                             |                        | No                    |
 | DreamCam VR   | `DCVR`       |                             | for VR videos          | No                    |
+| FanslyLive    | `FL`         |                             |                        | Yes                   |
 | Flirt4Free    | `F4F`        |                             |                        | Yes                   |
 | MyFreeCams    | `MFC`        |                             |                        | Yes                   |
 | SexChat.hu    | `SCHU`       |                             | use the id as username | No                    |
 | StreaMate     | `SM`         | PornHubLive, PepperCams,... |                        | Yes                   |
-| StripChat     | `SC`         | XHamsterLive,...            |                        | Yes                   |
+| StripChat     | `SC`         | XHamsterLive,...            | must add crypto keys   | Yes                   |
 | StripChat VR  | `SCVR`       |                             | for VR videos          | No                    |
 | XLoveCam      | `XLC`        |                             |                        | No                    |
 
@@ -97,6 +98,8 @@ Simply start it in the folder with `docker-compose up`.
 ## Configuration
 
 You can set some parameters in the [parameters.py](parameters.py).
+
+You also have to add decryption keys yourself for StripChat in the `stripchat_mouflon_keys.json` file.
 
 ## Disclaimer
 

@@ -15,14 +15,13 @@ web_status_lookup = {
 
 status_icons_lookup = {
     Status.UNKNOWN: "help-circle",
-    Status.NOTRUNNING: "stop-circle",
-    Status.ERROR: "alert-circle", 
-    Status.RESTRICTED: "shield-x",
-    Status.PUBLIC: "video",
-    Status.NOTEXIST: "user-x",
-    Status.PRIVATE: "lock",
+    Status.PUBLIC: "eye",
     Status.OFFLINE: "video-off",
-    Status.DELETED: "trash-2",
-    Status.RATELIMIT: "clock",
-    Status.CLOUDFLARE: "cloud"
+    Status.LONG_OFFLINE: "video-off",
+    Status.PRIVATE: "eye-off",
+    Status.RATELIMIT: "alert-octagon",
+    Status.NOTEXIST: "minus-circle",
+    Status.NOTRUNNING: "bell-off",
+    Status.ERROR: "alert-triangle",
+    Status.RESTRICTED: "x-octagon"
 }

@@ -11,6 +11,7 @@ class Status(Enum):
     NOTEXIST = 400
     PRIVATE = 403
     OFFLINE = 404
+    LONG_OFFLINE = 410
     DELETED = 444 
     RATELIMIT = 429
     CLOUDFLARE = 503

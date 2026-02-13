@@ -1,9 +1,0 @@
-{
-    "VR": ["[SCVR]"], 
-    "Desktop": ["[SC]", "[CB]", "[F4F]"],
-    "Aliases": {
-        "Model1": ["Alias1", "Alias1a"],
-        "Model2": ["Alias2", "Alias2a"],
-        "Model3": ["Alias3", "Alias3a"]
-    }
-}

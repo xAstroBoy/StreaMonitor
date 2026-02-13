@@ -10,7 +10,7 @@ ffmpy
 m3u8
 curl_cffi
 fake-useragent
-python-environ
+django-environ
 pycurl
 pycurl-requests
 filelock

@@ -2,12 +2,12 @@ from parameters import VR_FORMAT_SUFFIX
 from streamonitor.downloaders.hls import getVideoNativeHLS
 from streamonitor.enums import Status
 from streamonitor.sites.stripchat import StripChat
-from streamonitor.bot import Bot
 
 
 class StripChatVR(StripChat):
     site = 'StripChatVR'
     siteslug = 'SCVR'
+    bulk_update = False  # VR doesn't support bulk status
 
     vr_frame_format_map = {
         'FISHEYE': 'F',
@@ -16,8 +16,21 @@ class StripChatVR(StripChat):
         'EQUIRECTANGULAR': 'E',
     }
 
-    def __init__(self, username):
-        super().__init__(username)
+    @property
+    def filename_extra_suffix(self):
+        """Add VR format suffix to filenames if configured."""
+        if not VR_FORMAT_SUFFIX:
+            return ''
+        vr_settings = self._find_vr_cam_settings()
+        if vr_settings:
+            fmt = vr_settings.get('frameFormat', '')
+            suffix = self.vr_frame_format_map.get(fmt, '')
+            if suffix:
+                return f'_{suffix}'
+        return '_VR'
+
+    def __init__(self, username, room_id=None):
+        super().__init__(username, room_id=room_id)
         self.stopDownloadFlag = False
         self.vr = True
         self.url = self.getWebsiteURL()
@@ -317,6 +330,3 @@ class StripChatVR(StripChat):
     def isMobile(self):
         """VR downloads are desktop only."""
         return False
-
-
-Bot.loaded_sites.add(StripChatVR)

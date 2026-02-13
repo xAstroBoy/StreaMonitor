@@ -12,7 +12,7 @@ from shlex import quote as shlex_quote
 from typing import TYPE_CHECKING
 
 import requests.cookies
-from parameters import DEBUG, SEGMENT_TIME, CONTAINER, FFMPEG_PATH
+from parameters import DEBUG, SEGMENT_TIME, CONTAINER, FFMPEG_PATH, FFMPEG_READRATE
 from .ffsettings import FFSettings
 
 if TYPE_CHECKING:
@@ -149,6 +149,9 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
         """Build FFmpeg command with all necessary parameters."""
         ua, extra_headers = _compose_headers()
         cmd = [FFMPEG_PATH, '-hide_banner', '-loglevel', 'info', '-user_agent', ua]
+        
+        if FFMPEG_READRATE:
+            cmd.insert(1, '-re')
         
         if extra_headers:
             cmd.extend(['-headers', extra_headers])

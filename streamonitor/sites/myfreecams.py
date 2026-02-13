@@ -132,6 +132,3 @@ class MyFreeCams(Bot):
     def isMobile(self) -> bool:
         """Check if this is a mobile broadcast."""
         return False
-
-
-Bot.loaded_sites.add(MyFreeCams)

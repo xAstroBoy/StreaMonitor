@@ -77,8 +77,6 @@ class CamsCom(Bot):
         return False
 
 
-Bot.loaded_sites.add(CamsCom)
-
 # Known online flag states:
 # 0: Offline
 # 1: Public

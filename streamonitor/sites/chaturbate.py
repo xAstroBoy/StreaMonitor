@@ -1,13 +1,21 @@
 import re
 import requests
-from typing import Optional
+from typing import Optional, Set
 from streamonitor.bot import Bot
-from streamonitor.enums import Status
+from streamonitor.enums import Status, Gender
 
 
 class Chaturbate(Bot):
     site: str = 'Chaturbate'
     siteslug: str = 'CB'
+    bulk_update: bool = True
+
+    _GENDER_MAP = {
+        'f': Gender.FEMALE,
+        'm': Gender.MALE,
+        's': Gender.TRANS,
+        'c': Gender.BOTH,
+    }
 
     def __init__(self, username: str) -> None:
         super().__init__(username)
@@ -27,6 +35,9 @@ class Chaturbate(Bot):
     
     def getVideoUrl(self) -> Optional[str]:
         """Get the video stream URL."""
+        # If bulk_update is active, we need to fetch our own status for the URL
+        if self.bulk_update:
+            self.getStatus()
         # If lastInfo is missing or stale, try to refresh it
         if not self.lastInfo or 'url' not in self.lastInfo:
             self.logger.debug("lastInfo missing URL, refreshing status...")
@@ -79,16 +90,9 @@ class Chaturbate(Bot):
             self.lastInfo = response.json()
 
             room_status = self.lastInfo.get("room_status", "").lower()
-            
-            if room_status == "public":
-                status = Status.PUBLIC
-            elif room_status in ["private", "hidden"]:
-                status = Status.PRIVATE
-            elif room_status == "offline":
-                status = Status.OFFLINE
-            else:
-                self.logger.warning(f"Unknown room status: {room_status}")
-                status = Status.OFFLINE
+            status = self._parseStatus(room_status)
+            if status == Status.PUBLIC and not self.lastInfo.get('url'):
+                status = Status.RESTRICTED
                 
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error checking status: {e}")
@@ -103,9 +107,51 @@ class Chaturbate(Bot):
         self.ratelimit = status == Status.RATELIMIT
         return status
 
+    @staticmethod
+    def _parseStatus(room_status: str) -> Status:
+        """Parse room status string into Status enum."""
+        if room_status == "public":
+            return Status.PUBLIC
+        elif room_status in ("private", "hidden"):
+            return Status.PRIVATE
+        elif room_status == "offline":
+            return Status.OFFLINE
+        else:
+            return Status.OFFLINE
+
+    @classmethod
+    def getStatusBulk(cls, streamers: Set['Chaturbate']) -> None:
+        """Bulk status update using the affiliates API."""
+        session = requests.Session()
+        session.headers.update(cls.headers)
+        try:
+            r = session.get("https://chaturbate.com/affiliates/api/onlinerooms/?format=json&wm=DkfRj", timeout=10)
+            try:
+                data = r.json()
+            except requests.exceptions.JSONDecodeError:
+                return
+
+            data_map = {str(model['username']).lower(): model for model in data}
+
+            for streamer in streamers:
+                model_data = data_map.get(streamer.username.lower())
+                if not model_data:
+                    streamer.setStatus(Status.OFFLINE)
+                    continue
+                if model_data.get('gender'):
+                    streamer.gender = cls._GENDER_MAP.get(model_data['gender'], Gender.UNKNOWN)
+                if model_data.get('country'):
+                    streamer.country = model_data.get('country', '').upper()
+                status = cls._parseStatus(model_data.get('current_show', ''))
+                if status == Status.PUBLIC:
+                    if streamer.sc in (Status.PUBLIC, Status.RESTRICTED):
+                        continue
+                    status = streamer.getStatus()
+                streamer.setStatus(status)
+        except Exception as e:
+            # Silently fail for bulk — individual bots will still poll on their own
+            pass
+
     def isMobile(self) -> bool:
         """Check if this is a mobile broadcast."""
         return False
-
-
-Bot.loaded_sites.add(Chaturbate)

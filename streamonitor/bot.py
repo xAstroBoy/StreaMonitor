@@ -12,7 +12,7 @@ from datetime import datetime
 from threading import Thread, Event, Lock, RLock
 from typing import Optional, List, Dict, Any, Set, Union, Callable, Type
 
-from streamonitor.enums import Status
+from streamonitor.enums import Status, Gender, GENDER_DATA, COUNTRIES
 import streamonitor.log as log
 import parameters
 from parameters import (
@@ -47,6 +47,10 @@ _print_lock = Lock()
 _filename_lock = RLock()  # Reentrant lock for nested filename operations
 
 
+# Global set of loaded site classes for upstream compatibility (used by BulkStatusManager)
+LOADED_SITES: Set[Type['Bot']] = set()
+
+
 class Bot(Thread):
     loaded_sites: Set[Type['Bot']] = set()
     username: Optional[str] = None
@@ -54,6 +58,7 @@ class Bot(Thread):
     siteslug: Optional[str] = None
     aliases: List[str] = []
     ratelimit: bool = False
+    bulk_update: bool = False  # Override True in sites that support bulk status updates
     url: str = "javascript:void(0)"
     recording: bool = False
     sleep_on_private: int = 5
@@ -63,6 +68,14 @@ class Bot(Thread):
     sleep_on_ratelimit: int = 180
     long_offline_timeout: int = 180  # Reduced from 300 to 180 seconds (3min instead of 5min)
     previous_status: Optional[Status] = None
+    _GENDER_MAP: Dict[str, Gender] = {}  # Override in site subclasses to map API gender strings to Gender enum
+
+    def __init_subclass__(cls, **kwargs):
+        """Auto-register site subclasses when they are defined."""
+        super().__init_subclass__(**kwargs)
+        if cls.site is not None:
+            Bot.loaded_sites.add(cls)
+            LOADED_SITES.add(cls)
 
     # Manager registry for auto-removal of deleted models
     _manager_instance = None
@@ -80,6 +93,7 @@ class Bot(Thread):
         Status.DELETED: colored("Model account deleted", "red", attrs=["bold"]),
         Status.RATELIMIT: colored("Rate limited", "red", attrs=["bold"]),
         Status.NOTEXIST: colored("Nonexistent user", "red"),
+        Status.LONG_OFFLINE: colored("Long offline", "yellow", attrs=["dark"]),
         Status.NOTRUNNING: colored("Not running", "white"),
         Status.ERROR: colored("Error on downloading", "red", attrs=["bold"]),
         Status.RESTRICTED: colored("Model is restricted, maybe geo-block", "red"),
@@ -94,6 +108,8 @@ class Bot(Thread):
         super().__init__()
         self.daemon = True
         self.username = username
+        self.gender: Gender = Gender.UNKNOWN
+        self.country: Optional[str] = None
         
         # Use cached logger to prevent memory leaks
         self.logger = self._get_or_create_logger()
@@ -170,6 +186,38 @@ class Bot(Thread):
     def getLogger(self) -> log.Logger:
         """Legacy method for compatibility."""
         return self.logger
+
+    @property
+    def country_data(self) -> Optional[Dict[str, str]]:
+        """Get country data (name, flag) for this model's country code."""
+        if self.country:
+            return COUNTRIES.get(self.country.upper())
+        return None
+
+    @property
+    def gender_data(self) -> Optional[Dict[str, Any]]:
+        """Get gender display data (name, icon, color) for this model's gender."""
+        return GENDER_DATA.get(self.gender)
+
+    def setStatus(self, status: Status, gender: Optional[Gender] = None, country: Optional[str] = None) -> None:
+        """Set status from bulk status update (used by BulkStatusManager).
+        Also updates gender/country if provided.
+        """
+        if gender is not None:
+            self.gender = gender
+        if country is not None:
+            self.country = country
+        self.sc = status
+        if self.sc != self.previous_status:
+            self.log(self.status())
+            self.previous_status = self.sc
+
+    def setUsername(self, username: str) -> None:
+        """Update username (e.g., when resolved from room_id)."""
+        if username and username != self.username:
+            old = self.username
+            self.username = username
+            self.logger.info(f"Username updated: {old} -> {username}")
     
     def get_site_color(self) -> tuple[str, list[str]]:
         """Default color scheme for sites that don't override this method."""
@@ -573,6 +621,11 @@ class Bot(Thread):
                         self._sleep(sleep_time)
                         continue
 
+                    elif self.sc == Status.LONG_OFFLINE:
+                        # Long offline - use longer sleep interval
+                        self._sleep(self.sleep_on_long_offline)
+                        continue
+
                     elif self.sc == Status.ONLINE:
                         # Model is connected but no stream yet - wait for it to start
                         offline_time = 0
@@ -876,13 +929,36 @@ class Bot(Thread):
                 return os.path.join(folder, f"1{ext}")
 
     def export(self) -> Dict[str, Any]:
-        return {
+        data = {
             "site": self.site,
             "username": self.username,
             "running": self.running,
             "status": self.sc.name if hasattr(self.sc, 'name') else str(self.sc),
-            "recording": self.recording
+            "recording": self.recording,
         }
+        if self.gender != Gender.UNKNOWN:
+            data["gender"] = self.gender.value
+        if self.country:
+            data["country"] = self.country
+        return data
+
+    @classmethod
+    def fromConfig(cls, config: Dict[str, Any]) -> Optional['Bot']:
+        """Create a Bot instance from a saved config dict (with gender/country restoration)."""
+        username = config.get("username")
+        if not username:
+            return None
+        instance = cls(username)
+        gender_val = config.get("gender")
+        if gender_val is not None:
+            try:
+                instance.gender = Gender(gender_val)
+            except (ValueError, KeyError):
+                instance.gender = Gender.UNKNOWN
+        country = config.get("country")
+        if country:
+            instance.country = country
+        return instance
 
     @staticmethod
     def str2site(site: str) -> Optional[Type['Bot']]:
@@ -934,3 +1010,50 @@ class Bot(Thread):
             if Bot._manager_instance:
                 Bot._manager_instance.logger.error(f"Failed to auto-remove model {username}: {e}")
             return False
+
+
+class RoomIdBot(Bot):
+    """Base class for sites that use a numeric room_id (StripChat, Flirt4Free, SexChatHU, FanslyLive).
+    
+    Supports looking up username from room_id and vice versa.
+    When instantiated with a numeric string, it's treated as a room_id.
+    """
+    site = None  # Must be set by subclass
+
+    def __init__(self, username: str, room_id: Optional[str] = None) -> None:
+        self.room_id: Optional[str] = room_id
+        if room_id is None and username.isdigit():
+            self.room_id = username
+        super().__init__(username)
+
+    def getUsernameFromRoomId(self, room_id: str) -> Optional[str]:
+        """Override in subclass to resolve username from room_id."""
+        return None
+
+    def getRoomIdFromUsername(self, username: str) -> Optional[str]:
+        """Override in subclass to resolve room_id from username."""
+        return None
+
+    def export(self) -> Dict[str, Any]:
+        data = super().export()
+        if self.room_id:
+            data["room_id"] = self.room_id
+        return data
+
+    @classmethod
+    def fromConfig(cls, config: Dict[str, Any]) -> Optional['RoomIdBot']:
+        username = config.get("username")
+        if not username:
+            return None
+        room_id = config.get("room_id")
+        instance = cls(username, room_id=room_id)
+        gender_val = config.get("gender")
+        if gender_val is not None:
+            try:
+                instance.gender = Gender(gender_val)
+            except (ValueError, KeyError):
+                instance.gender = Gender.UNKNOWN
+        country = config.get("country")
+        if country:
+            instance.country = country
+        return instance

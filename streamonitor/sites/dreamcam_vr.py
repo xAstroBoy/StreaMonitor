@@ -49,6 +49,3 @@ class DreamCamVR(DreamCam):
     
     def isMobile(self):
         return False
-
-
-Bot.loaded_sites.add(DreamCamVR)

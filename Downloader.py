@@ -8,6 +8,7 @@ from streamonitor.managers.httpmanager import HTTPManager
 from streamonitor.managers.climanager import CLIManager
 from streamonitor.managers.zmqmanager import ZMQManager
 from streamonitor.managers.outofspace_detector import OOSDetector
+from streamonitor.managers.bulk_status_manager import BulkStatusManager
 from streamonitor.clean_exit import CleanExit
 import streamonitor.sites  # must have
 import urllib3
@@ -203,6 +204,9 @@ def main():
 
     zmq_manager = ZMQManager(streamers)
     zmq_manager.start()
+
+    bulk_manager = BulkStatusManager(streamers)
+    bulk_manager.start()
 
     http_manager = HTTPManager(streamers)
     http_manager.start()

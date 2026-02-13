@@ -45,6 +45,17 @@ def loadStreamers():
             streamer_bot = Bot.str2site(site)(username, room_id=room_id)
         else:
             streamer_bot = Bot.str2site(site)(username)
+        # Restore gender and country from config
+        gender_val = streamer.get('gender')
+        if gender_val is not None:
+            try:
+                from streamonitor.enums import Gender
+                streamer_bot.gender = Gender(gender_val)
+            except (ValueError, KeyError):
+                pass
+        country = streamer.get('country')
+        if country:
+            streamer_bot.country = country
         streamers.append(streamer_bot)
         streamer_bot.start()
         if streamer["running"]:
