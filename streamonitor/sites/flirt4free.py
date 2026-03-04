@@ -1,9 +1,57 @@
 import json
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, Union, Tuple, List
 
 import requests
 from streamonitor.bot import RoomIdBot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ── Flirt4Free expected keys & known statuses ────────────────────────
+_F4F_STREAM_KEYS: dict = {"": frozenset({"code", "data"})}
+_F4F_ROOM_KEYS: dict = {"": frozenset({"config"})}
+_F4F_KNOWN_CODES: frozenset = frozenset({"0", "44"})
+_F4F_KNOWN_ROOM_STATUSES: frozenset = frozenset({"O", "P", "F"})
+
+
+@dataclass(frozen=True, slots=True)
+class F4FModelInfo:
+    """Combined info from Flirt4Free stream-urls + room-interface APIs."""
+
+    code: int         # from stream-urls: 0 = OK, 44 = NOTEXIST, -1 = missing
+    room_status: str  # from room-interface: O/P/F, "" if not yet fetched
+
+    @classmethod
+    def from_stream_data(cls, data: dict, username: str = "", logger=None) -> "F4FModelInfo":
+        check_unknown_fields(data, _F4F_STREAM_KEYS, "F4F", username, logger)
+        code = data.get("code")
+        try:
+            code = int(code) if code is not None else -1
+        except (ValueError, TypeError):
+            code = -1
+        return cls(code=code, room_status="")
+
+    @classmethod
+    def from_room_data(cls, code: int, data: dict, username: str = "", logger=None) -> "F4FModelInfo":
+        check_unknown_fields(data, _F4F_ROOM_KEYS, "F4F", username, logger)
+        rs = (data.get("config") or {}).get("room", {}).get("status", "")
+        return cls(code=code, room_status=rs)
+
+    def to_bot_status(self, username: str = "", logger=None) -> "Status":
+        if self.code == 44:
+            return Status.NOTEXIST
+        if self.room_status == "O":
+            return Status.PUBLIC
+        if self.room_status == "P":
+            return Status.PRIVATE
+        if self.room_status == "F":
+            return Status.OFFLINE
+        if self.code == 0 and self.room_status:
+            check_unknown_status(self.room_status, _F4F_KNOWN_ROOM_STATUSES, "F4F", username, logger)
+        elif self.code not in (0, 44, -1):
+            check_unknown_status(str(self.code), _F4F_KNOWN_CODES, "F4F", username, logger)
+        return Status.UNKNOWN
 
 
 # Site of Hungarian group AdultPerformerNetwork
@@ -91,58 +139,45 @@ class Flirt4Free(RoomIdBot):
         """Check the current status of the stream."""
         if not self.room_id:
             return Status.NOTEXIST
-            
+
         try:
-            # Get stream URLs
             response = self.session.get(
                 f'https://www.flirt4free.com/ws/chat/get-stream-urls.php?model_id={self.room_id}',
                 timeout=30,
                 bucket='status'
             )
-            
+
             if response.status_code != 200:
                 self.logger.warning(f"HTTP {response.status_code} for user {self.username}")
                 return Status.ERROR
-                
+
             stream_data = response.json()
             self.lastInfo = stream_data
-            
-            if stream_data.get('code') == 44:
-                return Status.NOTEXIST
-                
-            if stream_data.get('code') == 0:
-                # Get room status
+            info = F4FModelInfo.from_stream_data(stream_data, self.username, self.logger)
+
+            if info.code == 44:
+                return info.to_bot_status(self.username, self.logger)
+
+            if info.code == 0:
                 try:
                     room_response = self.session.get(
                         f'https://www.flirt4free.com/ws/rooms/chat-room-interface.php?a=login_room&model_id={self.room_id}',
                         timeout=30,
                         bucket='status'
                     )
-                    
-                    if room_response.status_code != 200:
+
+                    if room_response.status_code == 200:
+                        room_data = room_response.json()
+                        info = F4FModelInfo.from_room_data(info.code, room_data, self.username, self.logger)
+                    else:
                         self.logger.warning(f"Room status check failed with HTTP {room_response.status_code}")
-                        return Status.UNKNOWN
-                        
-                    room_data = room_response.json()
-                    
-                    if 'config' not in room_data:
-                        return Status.UNKNOWN
-                        
-                    room_status = room_data.get('config', {}).get('room', {}).get('status')
-                    
-                    if room_status == 'O':
-                        return Status.PUBLIC
-                    elif room_status == 'P':
-                        return Status.PRIVATE
-                    elif room_status == 'F':
-                        return Status.OFFLINE
-                        
+
                 except Exception as e:
                     self.logger.error(f"Error checking room status: {e}")
                     return Status.ERROR
 
-            return Status.UNKNOWN
-            
+            return info.to_bot_status(self.username, self.logger)
+
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error checking status: {e}")
             return Status.ERROR

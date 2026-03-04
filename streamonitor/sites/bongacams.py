@@ -1,7 +1,55 @@
 import requests
+from dataclasses import dataclass
 from typing import Optional, Tuple, List
+
 from streamonitor.bot import Bot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ── BongaCams expected keys & known show types ─────────────────────────
+_BC_EXPECTED_KEYS: dict = {
+    "": frozenset({"status", "performerData", "localData"}),
+    "performerData": frozenset({"username", "showType"}),
+    "localData": frozenset({"videoServerUrl"}),
+}
+_BC_KNOWN_SHOW_TYPES: frozenset = frozenset({"private", "group"})
+
+
+@dataclass(frozen=True, slots=True)
+class BCModelInfo:
+    """Typed reader for the BongaCams ``amf.php`` room data response."""
+
+    api_status: str
+    show_type: str
+    performer_username: str
+    has_video_server: bool
+
+    @classmethod
+    def from_response(cls, data: dict, username: str = "", logger=None) -> "BCModelInfo":
+        check_unknown_fields(data, _BC_EXPECTED_KEYS, "BC", username, logger)
+        pd = data.get("performerData") or {}
+        ld = data.get("localData") or {}
+        if isinstance(pd, dict):
+            check_unknown_fields(pd, {"": _BC_EXPECTED_KEYS["performerData"]}, "BC", username, logger)
+        if isinstance(ld, dict):
+            check_unknown_fields(ld, {"": _BC_EXPECTED_KEYS["localData"]}, "BC", username, logger)
+        return cls(
+            api_status=(data.get("status", "") or "").lower(),
+            show_type=(pd.get("showType", "") or "").lower(),
+            performer_username=pd.get("username", "") or "",
+            has_video_server="videoServerUrl" in ld,
+        )
+
+    def to_bot_status(self, username: str = "", logger=None) -> "Status":
+        if self.api_status == "error":
+            return Status.NOTEXIST
+        if self.show_type in _BC_KNOWN_SHOW_TYPES:
+            return Status.PRIVATE
+        if not self.has_video_server:
+            return Status.OFFLINE
+        # Tentatively PUBLIC — caller should still verify the playlist
+        return Status.PUBLIC
 
 
 class BongaCams(Bot):
@@ -68,26 +116,16 @@ class BongaCams(Bot):
                 return Status.ERROR
 
             self.lastInfo = response.json()
-            
-            if self.lastInfo.get("status") == "error":
-                return Status.NOTEXIST
-                
+            info = BCModelInfo.from_response(self.lastInfo, self.username, self.logger)
+
             # Update username if performer changed it
-            performer_data = self.lastInfo.get('performerData', {})
-            actual_username = performer_data.get('username')
-            if actual_username and actual_username != self.username:
-                self.username = actual_username
+            if info.performer_username and info.performer_username != self.username:
+                self.username = info.performer_username
                 self.logger = self.getLogger()
-                
-            # Check show type
-            show_type = performer_data.get('showType', '').lower()
-            if show_type in ['private', 'group']:
-                return Status.PRIVATE
-                
-            # Check if video server is available
-            local_data = self.lastInfo.get('localData', {})
-            if 'videoServerUrl' not in local_data:
-                return Status.OFFLINE
+
+            preliminary = info.to_bot_status(self.username, self.logger)
+            if preliminary != Status.PUBLIC:
+                return preliminary
                 
             # Verify playlist is accessible
             playlist_url = self.getPlaylistUrl()

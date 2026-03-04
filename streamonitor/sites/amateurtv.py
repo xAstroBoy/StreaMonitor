@@ -1,7 +1,54 @@
 import requests
+from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Tuple
 from streamonitor.bot import Bot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ---------------------------------------------------------------------------
+# ATVModelInfo – Foolproof JSON reader for AmateurTV
+# ---------------------------------------------------------------------------
+_ATV_KNOWN_STATUSES = frozenset({"online", "offline"})
+_ATV_EXPECTED_KEYS = {
+    "": frozenset({
+        "status", "message", "result", "privateChatStatus", "qualities",
+        "videoTechnologies", "username", "id", "slug", "age", "gender",
+        "country", "languages", "tags", "description", "avatar",
+        "preview", "viewers", "followers",
+    }),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ATVModelInfo:
+    """Immutable snapshot parsed from AmateurTV's API."""
+    status: str
+    message: str
+    result: str
+    private_chat_status: bool   # True if privateChatStatus is not None
+
+    @classmethod
+    def from_response(cls, data: dict, username: str = "", logger=None) -> "ATVModelInfo":
+        check_unknown_fields(data, _ATV_EXPECTED_KEYS, "ATV", username, logger)
+        return cls(
+            status=(data.get("status", "") or "").lower(),
+            message=data.get("message", "") or "",
+            result=data.get("result", "") or "",
+            private_chat_status=data.get("privateChatStatus") is not None,
+        )
+
+    def to_bot_status(self, username: str = "") -> Status:
+        if self.message == "NOT_FOUND":
+            return Status.NOTEXIST
+        if self.result == "KO":
+            return Status.ERROR
+        check_unknown_status(self.status, _ATV_KNOWN_STATUSES, "ATV", username)
+        if self.status == "online":
+            return Status.PRIVATE if self.private_chat_status else Status.PUBLIC
+        if self.status == "offline":
+            return Status.OFFLINE
+        return Status.UNKNOWN
 
 
 class AmateurTV(Bot):
@@ -66,25 +113,11 @@ class AmateurTV(Bot):
                 self.logger.warning(f"HTTP {response.status_code} for user {self.username}")
                 return Status.ERROR
 
-            self.lastInfo = response.json()
+            raw = response.json()
+            self.lastInfo = raw
 
-            if self.lastInfo.get('message') == 'NOT_FOUND':
-                return Status.NOTEXIST
-                
-            if self.lastInfo.get('result') == 'KO':
-                return Status.ERROR
-                
-            stream_status = self.lastInfo.get('status')
-            if stream_status == 'online':
-                if self.lastInfo.get('privateChatStatus') is None:
-                    return Status.PUBLIC
-                else:
-                    return Status.PRIVATE
-            elif stream_status == 'offline':
-                return Status.OFFLINE
-            else:
-                self.logger.warning(f"Unknown status: {stream_status}")
-                return Status.UNKNOWN
+            info = ATVModelInfo.from_response(raw, self.username, self.logger)
+            return info.to_bot_status(self.username)
                 
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error checking status: {e}")

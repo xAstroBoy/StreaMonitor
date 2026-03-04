@@ -2,9 +2,73 @@ import re
 import requests
 import time
 import random
+from dataclasses import dataclass
 from typing import Optional, Set
 from streamonitor.bot import Bot
 from streamonitor.enums import Status, Gender
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ---------------------------------------------------------------------------
+# CBModelInfo – Foolproof JSON reader for Chaturbate API responses
+# ---------------------------------------------------------------------------
+_CB_KNOWN_STATUSES = frozenset({"public", "private", "hidden", "offline"})
+_CB_EXPECTED_KEYS = {
+    "": frozenset({"room_status", "url", "cmaf_edge", "success"}),
+}
+_CB_BULK_EXPECTED_KEYS = {
+    "": frozenset({
+        "username", "gender", "country", "current_show", "display_name",
+        "image_url", "image_url_360x270", "chat_room_url",
+        "chat_room_url_revshare", "iframe_embed", "iframe_embed_revshare",
+        "num_users", "num_followers", "spoken_languages", "birthday",
+        "age", "is_new", "seconds_online", "location", "tags",
+        "source_name", "recording",
+    }),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class CBModelInfo:
+    """Immutable snapshot parsed from Chaturbate's AJAX or bulk API."""
+    room_status: str
+    url: str
+    cmaf_edge: bool
+    gender: str
+    country: str
+
+    @classmethod
+    def from_response(cls, data: dict, username: str = "", logger=None) -> "CBModelInfo":
+        check_unknown_fields(data, _CB_EXPECTED_KEYS, "CB", username, logger)
+        return cls(
+            room_status=(data.get("room_status", "") or "").lower(),
+            url=data.get("url", "") or "",
+            cmaf_edge=bool(data.get("cmaf_edge", False)),
+            gender="",
+            country="",
+        )
+
+    @classmethod
+    def from_bulk_model(cls, m: dict, username: str = "", logger=None) -> "CBModelInfo":
+        check_unknown_fields(m, _CB_BULK_EXPECTED_KEYS, "CB", username, logger)
+        return cls(
+            room_status=(m.get("current_show", "") or "").lower(),
+            url="",
+            cmaf_edge=False,
+            gender=(m.get("gender", "") or "").lower(),
+            country=(m.get("country", "") or "").upper(),
+        )
+
+    def to_bot_status(self, username: str = "") -> Status:
+        s = self.room_status
+        check_unknown_status(s, _CB_KNOWN_STATUSES, "CB", username)
+        if s == "public":
+            return Status.PUBLIC if self.url else Status.RESTRICTED
+        if s in ("private", "hidden"):
+            return Status.PRIVATE
+        if s == "offline":
+            return Status.OFFLINE
+        return Status.OFFLINE
 
 
 class Chaturbate(Bot):
@@ -110,13 +174,15 @@ class Chaturbate(Bot):
                     # Handle different status codes
                     if response.status_code == 200:
                         try:
-                            self.lastInfo = response.json()
+                            raw = response.json()
+                            self.lastInfo = raw
                             self._last_successful_request = time.time()
                             self._request_failure_count = 0
                             
-                            room_status = self.lastInfo.get("room_status", "").lower()
-                            status = self._parseStatus(room_status)
-                            if status == Status.PUBLIC and not self.lastInfo.get('url'):
+                            info = CBModelInfo.from_response(raw, self.username, self.logger)
+                            self._cb_info = info
+                            status = info.to_bot_status(self.username)
+                            if status == Status.PUBLIC and not info.url:
                                 self.logger.debug(f"Public status but no URL for {self.username}")
                                 status = Status.RESTRICTED
                                 
@@ -190,15 +256,9 @@ class Chaturbate(Bot):
 
     @staticmethod
     def _parseStatus(room_status: str) -> Status:
-        """Parse room status string into Status enum."""
-        if room_status == "public":
-            return Status.PUBLIC
-        elif room_status in ("private", "hidden"):
-            return Status.PRIVATE
-        elif room_status == "offline":
-            return Status.OFFLINE
-        else:
-            return Status.OFFLINE
+        """Parse room status string into Status enum (legacy helper)."""
+        info = CBModelInfo(room_status=room_status.lower(), url="", cmaf_edge=False, gender="", country="")
+        return info.to_bot_status()
 
     @classmethod
     def getStatusBulk(cls, streamers: Set['Chaturbate']) -> None:
@@ -228,25 +288,30 @@ class Chaturbate(Bot):
                 except (requests.exceptions.JSONDecodeError, ValueError):
                     continue
 
-                data_map = {str(model.get('username', '')).lower(): model for model in data if model.get('username')}
+                data_map = {}
+                for model in data:
+                    if not isinstance(model, dict):
+                        continue
+                    uname = str(model.get('username', '')).lower()
+                    if uname:
+                        data_map[uname] = model
                 successful_updates = 0
 
                 for streamer in streamers:
                     try:
                         model_data = data_map.get(streamer.username.lower())
                         if not model_data:
-                            # Only set offline if we haven't seen them recently
                             if streamer.sc not in (Status.PUBLIC, Status.PRIVATE):
                                 streamer.setStatus(Status.OFFLINE)
                             continue
                             
-                        # Update gender and country if available
-                        if model_data.get('gender'):
-                            streamer.gender = cls._GENDER_MAP.get(model_data['gender'], Gender.UNKNOWN)
-                        if model_data.get('country'):
-                            streamer.country = model_data.get('country', '').upper()
+                        info = CBModelInfo.from_bulk_model(model_data, streamer.username)
+                        if info.gender:
+                            streamer.gender = cls._GENDER_MAP.get(info.gender, Gender.UNKNOWN)
+                        if info.country:
+                            streamer.country = info.country
                             
-                        status = cls._parseStatus(model_data.get('current_show', ''))
+                        status = info.to_bot_status(streamer.username)
                         
                         # For public status, verify with individual check to get stream URL
                         if status == Status.PUBLIC:

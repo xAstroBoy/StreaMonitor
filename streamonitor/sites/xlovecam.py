@@ -1,7 +1,67 @@
 import requests
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple, List
+
 from streamonitor.bot import Bot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ── XLoveCam expected keys & known statuses ─────────────────────────────
+_XLC_EXPECTED_KEYS: dict = {
+    "": frozenset({"content"}),
+}
+_XLC_PERFORMER_KEYS: dict = {
+    "": frozenset({"enabled", "online", "hlsPlaylistFree"}),
+}
+_XLC_KNOWN_ONLINE_CODES: frozenset = frozenset({"0", "1"})
+
+
+@dataclass(frozen=True, slots=True)
+class XLCModelInfo:
+    """Typed reader for the XLoveCam ``getPerformerRoom`` response."""
+
+    has_performer: bool
+    enabled: bool
+    online: int  # 0 = offline, 1 = online, -1 = missing
+    has_hls_free: bool
+
+    @classmethod
+    def from_response(cls, resp_data: dict, username: str = "", logger=None) -> "XLCModelInfo":
+        check_unknown_fields(resp_data, _XLC_EXPECTED_KEYS, "XLC", username, logger)
+        content = resp_data.get("content") or {}
+        performer = content.get("performer") if isinstance(content, dict) else None
+        if not performer:
+            return cls(has_performer=False, enabled=False, online=-1, has_hls_free=False)
+        if isinstance(performer, dict):
+            check_unknown_fields(performer, _XLC_PERFORMER_KEYS, "XLC", username, logger)
+        raw_online = performer.get("online")
+        try:
+            online = int(raw_online) if raw_online is not None else -1
+        except (ValueError, TypeError):
+            online = -1
+        return cls(
+            has_performer=True,
+            enabled=bool(performer.get("enabled")),
+            online=online,
+            has_hls_free="hlsPlaylistFree" in performer,
+        )
+
+    def to_bot_status(self, username: str = "", logger=None) -> "Status":
+        if not self.has_performer:
+            return Status.UNKNOWN
+        if not self.enabled:
+            return Status.NOTEXIST
+        if self.online == 1:
+            return Status.PUBLIC if self.has_hls_free else Status.PRIVATE
+        if self.online == 0:
+            return Status.OFFLINE
+        if self.online >= 0:
+            check_unknown_status(
+                str(self.online), _XLC_KNOWN_ONLINE_CODES,
+                "XLC", username, logger,
+            )
+        return Status.UNKNOWN
 
 
 class XLoveCam(Bot):
@@ -85,7 +145,7 @@ class XLoveCam(Bot):
             data = {
                 'performerId': self._id,
             }
-            
+
             response = self.session.post(
                 'https://www.xlovecam.com/hu/performerAction/getPerformerRoom',
                 headers=self.headers,
@@ -97,32 +157,15 @@ class XLoveCam(Bot):
             if not response.ok:
                 self.logger.warning(f"HTTP {response.status_code} for user {self.username}")
                 return Status.UNKNOWN
-                
-            resp_data = response.json()
-            
-            if 'content' not in resp_data:
-                return Status.UNKNOWN
-            if 'performer' not in resp_data['content']:
-                return Status.UNKNOWN
-                
-            self.lastInfo = resp_data['content']['performer']
 
-            if not self.lastInfo.get('enabled'):
-                return Status.NOTEXIST
-                
-            online_status = self.lastInfo.get('online')
-            
-            if online_status == 1:
-                # Check if there's a free stream available
-                if 'hlsPlaylistFree' in self.lastInfo:
-                    return Status.PUBLIC
-                else:
-                    return Status.PRIVATE
-            elif online_status == 0:
-                return Status.OFFLINE
-            else:
-                return Status.UNKNOWN
-                
+            resp_data = response.json()
+            info = XLCModelInfo.from_response(resp_data, self.username, self.logger)
+
+            # Store performer data for getVideoUrl()
+            self.lastInfo = (resp_data.get("content") or {}).get("performer")
+
+            return info.to_bot_status(self.username, self.logger)
+
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error checking status: {e}")
             return Status.ERROR

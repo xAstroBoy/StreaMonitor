@@ -1,7 +1,59 @@
 import requests
+from dataclasses import dataclass
 from typing import Optional, Tuple, List
+
 from streamonitor.bot import Bot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ── CamsCom expected keys & known online codes ──────────────────────────
+_CC_EXPECTED_KEYS: dict = {
+    "": frozenset({"stream_name", "online"}),
+}
+_CC_PUBLIC_CODES: frozenset = frozenset({1, 2, 6, 10, 11, 12})
+_CC_PRIVATE_CODES: frozenset = frozenset({3, 4, 7, 13, 14})
+_CC_KNOWN_ONLINE_CODES: frozenset = frozenset(
+    {str(c) for c in _CC_PUBLIC_CODES | _CC_PRIVATE_CODES | {0}}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CCModelInfo:
+    """Typed reader for the CamsCom ``/models/stream/`` response."""
+
+    stream_name: str
+    online: int  # normalised to int; -1 = missing/unparseable
+
+    @classmethod
+    def from_response(cls, data: dict, username: str = "", logger=None) -> "CCModelInfo":
+        check_unknown_fields(data, _CC_EXPECTED_KEYS, "CC", username, logger)
+        raw_online = data.get("online")
+        try:
+            online = int(raw_online) if raw_online is not None else -1
+        except (ValueError, TypeError):
+            online = -1
+        return cls(
+            stream_name=data.get("stream_name", "") or "",
+            online=online,
+        )
+
+    def to_bot_status(self, username: str = "", logger=None) -> "Status":
+        if not self.stream_name:
+            return Status.NOTEXIST
+        if self.online == 0:
+            return Status.OFFLINE
+        if self.online in _CC_PUBLIC_CODES:
+            return Status.PUBLIC
+        if self.online in _CC_PRIVATE_CODES:
+            return Status.PRIVATE
+        if self.online >= 0:
+            check_unknown_status(
+                str(self.online), _CC_KNOWN_ONLINE_CODES,
+                "CC", username, logger,
+            )
+            return Status.PRIVATE
+        return Status.UNKNOWN
 
 
 class CamsCom(Bot):
@@ -32,36 +84,15 @@ class CamsCom(Bot):
                 timeout=30,
                 bucket='status'
             )
-            
+
             if response.status_code != 200:
                 self.logger.warning(f"HTTP {response.status_code} for user {self.username}")
                 return Status.ERROR
-                
+
             self.lastInfo = response.json()
-            
-            # Check if stream_name exists to verify user existence
-            if 'stream_name' not in self.lastInfo:
-                return Status.NOTEXIST
-                
-            online_status = self.lastInfo.get('online')
-            
-            # Handle different online status values
-            if online_status == '0' or online_status == 0:
-                return Status.OFFLINE
-            elif online_status == '1' or online_status == 1:
-                return Status.PUBLIC
-            elif online_status == '2' or online_status == 2:  # Nude show
-                return Status.PUBLIC
-            elif online_status in ['3', '4', '7', '13', '14', 3, 4, 7, 13, 14]:  # Private/Group/Voyeur/C2C
-                return Status.PRIVATE
-            elif online_status in ['6', '10', '11', '12', 6, 10, 11, 12]:  # Ticket/Party/Goal shows
-                return Status.PUBLIC
-            elif online_status is not None:
-                # Any other non-null value indicates some form of private show
-                return Status.PRIVATE
-                
-            return Status.UNKNOWN
-            
+            info = CCModelInfo.from_response(self.lastInfo, self.username, self.logger)
+            return info.to_bot_status(self.username, self.logger)
+
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error checking status: {e}")
             return Status.ERROR

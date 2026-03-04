@@ -3,6 +3,7 @@
 
 import os
 import re
+import shutil
 from typing import Any, Callable, Dict, Optional
 import m3u8
 import subprocess
@@ -21,6 +22,7 @@ except ImportError:
 
 from parameters import DEBUG, CONTAINER, FFMPEG_PATH
 from streamonitor.bot import Bot
+from streamonitor.enums import Status
 import requests
 
 TEMP_DIR_NAME = "M3U8_TMP"
@@ -29,6 +31,53 @@ try:
     from parameters import HLS_TMP_DIR as _HLS_TMP_DIR
 except Exception:
     _HLS_TMP_DIR = None
+
+
+_tmp_root_cleaned: bool = False  # Only clean once per process
+
+
+def _purge_stale_tmp_dirs(tmp_root: str) -> None:
+    """Remove leftover M3U8_TMP subdirectories from previous/crashed processes.
+
+    Each sub-directory is named ``[SITE]model_PID_THREAD``.  If the PID no
+    longer exists it's stale; if the PID exists but doesn't belong to our
+    executable it's also stale (PID reuse).  Delete everything inside and
+    the directory itself.
+    """
+    if not os.path.isdir(tmp_root):
+        return
+    my_pid = os.getpid()
+    for name in os.listdir(tmp_root):
+        full = os.path.join(tmp_root, name)
+        if not os.path.isdir(full):
+            continue
+        # Extract PID from dir name  (e.g. "[SC]model_12345_67890")
+        parts = name.rsplit("_", 2)
+        if len(parts) >= 3:
+            try:
+                dir_pid = int(parts[-2])
+            except ValueError:
+                dir_pid = -1
+        else:
+            dir_pid = -1
+
+        # Keep dirs that belong to the current process
+        if dir_pid == my_pid:
+            continue
+
+        # Check if the owning process is still alive
+        if dir_pid > 0:
+            try:
+                os.kill(dir_pid, 0)  # 0 = existence check, no signal sent
+                continue  # process is alive — leave it alone
+            except OSError:
+                pass  # process is dead — safe to clean
+
+        # Nuke the stale directory
+        try:
+            shutil.rmtree(full, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _get_tmp_root(self: Bot) -> str:
@@ -61,6 +110,15 @@ def _get_tmp_root(self: Bot) -> str:
     candidate = os.path.join(os.getcwd(), TEMP_DIR_NAME)
     os.makedirs(candidate, exist_ok=True)
     return candidate
+
+
+def _ensure_tmp_clean(tmp_root: str) -> str:
+    """Purge stale dirs on first call per process, then return tmp_root."""
+    global _tmp_root_cleaned
+    if not _tmp_root_cleaned:
+        _tmp_root_cleaned = True
+        _purge_stale_tmp_dirs(tmp_root)
+    return tmp_root
 
 
 def _abs_with_parent_query(base_url: str, maybe_rel: str) -> str:
@@ -274,24 +332,11 @@ class _RollingM3UWriter:
                 self._thr.join(timeout=3.0)
             except Exception:
                 pass
-        
-        # Clean up our files
+
+        # Remove entire model directory (playlist + any leftovers)
         try:
-            if os.path.exists(self.path):
-                os.unlink(self.path)
-        except Exception:
-            pass
-        try:
-            pp = self.path + ".part"
-            if os.path.exists(pp):
-                os.unlink(pp)
-        except Exception:
-            pass
-        
-        # Remove empty dir
-        try:
-            if not os.listdir(self.model_dir):
-                os.rmdir(self.model_dir)
+            if os.path.isdir(self.model_dir):
+                shutil.rmtree(self.model_dir, ignore_errors=True)
         except Exception:
             pass
 
@@ -406,7 +451,7 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
         text1 = m3u_processor(text1)
 
     # Start writer
-    tmp_root = _get_tmp_root(self)
+    tmp_root = _ensure_tmp_clean(_get_tmp_root(self))
     model_key = f"[{getattr(self, 'siteslug', 'SITE')}]{self.username}"
     writer = _RollingM3UWriter(
         media_url=url, sess=sess, headers=headers, m3u_processor=m3u_processor,
@@ -619,18 +664,36 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
                 consecutive_404s = 0  # Reset on progress
             elif HTTP_404_PATTERN.search(line):
                 # HTTP 404 — stream segments gone (model went offline/private).
-                # Log the first one, suppress the flood, and kill FFmpeg quickly.
+                # On the first 404 verify with a quick status check.
                 consecutive_404s += 1
                 if consecutive_404s == 1:
-                    self.logger.warning(f"FFmpeg: segment 404 — stream likely ended")
-                elif consecutive_404s >= MAX_CONSECUTIVE_404S:
-                    self.logger.info(f"FFmpeg: {consecutive_404s} consecutive 404s — terminating (stream ended)")
-                    terminated_for_404 = True
+                    # Quick status probe — don't let it blow up the download loop
                     try:
-                        proc.terminate()
+                        live_status = self.getStatus()
                     except Exception:
-                        pass
-                    break
+                        live_status = None
+                    if live_status == Status.PUBLIC:
+                        self.logger.info("FFmpeg: segment 404 — but stream is still PUBLIC, CDN hiccup")
+                        consecutive_404s = 0  # Reset — stream is fine
+                    else:
+                        self.logger.warning(f"FFmpeg: segment 404 — stream ended (status={live_status})")
+                elif consecutive_404s >= MAX_CONSECUTIVE_404S:
+                    # About to kill FFmpeg — confirm the stream is really gone
+                    try:
+                        live_status = self.getStatus()
+                    except Exception:
+                        live_status = None
+                    if live_status == Status.PUBLIC:
+                        self.logger.info(f"FFmpeg: {consecutive_404s} consecutive 404s but stream is still PUBLIC — resetting")
+                        consecutive_404s = 0
+                    else:
+                        self.logger.info(f"FFmpeg: {consecutive_404s} consecutive 404s — terminating (status={live_status})")
+                        terminated_for_404 = True
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        break
                 # else: suppress — don't log the 2nd, 3rd, 4th duplicate
             elif HTTP_4XX_5XX_PATTERN.search(line):
                 # Other HTTP errors (403, 5xx, etc.) — still log but reset 404 counter

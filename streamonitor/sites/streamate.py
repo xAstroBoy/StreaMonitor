@@ -1,7 +1,13 @@
 import requests
 from typing import Optional, List, Dict, Any, Tuple
+
 from streamonitor.bot import Bot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields
+
+
+# ── StreaMate expected keys (JSON only parsed on 200/PUBLIC) ───────────
+_SM_EXPECTED_KEYS: dict = {"": frozenset({"formats"})}
 
 
 class StreaMate(Bot):
@@ -66,6 +72,7 @@ class StreaMate(Bot):
             if response.status_code == 200:
                 try:
                     self.lastInfo = response.json()
+                    check_unknown_fields(self.lastInfo, _SM_EXPECTED_KEYS, "SM", self.username, self.logger)
                     return Status.PUBLIC
                 except (ValueError, KeyError) as e:
                     self.logger.error(f"Error parsing response: {e}")

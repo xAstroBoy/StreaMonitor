@@ -1,7 +1,15 @@
 import requests
 from typing import Optional, Tuple, List
+
 from streamonitor.bot import Bot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields
+
+
+# ── Cam4 expected keys per endpoint ──────────────────────────────────
+_C4_PROFILE_KEYS: dict = {"": frozenset({"online"})}
+_C4_ACCESS_KEYS: dict = {"": frozenset({"privateStream"})}
+_C4_STREAM_KEYS: dict = {"": frozenset({"cdnURL"})}
 
 
 class Cam4(Bot):
@@ -51,6 +59,7 @@ class Cam4(Bot):
                         return Status.NOTEXIST
 
                     profile_data = profile_response.json()
+                    check_unknown_fields(profile_data, _C4_PROFILE_KEYS, "C4", self.username, self.logger)
                     if not profile_data.get('online', False):
                         return Status.OFFLINE
                         
@@ -72,6 +81,7 @@ class Cam4(Bot):
                     return Status.UNKNOWN
                     
                 access_data = access_response.json()
+                check_unknown_fields(access_data, _C4_ACCESS_KEYS, "C4", self.username, self.logger)
                 if access_data.get('privateStream', False):
                     return Status.PRIVATE
                     
@@ -92,6 +102,7 @@ class Cam4(Bot):
                     return Status.OFFLINE
                 elif stream_response.status_code == 200:
                     self.lastInfo = stream_response.json()
+                    check_unknown_fields(self.lastInfo, _C4_STREAM_KEYS, "C4", self.username, self.logger)
                     return Status.PUBLIC
                 else:
                     self.logger.warning(f"Stream info check failed with HTTP {stream_response.status_code}")

@@ -85,7 +85,7 @@ class Bot(Thread):
     }
 
     status_messages: Dict[Status, str] = {
-        Status.UNKNOWN: colored("Unknown error", "red"),
+        Status.UNKNOWN: colored("Temporary error, retrying", "yellow", attrs=["dark"]),
         Status.PUBLIC: colored("Channel online", "green", attrs=["bold"]),
         Status.ONLINE: colored("Connected, waiting for stream", "cyan", attrs=["bold"]),
         Status.OFFLINE: colored("No stream", "yellow"),

@@ -7,6 +7,7 @@ import random
 import itertools
 import json
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional, Tuple, List, Dict
 
@@ -16,7 +17,195 @@ from urllib3.util.retry import Retry
 from streamonitor.bot import RoomIdBot
 from streamonitor.downloaders.hls import getVideoNativeHLS
 from streamonitor.enums import Status, Gender
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
 from streamonitor.utils.CloudflareDetection import looks_like_cf_html
+
+
+# ---------------------------------------------------------------------------
+# SCModelInfo  –  Foolproof JSON reader for every StripChat API shape
+# ---------------------------------------------------------------------------
+# Ground-truth field mapping (verified against live API 2025-06):
+#
+#   /api/front/v2/models/username/{name}/cam  →  {cam:{…}, user:{user:{…}}}
+#     user.user.status      ← authoritative  ("public"|"off"|"private"|"groupShow"|…)
+#     user.user.isLive      ← authoritative live flag
+#     user.user.isOnline    ← online flag (True even in private/group)
+#     user.user.isDeleted   ← account removed
+#     user.isGeoBanned      ← geo-blocked from viewer's IP
+#     cam.isCamAvailable    ← True ONLY during freely-viewable public streams
+#     cam.streamName        ← stream ID for playlist URL (empty when offline)
+#     cam.show              ← dict with show info during group/private, else None
+#     cam.broadcastSettings.originOnly ← True when not yet on edge CDN
+#
+#   UNRELIABLE (ignore these):
+#     cam.isCamActive       ← ALWAYS True, even when model is offline
+#     cam.streamStatus      ← ALWAYS None
+#
+#   Browse/bulk API  →  flat model dicts  {username, status, isLive, …}
+# ---------------------------------------------------------------------------
+
+# Status string sets — ALL LOWERCASE (SCModelInfo normalizes to lowercase)
+_PRIVATE_STATUSES = frozenset({"private", "groupshow", "p2p", "virtualprivate", "p2pvoice"})
+_OFFLINE_STATUSES = frozenset({"off", "idle"})
+_SC_ALL_KNOWN_STATUSES = _PRIVATE_STATUSES | _OFFLINE_STATUSES | frozenset({
+    "public", "connected", "online",
+})
+
+# Expected keys at each nesting level of the /cam endpoint.
+# Any key NOT listed here will be logged once as a new API field.
+_SC_CAM_EXPECTED_KEYS = {
+    "": frozenset({"cam", "user"}),
+    "cam": frozenset({
+        "isCamAvailable", "isCamActive", "streamStatus", "streamName",
+        "show", "broadcastSettings", "privateMode", "id", "viewerCount",
+        "isTipGoalEnabled", "status", "topic",
+    }),
+    "cam.broadcastSettings": frozenset({
+        "isMobile", "originOnly", "camMode", "resolution",
+    }),
+    "user": frozenset({"user", "isGeoBanned"}),
+    "user.user": frozenset({
+        "status", "isLive", "isOnline", "isDeleted", "username", "id",
+        "gender", "broadcastGender", "genderDoc", "genderCategory",
+        "contestGender", "country", "isMobile", "isNew", "avatarUrl",
+        "previewUrl", "snapshotUrl", "snapshotTimestamp", "languages",
+        "ethnicity", "age", "bodyType", "hairColor", "eyeColor",
+        "breastSize", "publicHeight", "publicWeight", "displayName",
+        "isHd", "isMobileAllowed", "isVr", "isReal",
+    }),
+}
+
+# Expected keys in browse/bulk model dicts (flat).
+_SC_BROWSE_EXPECTED_KEYS = {
+    "": frozenset({
+        "username", "status", "isLive", "isOnline", "isDeleted",
+        "isGeoBanned", "streamName", "isCamAvailable", "isCamActive",
+        "gender", "genderCategory", "country", "isMobile", "show",
+        "id", "avatarUrl", "previewUrl", "snapshotUrl", "age",
+        "isNew", "isHd", "isVr", "viewerCount", "languages",
+        "ethnicity", "bodyType", "hairColor", "eyeColor", "breastSize",
+        "broadcastGender", "snapshotTimestamp", "displayName",
+    }),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SCModelInfo:
+    """
+    Immutable snapshot of a StripChat model parsed from ANY API response shape.
+
+    Two factory methods cover every known response format:
+      • from_cam_response()   – the per-model /cam endpoint
+      • from_browse_model()   – flat dicts from the browse/bulk listing
+
+    Call .to_bot_status() to get the Status enum — this is the SINGLE place
+    where status strings are mapped to bot statuses.
+    """
+    username: str
+    status: str              # raw API status string, lowercased
+    is_live: bool            # user.user.isLive (authoritative)
+    is_online: bool          # user.user.isOnline
+    is_deleted: bool         # user.user.isDeleted
+    is_geo_banned: bool      # user.isGeoBanned
+    stream_name: str         # cam.streamName (empty when offline)
+    is_cam_available: bool   # cam.isCamAvailable (True only for public streams)
+    gender: str              # raw gender string (map with _GENDER_MAP)
+    country: str             # ISO country code
+    is_mobile: bool          # broadcasting from mobile
+    origin_only: bool        # stream not yet on edge CDN
+    show: Optional[dict]     # show info during group/private, else None
+
+    # -- Factory methods -------------------------------------------------- #
+
+    @classmethod
+    def from_cam_response(cls, data: dict, username: str = "", logger=None) -> "SCModelInfo":
+        """
+        Parse the /api/front/v2/models/username/{name}/cam response.
+        Expected shape: {cam: {…}, user: {user: {…}, isGeoBanned: …}}
+        """
+        check_unknown_fields(data, _SC_CAM_EXPECTED_KEYS, "SC", username, logger)
+        cam = data.get("cam") or {}
+        user_wrapper = data.get("user") or {}
+        user = user_wrapper.get("user") or {}
+        bcast = cam.get("broadcastSettings") or {}
+
+        return cls(
+            username=user.get("username", "") or "",
+            status=(user.get("status", "") or "").lower(),
+            is_live=bool(user.get("isLive", False)),
+            is_online=bool(user.get("isOnline", False)),
+            is_deleted=bool(user.get("isDeleted", False)),
+            is_geo_banned=bool(user_wrapper.get("isGeoBanned", False)),
+            stream_name=str(cam.get("streamName", "") or ""),
+            is_cam_available=bool(cam.get("isCamAvailable", False)),
+            # broadcastGender is the actual performer gender;
+            # 'gender' can be compound like "maleFemale" for couples
+            gender=(user.get("broadcastGender") or user.get("genderCategory") or user.get("gender") or "").lower(),
+            country=(user.get("country", "") or "").upper(),
+            is_mobile=bool(bcast.get("isMobile", False)),
+            origin_only=bool(bcast.get("originOnly", False)),
+            show=cam.get("show"),
+        )
+
+    @classmethod
+    def from_browse_model(cls, m: dict, username: str = "", logger=None) -> "SCModelInfo":
+        """
+        Parse a single model dict from the browse/bulk listing.
+        These are flat: {username, status, isLive, streamName, …}
+        """
+        check_unknown_fields(m, _SC_BROWSE_EXPECTED_KEYS, "SC", username, logger)
+        return cls(
+            username=m.get("username", "") or "",
+            status=(m.get("status", "") or "").lower(),
+            is_live=bool(m.get("isLive", False)),
+            is_online=bool(m.get("isOnline", False)),
+            is_deleted=bool(m.get("isDeleted", False)),
+            is_geo_banned=bool(m.get("isGeoBanned", False)),
+            stream_name=str(m.get("streamName", "") or ""),
+            is_cam_available=bool(m.get("isCamAvailable", False)),
+            gender=(m.get("gender") or m.get("genderCategory") or "").lower(),
+            country=(m.get("country", "") or "").upper(),
+            is_mobile=bool(m.get("isMobile", False)),
+            origin_only=False,  # not available in browse
+            show=m.get("show"),
+        )
+
+    # -- Status decision -------------------------------------------------- #
+
+    def to_bot_status(self) -> Status:
+        """
+        Single source of truth: convert parsed model info → bot Status enum.
+
+        Decision order (first match wins):
+          1. Deleted account   → DELETED
+          2. Geo-banned        → RESTRICTED
+          3. Private statuses  → PRIVATE
+          4. Offline statuses  → OFFLINE
+          5. "public" + live   → PUBLIC
+          6. "public" − live   → OFFLINE  (transitional / stale)
+          7. "connected"/"online" → OFFLINE
+          8. Anything else     → UNKNOWN
+        """
+        if self.is_deleted:
+            return Status.DELETED
+        if self.is_geo_banned:
+            return Status.RESTRICTED
+
+        s = self.status  # already lowercased
+
+        if s in _PRIVATE_STATUSES:
+            return Status.PRIVATE
+        if s in _OFFLINE_STATUSES:
+            return Status.OFFLINE
+        if s == "public":
+            if self.is_cam_available or self.is_live:
+                return Status.PUBLIC
+            # Status says public but no live indicator — transitional
+            return Status.OFFLINE
+        if s in ("connected", "online"):
+            return Status.OFFLINE
+        check_unknown_status(s, _SC_ALL_KNOWN_STATUSES, "SC", self.username)
+        return Status.UNKNOWN
 
 
 class StripChat(RoomIdBot):
@@ -58,10 +247,9 @@ class StripChat(RoomIdBot):
     _CDN_DOMAINS = ("org", "com", "net")
     _CHARSET = "abcdefghijklmnopqrstuvwxyz0123456789"
     
-    # Status sets for O(1) lookup
-    # groupShow included in private - requires ticket to view
-    _PRIVATE_STATUSES = frozenset(["private", "groupShow", "p2p", "virtualPrivate", "p2pVoice"])
-    _OFFLINE_STATUSES = frozenset(["off", "idle"])
+    # Reference the module-level status sets (used by SCModelInfo.to_bot_status too)
+    _PRIVATE_STATUSES = _PRIVATE_STATUSES
+    _OFFLINE_STATUSES = _OFFLINE_STATUSES
 
     def __init__(self, username, room_id=None):
         if StripChat._static_data is None:
@@ -579,7 +767,11 @@ class StripChat(RoomIdBot):
 
     @classmethod
     def getStatusBulk(cls, streamers):
-        """Bulk status check for all StripChat streamers at once."""
+        """Bulk status check for all StripChat streamers at once.
+        
+        Uses SCModelInfo.from_browse_model() for consistent parsing
+        and .to_bot_status() for the same status logic as getStatus().
+        """
         s = cls._get_session()
         try:
             r = s.get(
@@ -589,47 +781,51 @@ class StripChat(RoomIdBot):
             if r.status_code != 200:
                 return
             data = r.json()
-            models = data.get('models', data.get('items', []))
-            if not models:
+
+            # The browse API may nest models inside blocks or at top level
+            models_list = []
+            for block in data.get('blocks', []):
+                models_list.extend(block.get('models', []))
+            if not models_list:
+                models_list = data.get('models', data.get('items', []))
+            if not models_list:
                 return
 
-            # Build lookup by username (lowercase)
-            model_map = {}
-            for model in models:
-                info = cls.normalizeInfo(model) if isinstance(model, dict) else {}
-                uname = info.get('username', '').lower()
-                if uname:
-                    model_map[uname] = info
+            # Parse every model through SCModelInfo and build lookup
+            info_map: Dict[str, SCModelInfo] = {}
+            for m in models_list:
+                if not isinstance(m, dict):
+                    continue
+                info = SCModelInfo.from_browse_model(m, m.get('username',''))
+                if info.username:
+                    info_map[info.username.lower()] = info
 
             for streamer in streamers:
-                model_data = model_map.get(streamer.username.lower())
-                if not model_data:
+                info = info_map.get(streamer.username.lower())
+                if not info:
                     # Not in the top list — could be offline or private
                     if streamer.sc not in (Status.PUBLIC, Status.PRIVATE, Status.RESTRICTED):
                         streamer.setStatus(Status.OFFLINE)
                     continue
 
-                # Update gender
-                gender_str = model_data.get('gender', model_data.get('genderCategory', ''))
-                if gender_str:
-                    streamer.gender = cls._GENDER_MAP.get(gender_str.lower(), Gender.UNKNOWN)
+                # Update gender/country from bulk data
+                if info.gender:
+                    streamer.gender = cls._GENDER_MAP.get(info.gender, Gender.UNKNOWN)
+                if info.country:
+                    streamer.country = info.country
 
-                # Update country
-                country = model_data.get('country', '')
-                if country:
-                    streamer.country = country.upper()
+                # Use the same status logic as the per-model endpoint
+                bot_status = info.to_bot_status()
 
-                # Determine status
-                status_val = model_data.get('status', model_data.get('broadcastStatus', ''))
-                is_live = model_data.get('isLive', model_data.get('isCamActive', False))
-                if status_val == 'public' and is_live:
+                if bot_status == Status.PUBLIC:
+                    # If already PUBLIC or RESTRICTED, skip redundant per-model fetch
                     if streamer.sc in (Status.PUBLIC, Status.RESTRICTED):
                         continue
+                    # First time seeing them live — do full per-model fetch
+                    # to populate lastInfo (needed for playlist/keys)
                     status = streamer.getStatus()
-                elif status_val in cls._PRIVATE_STATUSES:
-                    status = Status.PRIVATE
                 else:
-                    status = Status.OFFLINE
+                    status = bot_status
                 streamer.setStatus(status)
         except Exception:
             pass
@@ -878,29 +1074,25 @@ class StripChat(RoomIdBot):
 
     def getStreamName(self) -> str:
         """
-        Robust streamName detector: checks multiple common locations and finally
-        performs a recursive search for the key if not found.
+        Return the stream name (ID used in playlist URLs).
+        Uses SCModelInfo if available, falls back to raw dict lookup.
         Raises KeyError if nothing found.
         """
+        # Fast path: use the parsed info from getStatus()
+        info = getattr(self, '_sc_info', None)
+        if info and info.stream_name:
+            return info.stream_name
+
+        # Fallback: dig through raw lastInfo (in case called before getStatus)
         if not self.lastInfo:
             raise KeyError("lastInfo is empty, call getStatus() first")
 
-        # Common paths to check in order
         paths = [
-            ["streamName"],
             ["cam", "streamName"],
-            ["user", "streamName"],
+            ["streamName"],
             ["user", "user", "streamName"],
-            ["model", "streamName"],
-            ["user", "user", "userStreamName"],
-            ["cam", "userStreamName"],
         ]
         val = self._first_in_paths(paths)
-        if val:
-            return str(val)
-
-        # Last resort: recursive find
-        val = self._recursive_find(self.lastInfo, "streamName")
         if val:
             return str(val)
 
@@ -908,158 +1100,86 @@ class StripChat(RoomIdBot):
 
     def getStatusField(self):
         """
-        Robust status detector. Tries known paths and falls back to recursive search.
-        Returns the raw status value or None.
+        Return the raw status string. Prefers SCModelInfo if available.
+        Kept for backward compatibility — new code should use SCModelInfo directly.
         """
+        info = getattr(self, '_sc_info', None)
+        if info and info.status:
+            return info.status
+
+        # Fallback: direct path lookup
         if not self.lastInfo:
             return None
-
-        # Explicit candidate paths (ordered)
         paths = [
-            ["status"],
-            ["cam", "streamStatus"],
-            ["cam", "status"],
-            ["model", "status"],
-            ["user", "status"],
             ["user", "user", "status"],
-            ["user", "user", "state"],
-            ["user", "user", "broadcastStatus"],
+            ["status"],
+            ["cam", "status"],
         ]
-        status = self._first_in_paths(paths)
-        if status is not None:
-            return status
-
-        # Recursive fallback — but prefer strings that match expected status tokens
-        found = self._recursive_find(self.lastInfo, "status")
-        if isinstance(found, str):
-            return found
-        return None
+        return self._first_in_paths(paths)
 
     def getIsLive(self) -> bool:
         """
-        Robust isLive detector. Checks multiple locations and returns boolean.
+        Return whether the model is currently live.
+        Uses SCModelInfo.is_live (user.user.isLive) — the authoritative flag.
+        NOTE: cam.isCamActive is ALWAYS True and is intentionally ignored.
         """
+        info = getattr(self, '_sc_info', None)
+        if info is not None:
+            return info.is_live
+
+        # Fallback: direct path lookup
         if not self.lastInfo:
             return False
-
-        # Try direct root flag
-        val = self._get_by_path(self.lastInfo, ["isLive"])
-        if val is not None:
-            return bool(val)
-
-        # Common locations
-        paths = [
-            ["cam", "isCamActive"],
-            ["cam", "isCamAvailable"],
-            ["cam", "isLive"],
-            ["model", "isLive"],
-            ["user", "isLive"],
-            ["user", "user", "isLive"],
-            ["user", "user", "isCamActive"],
-            ["broadcastSettings", "isLive"],
-            ["cam", "broadcastSettings", "isCamActive"],
-            ["cam", "broadcastSettings", "isLive"],
-        ]
-        val = self._first_in_paths(paths)
-        if val is not None:
-            return bool(val)
-
-        # Recursive fallback for any key named isLive or isCamActive
-        for k in ("isLive", "isCamActive", "isCamAvailable"):
-            found = self._recursive_find(self.lastInfo, k)
-            if found is not None:
-                return bool(found)
-
-        return False
+        val = self._get_by_path(self.lastInfo, ["user", "user", "isLive"])
+        return bool(val) if val is not None else False
 
     def getIsMobile(self) -> bool:
-        """
-        Robust isMobile detector. Checks multiple locations and returns boolean.
-        """
-        if not self.lastInfo:
-            return False
-
-        # Direct
-        val = self._get_by_path(self.lastInfo, ["isMobile"])
-        if val is not None:
-            return bool(val)
-
-        # Common paths
-        paths = [
-            ["model", "isMobile"],
-            ["user", "isMobile"],
-            ["user", "user", "isMobile"],
-            ["broadcastSettings", "isMobile"],
-            ["cam", "broadcastSettings", "isMobile"],
-            ["cam", "isMobile"],
-        ]
-        val = self._first_in_paths(paths)
-        if val is not None:
-            return bool(val)
-
-        # Recursive fallback
-        found = self._recursive_find(self.lastInfo, "isMobile")
-        if found is not None:
-            return bool(found)
-
-        return False
+        """Check if the current broadcast is from a mobile device."""
+        info = getattr(self, '_sc_info', None)
+        if info is not None:
+            return info.is_mobile
+        # Fallback
+        val = self._get_by_path(self.lastInfo or {}, ["cam", "broadcastSettings", "isMobile"])
+        return bool(val) if val is not None else False
 
     def getIsGeoBanned(self) -> bool:
         """Check if user is geo-banned from viewing this model."""
-        if not self.lastInfo:
-            return False
-
-        paths = [
-            ["isGeoBanned"],
-            ["user", "isGeoBanned"],
-            ["user", "user", "isGeoBanned"],
-        ]
-        val = self._first_in_paths(paths)
-        if val is not None:
-            return bool(val)
-
-        found = self._recursive_find(self.lastInfo, "isGeoBanned")
-        return bool(found) if found is not None else False
+        info = getattr(self, '_sc_info', None)
+        if info is not None:
+            return info.is_geo_banned
+        # Fallback
+        val = self._get_by_path(self.lastInfo or {}, ["user", "isGeoBanned"])
+        return bool(val) if val is not None else False
 
     def getIsDeleted(self) -> bool:
         """Check if the model account has been deleted."""
-        if not self.lastInfo:
-            return False
-
-        # Try common paths where isDeleted might be found
-        paths = [
-            ["isDeleted"],
-            ["user", "isDeleted"],
-            ["user", "user", "isDeleted"],
-            ["model", "isDeleted"],
-        ]
-        val = self._first_in_paths(paths)
-        if val is not None:
-            return bool(val)
-
-        # Recursive fallback
-        found = self._recursive_find(self.lastInfo, "isDeleted")
-        return bool(found) if found is not None else False
+        info = getattr(self, '_sc_info', None)
+        if info is not None:
+            return info.is_deleted
+        # Fallback
+        val = self._get_by_path(self.lastInfo or {}, ["user", "user", "isDeleted"])
+        return bool(val) if val is not None else False
 
     def getStatus(self):
-        """Check the current status of the model's stream."""
+        """Check the current status of the model's stream.
+        
+        Uses SCModelInfo for foolproof JSON parsing — every field is extracted
+        from a verified path and the status decision lives in one place.
+        """
         url = f'https://stripchat.com/api/front/v2/models/username/{self.username}/cam?uniq={StripChat.uniq()}'
 
         try:
             r = self.session.get(url, headers=self.headers, bucket='api')
         except Exception as e:
-            # Network errors (timeout, connection reset, HTTP/2 stream errors, SSL errors)
-            # should NEVER bubble up as unhandled exceptions — return RATELIMIT so the
-            # bot backs off gracefully instead of counting hard ERROR strikes.
             err_type = type(e).__name__
             err_msg = str(e) or "(no details)"
-            self.logger.warning(f'Network error ({err_type}) fetching status for {self.username}: {err_msg}')
-            return Status.RATELIMIT
+            self.logger.warning(f'Network error ({err_type}) for {self.username}: {err_msg}')
+            return Status.UNKNOWN
 
         ct = (r.headers.get("content-type") or "").lower()
         body = r.text or ""
 
-        # Handle HTTP errors
+        # HTTP error handling
         if r.status_code == 404:
             return Status.NOTEXIST
         if r.status_code == 403:
@@ -1075,53 +1195,39 @@ class StripChat(RoomIdBot):
                 self.logger.error(f'Cloudflare challenge ({r.status_code}) for {self.username}')
                 return Status.CLOUDFLARE
             self.logger.warning(f'Server error {r.status_code} for {self.username}')
-            return Status.RATELIMIT
+            return Status.UNKNOWN
 
-        # Validate JSON response
+        # Validate JSON
         if "application/json" not in ct or not body.strip():
             self.logger.warning(f'Non-JSON response for {self.username}')
-            return Status.RATELIMIT
+            return Status.UNKNOWN
 
         try:
             raw = r.json()
         except Exception as e:
             self.logger.warning(f'Failed to parse JSON for {self.username}: {e}')
-            return Status.RATELIMIT
+            return Status.UNKNOWN
 
-        # Normalize and store info
-        self.lastInfo = self.normalizeInfo(raw)
+        # Store raw response for methods that still need it (getPlaylistVariants etc.)
+        self.lastInfo = raw
 
-        # Check for geo-ban
-        if self.getIsGeoBanned():
-            return Status.RESTRICTED
+        # ---- Foolproof parsing via SCModelInfo ----
+        info = SCModelInfo.from_cam_response(raw, self.username, self.logger)
+        self._sc_info = info  # cache for other methods
 
-        # Check if model account has been deleted
-        if self.getIsDeleted():
-            self.logger.warning(f'⚠️ Model account {self.username} has been deleted - this model will be auto-deregistered')
-            return Status.DELETED
+        bot_status = info.to_bot_status()
 
-        # Get status and cam state
-        status = self.getStatusField()
-        is_cam_available = self._get_by_path(self.lastInfo, ["isCamAvailable"]) or \
-                          self._get_by_path(self.lastInfo, ["cam", "isCamAvailable"]) or False
-        is_cam_active = self._get_by_path(self.lastInfo, ["isCamActive"]) or \
-                       self._get_by_path(self.lastInfo, ["cam", "isCamActive"]) or False
-        
-        # Only return PUBLIC if status is public AND camera is available AND active
-        # This prevents downloading promotional videos when model is offline
-        if status == "public" and is_cam_available and is_cam_active:
-            return Status.PUBLIC
-        
-        if status in self._PRIVATE_STATUSES:
-            return Status.PRIVATE
-        
-        if status in self._OFFLINE_STATUSES:
-            return Status.OFFLINE
-        
-        # Unknown status - log the actual data for debugging
-        self.logger.warning(f"Unknown status '{status}' for {self.username} - lastInfo keys: {list(self.lastInfo.keys())}")
-        self.logger.debug(f"Full response for {self.username}: {str(self.lastInfo)[:500]}")
-        return Status.UNKNOWN
+        # Extra logging for edge cases
+        if bot_status == Status.DELETED:
+            self.logger.warning(f'⚠️ Model account {self.username} has been deleted — will be auto-deregistered')
+        elif bot_status == Status.UNKNOWN and info.status:
+            self.logger.warning(f"Unknown status '{info.status}' for {self.username}")
+        elif bot_status == Status.UNKNOWN:
+            self.logger.warning(f"No status field found for {self.username} — keys: {list(raw.keys())}")
+        elif bot_status == Status.OFFLINE and info.status == "public":
+            self.logger.debug(f"{self.username}: status='public' but isCamAvailable={info.is_cam_available}, isLive={info.is_live} — treating as offline")
+
+        return bot_status
 
     def isMobile(self):
         """Check if the current broadcast is from a mobile device."""
@@ -1138,7 +1244,8 @@ class StripChat(RoomIdBot):
         origin_retry_delay = 3  # seconds
         
         for retry in range(max_origin_retries):
-            origin_only = self._get_by_path(self.lastInfo, ["cam", "broadcastSettings", "originOnly"])
+            info = getattr(self, '_sc_info', None)
+            origin_only = info.origin_only if info else self._get_by_path(self.lastInfo, ["cam", "broadcastSettings", "originOnly"])
             if not origin_only:
                 break
             
@@ -1148,6 +1255,7 @@ class StripChat(RoomIdBot):
                 # Re-fetch status to check if originOnly changed
                 try:
                     self.getStatus()
+                    stream_name = self.getStreamName()
                 except Exception as e:
                     self.logger.warning(f"Failed to re-fetch status: {e}")
                     break
@@ -1195,10 +1303,20 @@ class StripChat(RoomIdBot):
             if result and result.status_code == 200:
                 break  # Got a valid playlist
             
-            # All hosts failed — if we have retries left, wait for CDN propagation
+            # All hosts failed — if we have retries left, re-fetch status
+            # (stream name / CDN info may have changed) then retry.
             if cdn_attempt < max_cdn_attempts - 1:
                 self.logger.info(f"Playlist not on any CDN yet, waiting {cdn_retry_delay}s for propagation... (attempt {cdn_attempt + 1}/{max_cdn_attempts})")
                 time.sleep(cdn_retry_delay)
+                # Re-grab status so stream_name / origin_only are fresh
+                try:
+                    self.getStatus()
+                    new_stream = self.getStreamName()
+                    if new_stream != stream_name:
+                        self.logger.info(f"Stream name changed: {stream_name} -> {new_stream}")
+                        stream_name = new_stream
+                except Exception as e:
+                    self.logger.warning(f"Failed to re-fetch status during CDN retry: {e}")
                 random.shuffle(cdn_hosts)  # Try different order next round
         
         if not result or result.status_code != 200:

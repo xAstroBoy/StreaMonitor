@@ -1,7 +1,68 @@
 import requests
+from dataclasses import dataclass
 from typing import Optional, Dict, List, Any, Union
+
 from streamonitor.bot import Bot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ── CamSoda expected keys & known statuses ──────────────────────────────
+_CS_EXPECTED_KEYS: dict = {
+    "": frozenset({"error", "chat", "mode", "stream",
+                   "user", "userBio", "userMediaList",
+                   "userMediaTopList", "tagListNew"}),
+    "chat": frozenset({"status"}),
+    "stream": frozenset({"status", "token", "stream_name", "edge_servers"}),
+}
+_CS_KNOWN_CHAT_STATUSES: frozenset = frozenset({"online", "offline"})
+_CS_KNOWN_MODES: frozenset = frozenset({"public", "private"})
+
+
+@dataclass(frozen=True, slots=True)
+class CSModelInfo:
+    """Typed reader for the CamSoda ``/api/v1/chat/react/`` response."""
+
+    error: str
+    chat_status: str
+    mode: str
+    stream_status: int  # 1 = live, -1 = missing
+
+    @classmethod
+    def from_response(cls, data: dict, username: str = "", logger=None) -> "CSModelInfo":
+        check_unknown_fields(data, _CS_EXPECTED_KEYS, "CS", username, logger)
+        chat = data.get("chat") or {}
+        stream = data.get("stream") or {}
+        if isinstance(chat, dict):
+            check_unknown_fields(chat, {"": _CS_EXPECTED_KEYS["chat"]}, "CS", username, logger)
+        if isinstance(stream, dict):
+            check_unknown_fields(stream, {"": _CS_EXPECTED_KEYS["stream"]}, "CS", username, logger)
+        raw_ss = stream.get("status")
+        try:
+            stream_status = int(raw_ss) if raw_ss is not None else -1
+        except (ValueError, TypeError):
+            stream_status = -1
+        return cls(
+            error=data.get("error", "") or "",
+            chat_status=(chat.get("status", "") or "").lower(),
+            mode=(data.get("mode", "") or "").lower(),
+            stream_status=stream_status,
+        )
+
+    def to_bot_status(self, username: str = "", logger=None) -> "Status":
+        if self.error == "No username found.":
+            return Status.NOTEXIST
+        if self.chat_status == "online" and self.mode == "public":
+            return Status.PUBLIC
+        if self.chat_status == "online" and self.mode == "private":
+            return Status.PRIVATE
+        if self.chat_status == "offline":
+            return Status.OFFLINE
+        if self.stream_status == 1:
+            return Status.PUBLIC
+        check_unknown_status(self.chat_status, _CS_KNOWN_CHAT_STATUSES, "CS", username, logger)
+        check_unknown_status(self.mode, _CS_KNOWN_MODES, "CS", username, logger)
+        return Status.UNKNOWN
 
 
 class CamSoda(Bot):
@@ -112,23 +173,8 @@ class CamSoda(Bot):
         if "__status__" in data:
             return data["__status__"]
 
-        if "error" in data and data["error"] == "No username found.":
-            return Status.NOTEXIST
-
-        chat_status = self.getChatStatus()
-        mode = self.getMode()
-        stream_status = self.getStreamStatus()
-
-        if chat_status == "online" and mode == "public":
-            return Status.PUBLIC
-        if chat_status == "online" and mode == "private":
-            return Status.PRIVATE
-        if chat_status == "offline":
-            return Status.OFFLINE
-        if stream_status == 1:
-            return Status.PUBLIC
-
-        return Status.UNKNOWN
+        info = CSModelInfo.from_response(data, self.username, self.logger)
+        return info.to_bot_status(self.username, self.logger)
 
     # ──────────────── Video URL ────────────────
     def getVideoUrl(self) -> Optional[str]:

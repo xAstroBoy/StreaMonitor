@@ -1,9 +1,52 @@
 import time
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union, Tuple
 
 import requests
 from streamonitor.bot import RoomIdBot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ── SexChatHU expected keys & known statuses ────────────────────────────
+_SCHU_EXPECTED_KEYS: dict = {
+    "": frozenset({"active", "onlineStatus", "onlineParams"}),
+}
+_SCHU_KNOWN_STATUSES: frozenset = frozenset({"free", "vip", "group", "priv", "offline"})
+
+
+@dataclass(frozen=True, slots=True)
+class SCHUModelInfo:
+    """Typed reader for the SexChatHU ``getRoom`` response."""
+
+    active: bool
+    online_status: str
+    has_hls: bool  # onlineParams.modeSpecific.main.hls exists
+
+    @classmethod
+    def from_response(cls, data: dict, username: str = "", logger=None) -> "SCHUModelInfo":
+        check_unknown_fields(data, _SCHU_EXPECTED_KEYS, "SCHU", username, logger)
+        online_params = data.get("onlineParams") or {}
+        mode_specific = online_params.get("modeSpecific") or {}
+        main = mode_specific.get("main") or {}
+        return cls(
+            active=bool(data.get("active")),
+            online_status=(data.get("onlineStatus", "") or "").lower(),
+            has_hls="hls" in main,
+        )
+
+    def to_bot_status(self, username: str = "", logger=None) -> "Status":
+        if not self.active:
+            return Status.NOTEXIST
+        s = self.online_status
+        if s == "free":
+            return Status.PUBLIC if self.has_hls else Status.PRIVATE
+        if s in ("vip", "group", "priv"):
+            return Status.PRIVATE
+        if s == "offline":
+            return Status.OFFLINE
+        check_unknown_status(s, _SCHU_KNOWN_STATUSES, "SCHU", username, logger)
+        return Status.UNKNOWN
 
 
 # Site of Hungarian group AdultPerformerNetwork
@@ -110,7 +153,7 @@ class SexChatHU(RoomIdBot):
         """Check the current status of the stream."""
         if not hasattr(self, 'room_id') or not self.room_id:
             return Status.NOTEXIST
-            
+
         try:
             response = self.session.get(
                 f'https://chat.a.apn2.com/chat-api/index.php/room/getRoom?tokenID=guest&roomID={self.room_id}',
@@ -118,7 +161,7 @@ class SexChatHU(RoomIdBot):
                 timeout=30,
                 bucket='status'
             )
-            
+
             if response.status_code != 200:
                 if response.status_code == 404:
                     return Status.NOTEXIST
@@ -126,29 +169,9 @@ class SexChatHU(RoomIdBot):
                 return Status.UNKNOWN
 
             self.lastInfo = response.json()
+            info = SCHUModelInfo.from_response(self.lastInfo, self.username, self.logger)
+            return info.to_bot_status(self.username, self.logger)
 
-            if not self.lastInfo.get("active"):
-                return Status.NOTEXIST
-                
-            online_status = self.lastInfo.get("onlineStatus", "").lower()
-            
-            if online_status == "free":
-                # Check if HLS stream is available
-                online_params = self.lastInfo.get('onlineParams', {})
-                mode_specific = online_params.get('modeSpecific', {})
-                main = mode_specific.get('main', {})
-                
-                if 'hls' in main:
-                    return Status.PUBLIC
-                else:
-                    return Status.PRIVATE
-            elif online_status in ['vip', 'group', 'priv']:
-                return Status.PRIVATE
-            elif online_status == "offline":
-                return Status.OFFLINE
-            else:
-                return Status.UNKNOWN
-                
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error checking status: {e}")
             return Status.ERROR
@@ -214,7 +237,8 @@ class SexChatHU(RoomIdBot):
                 if streamer.sc not in (Status.PUBLIC, Status.PRIVATE, Status.RESTRICTED):
                     streamer.setStatus(Status.OFFLINE)
                 continue
-            online_status = babe.get('onlineStatus', '').lower()
+            bulk_info = SCHUModelInfo.from_response(babe, streamer.username, streamer.logger)
+            online_status = bulk_info.online_status
             if online_status == 'free':
                 if streamer.sc in (Status.PUBLIC, Status.RESTRICTED):
                     continue

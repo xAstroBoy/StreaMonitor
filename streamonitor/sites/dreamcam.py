@@ -1,8 +1,42 @@
 import requests
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
 
 from streamonitor.bot import Bot
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ── DreamCam expected keys & known statuses ─────────────────────────────
+_DC_EXPECTED_KEYS: dict = {
+    "": frozenset({"broadcastStatus", "streams"}),
+}
+_DC_KNOWN_STATUSES: frozenset = frozenset({"public", "private", "away", "offline"})
+
+
+@dataclass(frozen=True, slots=True)
+class DCModelInfo:
+    """Typed reader for the DreamCam broadcasts API response."""
+
+    broadcast_status: str
+
+    @classmethod
+    def from_response(cls, data: dict, username: str = "", logger=None) -> "DCModelInfo":
+        check_unknown_fields(data, _DC_EXPECTED_KEYS, "DC", username, logger)
+        return cls(
+            broadcast_status=(data.get("broadcastStatus", "") or "").lower(),
+        )
+
+    def to_bot_status(self, username: str = "", logger=None) -> "Status":
+        s = self.broadcast_status
+        if s == "public":
+            return Status.PUBLIC
+        if s == "private":
+            return Status.PRIVATE
+        if s in ("away", "offline"):
+            return Status.OFFLINE
+        check_unknown_status(s, _DC_KNOWN_STATUSES, "DC", username, logger)
+        return Status.UNKNOWN
 
 
 class DreamCam(Bot):
@@ -46,7 +80,7 @@ class DreamCam(Bot):
                 timeout=30,
                 bucket='status'
             )
-            
+
             if response.status_code != 200:
                 if response.status_code == 404:
                     return Status.NOTEXIST
@@ -54,19 +88,9 @@ class DreamCam(Bot):
                 return Status.UNKNOWN
 
             self.lastInfo = response.json()
-            
-            broadcast_status = self.lastInfo.get("broadcastStatus", "").lower()
+            info = DCModelInfo.from_response(self.lastInfo, self.username, self.logger)
+            return info.to_bot_status(self.username, self.logger)
 
-            if broadcast_status == "public":
-                return Status.PUBLIC
-            elif broadcast_status == "private":
-                return Status.PRIVATE
-            elif broadcast_status in ["away", "offline"]:
-                return Status.OFFLINE
-            else:
-                self.logger.warning(f'Got unknown status: {broadcast_status}')
-                return Status.UNKNOWN
-                
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error checking status: {e}")
             return Status.ERROR

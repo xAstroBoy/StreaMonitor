@@ -1,5 +1,6 @@
 import base64
 import json
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple, List
 
 import requests
@@ -7,6 +8,38 @@ from requests.cookies import RequestsCookieJar
 from streamonitor.bot import Bot
 from streamonitor.downloaders.hls import getVideoNativeHLS
 from streamonitor.enums import Status
+from streamonitor.model_info_base import check_unknown_fields, check_unknown_status
+
+
+# ── ManyVids expected keys & known statuses ────────────────────────────
+_MV_ROOMPOOL_KEYS: dict = {
+    "": frozenset({"roomLocationReason", "publicAPIURL", "floorId"}),
+}
+_MV_STREAM_KEYS: dict = {"": frozenset({"withCredentials"})}
+_MV_KNOWN_ROOM_REASONS: frozenset = frozenset({"ROOM_VALIDATION_FAILED", "ROOM_OK"})
+
+
+@dataclass(frozen=True, slots=True)
+class MVModelInfo:
+    """Typed reader for the ManyVids roompool response."""
+
+    room_location_reason: str
+
+    @classmethod
+    def from_response(cls, data: dict, username: str = "", logger=None) -> "MVModelInfo":
+        check_unknown_fields(data, _MV_ROOMPOOL_KEYS, "MV", username, logger)
+        return cls(
+            room_location_reason=data.get("roomLocationReason", "") or "",
+        )
+
+    def to_bot_status(self, username: str = "", logger=None) -> "Status":
+        r = self.room_location_reason
+        if r == "ROOM_VALIDATION_FAILED":
+            return Status.NOTEXIST
+        if r == "ROOM_OK":
+            return Status.PUBLIC  # caller verifies stream separately
+        check_unknown_status(r, _MV_KNOWN_ROOM_REASONS, "MV", username, logger)
+        return Status.UNKNOWN
 
 
 class ManyVids(Bot):
@@ -110,7 +143,7 @@ class ManyVids(Bot):
                 timeout=30,
                 bucket='status'
             )
-            
+
             if response.status_code != 200:
                 if response.status_code == 404:
                     return Status.NOTEXIST
@@ -118,26 +151,26 @@ class ManyVids(Bot):
                 return Status.UNKNOWN
 
             self.lastInfo = response.json()
-            
-            room_reason = self.lastInfo.get('roomLocationReason', '')
+            info = MVModelInfo.from_response(self.lastInfo, self.username, self.logger)
 
-            if room_reason == "ROOM_VALIDATION_FAILED":
+            if info.room_location_reason == "ROOM_VALIDATION_FAILED":
                 return Status.NOTEXIST
-            elif room_reason == "ROOM_OK":
+            elif info.room_location_reason == "ROOM_OK":
                 try:
                     stream_response = self.requestStreamInfo()
                     stream_data = stream_response.json()
-                    
+                    check_unknown_fields(stream_data, _MV_STREAM_KEYS, "MV", self.username, self.logger)
+
                     if 'withCredentials' not in stream_data:
                         return Status.OFFLINE
                     return Status.PUBLIC
-                    
+
                 except Exception as e:
                     self.logger.error(f"Error checking stream info: {e}")
                     return Status.ERROR
 
-            return Status.UNKNOWN
-            
+            return info.to_bot_status(self.username, self.logger)
+
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error checking status: {e}")
             return Status.ERROR
