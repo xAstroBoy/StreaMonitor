@@ -489,8 +489,24 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
         "-analyzeduration", "10000000",  # 10 seconds
     ]
 
-    # Network options for remote URLs
-    if not local_m3u and str(url_or_path).startswith(("http://", "https://")):
+    if local_m3u:
+        # Local M3U8 file with remote HTTP segments.
+        # CRITICAL: Do NOT pass HTTP protocol options (-headers, -reconnect*,
+        # -rw_timeout, -timeout) here — they are AVOptions for the HTTP protocol.
+        # When the input is a local file, FFmpeg matches them against the 'file'
+        # protocol which doesn't support them, causing "Option not found" and an
+        # immediate abort.  Segment authentication uses URL query params
+        # (pkey/pdkey), so HTTP headers aren't needed for segment fetches.
+        # Only pass HLS demuxer-level options that FFmpeg recognises on the
+        # format context regardless of input protocol.
+        cmd.extend([
+            "-live_start_index", "-3",
+            "-max_reload", "180",
+            "-seg_max_retry", "180",
+            "-m3u8_hold_counters", "180",
+        ])
+    elif str(url_or_path).startswith(("http://", "https://")):
+        # Remote HTTP input — pass full HTTP protocol + HLS demuxer options.
         cmd.extend([
             "-headers", hdr_blob,
             "-rw_timeout", "5000000",
@@ -501,7 +517,7 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
             "-reconnect_on_http_error", "4xx,5xx",
             "-reconnect_at_eof", "1",
             "-reconnect_delay_max", "10",
-            "-live_start_index", "-3",  # Start from last 3 segments
+            "-live_start_index", "-3",
             "-max_reload", "180",
             "-seg_max_retry", "180",
             "-m3u8_hold_counters", "180",
@@ -558,7 +574,31 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
 
     # Monitor stderr with basic stall detection
     last_output = time.monotonic()
+    start_time = last_output
     last_size = 0
+    stderr_tail = []  # Keep last N lines for error reporting
+    # Patterns for FFmpeg output classification
+    PROGRESS_PATTERN = re.compile(r'frame=\s*\d+.*fps=.*time=.*bitrate=.*speed=')
+    HTTP_404_PATTERN = re.compile(r'HTTP error 404')
+    HTTP_4XX_5XX_PATTERN = re.compile(r'HTTP error [45]\d\d')
+    ERROR_PATTERNS = [
+        re.compile(r'\[error\]|ERROR:|FATAL:'),  # Actual FFmpeg errors
+        re.compile(r'Connection refused|Connection timed out'),  # Network errors
+        re.compile(r'No such file|Permission denied'),  # File system errors
+        re.compile(r'Invalid data found|Invalid NAL unit'),  # Stream corruption
+    ]
+    WARNING_PATTERNS = [
+        re.compile(r'\[warning\]|WARNING:|deprecated'),  # FFmpeg warnings
+        re.compile(r'DTS \d+ < \d+ out of order'),  # Common HLS timing issues
+        re.compile(r'Non-monotonous DTS'),  # Timing issues
+    ]
+    
+    MAX_STDERR_TAIL = 15
+    # Track consecutive HTTP 404s — when the stream ends, FFmpeg floods these.
+    # After a threshold we terminate FFmpeg instead of letting it spam for minutes.
+    consecutive_404s = 0
+    MAX_CONSECUTIVE_404S = 5  # Kill FFmpeg after this many rapid 404s
+    terminated_for_404 = False
     
     try:
         for line in proc.stderr:
@@ -566,13 +606,50 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
             if not line:
                 continue
             
-            if DEBUG:
-                self.logger.debug(f"[ffmpeg] {line}")
+            # Keep tail buffer for error diagnostics
+            stderr_tail.append(line)
+            if len(stderr_tail) > MAX_STDERR_TAIL:
+                stderr_tail.pop(0)
             
-            # Check for critical errors
-            if "invalid" in line.lower() or "error" in line.lower():
-                if "No such" in line or "failed" in line:
-                    self.logger.error(f"FFmpeg error: {line}")
+            # Classify FFmpeg output intelligently
+            if PROGRESS_PATTERN.match(line):
+                # This is normal progress output - log at verbose level only
+                if DEBUG:
+                    self.logger.debug(f"[ffmpeg] {line}")
+                consecutive_404s = 0  # Reset on progress
+            elif HTTP_404_PATTERN.search(line):
+                # HTTP 404 — stream segments gone (model went offline/private).
+                # Log the first one, suppress the flood, and kill FFmpeg quickly.
+                consecutive_404s += 1
+                if consecutive_404s == 1:
+                    self.logger.warning(f"FFmpeg: segment 404 — stream likely ended")
+                elif consecutive_404s >= MAX_CONSECUTIVE_404S:
+                    self.logger.info(f"FFmpeg: {consecutive_404s} consecutive 404s — terminating (stream ended)")
+                    terminated_for_404 = True
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    break
+                # else: suppress — don't log the 2nd, 3rd, 4th duplicate
+            elif HTTP_4XX_5XX_PATTERN.search(line):
+                # Other HTTP errors (403, 5xx, etc.) — still log but reset 404 counter
+                consecutive_404s = 0
+                self.logger.error(f"FFmpeg: {line}")
+            else:
+                consecutive_404s = 0  # Reset on any non-404 output
+                # Check for actual errors
+                is_error = any(pattern.search(line) for pattern in ERROR_PATTERNS)
+                is_warning = any(pattern.search(line) for pattern in WARNING_PATTERNS)
+                
+                if is_error:
+                    self.logger.error(f"FFmpeg: {line}")
+                elif is_warning:
+                    self.logger.warning(f"FFmpeg: {line}")
+                else:
+                    # Other FFmpeg output (startup messages, info, etc.)
+                    if DEBUG:
+                        self.logger.debug(f"[ffmpeg] {line}")
             
             last_output = time.monotonic()
             
@@ -592,11 +669,27 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
 
     rc = proc.wait()
     proc_ref["p"] = None
+    elapsed = time.monotonic() - start_time
     
     try:
         proc.stderr.close()
     except Exception:
         pass
+
+    # Log diagnostics on failure (especially quick failures)
+    if terminated_for_404:
+        # Intentional termination — stream ended, no need for noisy warnings
+        pass
+    elif rc != 0:
+        self.logger.warning(f"FFmpeg exited with code {rc} after {elapsed:.1f}s")
+        if stderr_tail:
+            for line in stderr_tail[-5:]:
+                self.logger.warning(f"  [ffmpeg] {line}")
+    elif elapsed < 3.0 and not os.path.exists(out_path):
+        self.logger.warning(f"FFmpeg exited in {elapsed:.1f}s with no output")
+        if stderr_tail:
+            for line in stderr_tail[-5:]:
+                self.logger.warning(f"  [ffmpeg] {line}")
 
     # Validate output
     try:

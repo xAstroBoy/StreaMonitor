@@ -148,19 +148,9 @@ class StripChat(RoomIdBot):
             # The API structure has changed - use featureSettings instead of features
             if "featureSettings" in static_data:
                 feature_settings = static_data["featureSettings"]
-                mmp_origin = feature_settings["MMPExternalSourceOrigin"]
-            elif "features" in static_data:
-                # Fallback to old API structure
-                feature_settings = static_data["features"]
-                mmp_origin = feature_settings["MMPExternalSourceOrigin"]
+                mmp_origin = "https://mmp.doppiocdn.com/player/mmp"
             else:
                 raise Exception(f"'featureSettings' not found. Available keys: {list(static_data.keys())}")
-
-            if "featuresV2" not in static_data:
-                raise Exception(f"'featuresV2' not found. Available keys: {list(static_data.keys())}")
-
-            if "playerModuleExternalLoading" not in static_data["featuresV2"]:
-                raise Exception("'playerModuleExternalLoading' not found in featuresV2")
 
             mmp_version = static_data["featuresV2"]["playerModuleExternalLoading"]["mmpVersion"]
 
@@ -1054,7 +1044,17 @@ class StripChat(RoomIdBot):
     def getStatus(self):
         """Check the current status of the model's stream."""
         url = f'https://stripchat.com/api/front/v2/models/username/{self.username}/cam?uniq={StripChat.uniq()}'
-        r = self.session.get(url, headers=self.headers, bucket='api')
+
+        try:
+            r = self.session.get(url, headers=self.headers, bucket='api')
+        except Exception as e:
+            # Network errors (timeout, connection reset, HTTP/2 stream errors, SSL errors)
+            # should NEVER bubble up as unhandled exceptions — return RATELIMIT so the
+            # bot backs off gracefully instead of counting hard ERROR strikes.
+            err_type = type(e).__name__
+            err_msg = str(e) or "(no details)"
+            self.logger.warning(f'Network error ({err_type}) fetching status for {self.username}: {err_msg}')
+            return Status.RATELIMIT
 
         ct = (r.headers.get("content-type") or "").lower()
         body = r.text or ""
@@ -1068,25 +1068,25 @@ class StripChat(RoomIdBot):
                 return Status.CLOUDFLARE
             return Status.RESTRICTED
         if r.status_code == 429:
-            self.logger.error(f'Rate limited (429) for {self.username}')
+            self.logger.warning(f'Rate limited (429) for {self.username}')
             return Status.RATELIMIT
         if r.status_code >= 500:
             if looks_like_cf_html(body):
                 self.logger.error(f'Cloudflare challenge ({r.status_code}) for {self.username}')
                 return Status.CLOUDFLARE
-            self.logger.error(f'Server error {r.status_code} for {self.username}')
-            return Status.UNKNOWN
+            self.logger.warning(f'Server error {r.status_code} for {self.username}')
+            return Status.RATELIMIT
 
         # Validate JSON response
         if "application/json" not in ct or not body.strip():
             self.logger.warning(f'Non-JSON response for {self.username}')
-            return Status.UNKNOWN
+            return Status.RATELIMIT
 
         try:
             raw = r.json()
         except Exception as e:
-            self.logger.error(f'Failed to parse JSON for {self.username}: {e}')
-            return Status.UNKNOWN
+            self.logger.warning(f'Failed to parse JSON for {self.username}: {e}')
+            return Status.RATELIMIT
 
         # Normalize and store info
         self.lastInfo = self.normalizeInfo(raw)
@@ -1162,28 +1162,44 @@ class StripChat(RoomIdBot):
         vr_suffix = '_vr' if self.vr else ''
         auto_suffix = '_auto' if not self.vr else ''
         
-        result = None
-        playlist_url = None
+        # Retry the full CDN sweep a few times — when a model just goes live,
+        # edge CDN propagation can lag a few seconds behind the API status change.
+        max_cdn_attempts = 3
+        cdn_retry_delay = 3  # seconds between full sweeps
         
-        for host in cdn_hosts:
-            playlist_url = f"https://edge-hls.{host}/hls/{stream_name}{vr_suffix}/master/{stream_name}{vr_suffix}{auto_suffix}.m3u8"
-            self.debug(f"Fetching playlist from: {playlist_url}")
+        for cdn_attempt in range(max_cdn_attempts):
+            result = None
+            playlist_url = None
             
-            try:
-                result = s.get(playlist_url, headers=self.headers, cookies=self.cookies, timeout=10)
-                self.debug(f"Playlist response from {host}: {result.status_code}")
+            for host in cdn_hosts:
+                playlist_url = f"https://edge-hls.{host}/hls/{stream_name}{vr_suffix}/master/{stream_name}{vr_suffix}{auto_suffix}.m3u8"
+                self.debug(f"Fetching playlist from: {playlist_url}")
                 
-                if result.status_code == 200:
-                    break
-                elif result.status_code == 404:
-                    self.logger.warning(f"Playlist not found on {host}, trying next CDN...")
+                try:
+                    result = s.get(playlist_url, headers=self.headers, cookies=self.cookies, timeout=10)
+                    self.debug(f"Playlist response from {host}: {result.status_code}")
+                    
+                    if result.status_code == 200:
+                        break
+                    elif result.status_code == 404:
+                        if cdn_attempt == 0:
+                            self.logger.debug(f"Playlist not found on {host}, trying next CDN...")
+                        result = None
+                    else:
+                        self.logger.warning(f"Unexpected status {result.status_code} from {host}")
+                        result = None
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch from {host}: {e}")
                     result = None
-                else:
-                    self.logger.warning(f"Unexpected status {result.status_code} from {host}")
-                    result = None
-            except Exception as e:
-                self.logger.warning(f"Failed to fetch from {host}: {e}")
-                result = None
+            
+            if result and result.status_code == 200:
+                break  # Got a valid playlist
+            
+            # All hosts failed — if we have retries left, wait for CDN propagation
+            if cdn_attempt < max_cdn_attempts - 1:
+                self.logger.info(f"Playlist not on any CDN yet, waiting {cdn_retry_delay}s for propagation... (attempt {cdn_attempt + 1}/{max_cdn_attempts})")
+                time.sleep(cdn_retry_delay)
+                random.shuffle(cdn_hosts)  # Try different order next round
         
         if not result or result.status_code != 200:
             self.logger.error(f"Failed to fetch playlist from any CDN host")
@@ -1197,7 +1213,7 @@ class StripChat(RoomIdBot):
         
         if not pkey:
             self.logger.error("No mouflon pkey available - keys not extracted at startup?")
-            self.debug(f"Class state: _mouflon_pkey={StripChat._mouflon_pkey}, _mouflon_pdkey={StripChat._mouflon_pdkey}")
+            self.debug(f"Class state: _mouflon_keys={list(StripChat._mouflon_keys.keys())}")
             return []
         
         variants = super().getPlaylistVariants(m3u_data=m3u8_doc)
