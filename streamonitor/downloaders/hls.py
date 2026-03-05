@@ -4,7 +4,7 @@
 import os
 import re
 import shutil
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 import m3u8
 import subprocess
 import time
@@ -357,6 +357,51 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
     """
     Robust HLS capture that writes to .tmp.ts for post-processing.
     NO RENAME - file stays as .tmp.ts for external post-processing.
+    Implements restart logic for playlist updates (404s while stream is still PUBLIC).
+    """
+    self.stopDownloadFlag = False
+    restart_attempts = 0
+    max_restart_attempts = 3
+    
+    # CRITICAL: Always write to .tmp.ts - NO RENAME, leave for post-processing
+    base_name = os.path.splitext(filename)[0]
+    output_path = base_name + '.tmp.ts'
+    out_dir = os.path.dirname(output_path)
+    os.makedirs(out_dir, exist_ok=True)
+    
+    while restart_attempts <= max_restart_attempts:
+        if restart_attempts > 0:
+            self.logger.info(f"Restarting download (attempt {restart_attempts + 1}/{max_restart_attempts + 1})")
+            
+            # Get fresh URL for restart
+            try:
+                fresh_url = self.getVideoUrl()
+                if fresh_url and fresh_url != url:
+                    url = fresh_url
+                    self.logger.debug(f"Using fresh URL: {url[:100]}...")
+            except Exception as e:
+                self.logger.warning(f"Failed to get fresh URL for restart: {e}")
+        
+        result = _getVideoNativeHLS_single_attempt(self, url, output_path, m3u_processor)
+        
+        if result == "RESTART":
+            restart_attempts += 1
+            if restart_attempts <= max_restart_attempts:
+                time.sleep(1)  # Brief pause before restart
+                continue
+            else:
+                self.logger.warning(f"Max restart attempts ({max_restart_attempts}) exceeded")
+                return False
+        else:
+            # Success or permanent failure
+            return result
+    
+    return False
+
+
+def _getVideoNativeHLS_single_attempt(self: Bot, url: str, output_path: str, m3u_processor: Optional[Callable[[str], str]] = None) -> Union[bool, str]:
+    """
+    Single HLS capture attempt. Returns True/False for success/failure, or "RESTART" to indicate restart needed.
     """
     self.stopDownloadFlag = False
     writer_ref = {"w": None}
@@ -377,9 +422,7 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
 
     self.stopDownload = _stop_both
 
-    # CRITICAL: Always write to .tmp.ts - NO RENAME, leave for post-processing
-    base_name = os.path.splitext(filename)[0]
-    output_path = base_name + '.tmp.ts'
+    # output_path already contains the full path - use it directly
     out_dir = os.path.dirname(output_path)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -421,7 +464,7 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
             sess.close()
         except Exception:
             pass
-        return bool(ok)
+        return ok if ok == "RESTART" else bool(ok)
 
     if callable(m3u_processor):
         text0 = m3u_processor(text0)
@@ -445,7 +488,7 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
             sess.close()
         except Exception:
             pass
-        return bool(ok)
+        return ok if ok == "RESTART" else bool(ok)
 
     if callable(m3u_processor):
         text1 = m3u_processor(text1)
@@ -486,7 +529,12 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
     except Exception:
         pass
 
-    # Validate output (.tmp.ts file - no rename)
+    # Propagate RESTART before output validation — FFmpeg was intentionally
+    # terminated so there may be no output file yet and that's expected.
+    if ok == "RESTART":
+        return "RESTART"
+
+    # Validate output
     try:
         if not os.path.exists(output_path):
             self.logger.error("Output file does not exist")
@@ -509,7 +557,7 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
         return False
 
 
-def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out_path: str, proc_ref: Dict[str, Optional[subprocess.Popen]], local_m3u=False) -> bool:
+def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out_path: str, proc_ref: Dict[str, Optional[subprocess.Popen]], local_m3u=False) -> Union[bool, str]:
     """
     Fixed FFmpeg runner with proper flags and stall detection.
     """
@@ -639,11 +687,10 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
     ]
     
     MAX_STDERR_TAIL = 15
-    # Track consecutive HTTP 404s — when the stream ends, FFmpeg floods these.
-    # After a threshold we terminate FFmpeg instead of letting it spam for minutes.
-    consecutive_404s = 0
-    MAX_CONSECUTIVE_404S = 5  # Kill FFmpeg after this many rapid 404s
+    # Track HTTP 404s — on first 404, check status and restart if still PUBLIC
+    got_404 = False
     terminated_for_404 = False
+    restart_for_playlist_update = False
     
     try:
         for line in proc.stderr:
@@ -661,46 +708,37 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
                 # This is normal progress output - log at verbose level only
                 if DEBUG:
                     self.logger.debug(f"[ffmpeg] {line}")
-                consecutive_404s = 0  # Reset on progress
             elif HTTP_404_PATTERN.search(line):
-                # HTTP 404 — stream segments gone (model went offline/private).
-                # On the first 404 verify with a quick status check.
-                consecutive_404s += 1
-                if consecutive_404s == 1:
-                    # Quick status probe — don't let it blow up the download loop
+                # HTTP 404 — rolling playlist has changed, need to restart with fresh URL
+                if not got_404:
+                    got_404 = True
+                    # Check if stream is still live
                     try:
                         live_status = self.getStatus()
                     except Exception:
                         live_status = None
+                    
                     if live_status == Status.PUBLIC:
-                        self.logger.info("FFmpeg: segment 404 — but stream is still PUBLIC, CDN hiccup")
-                        consecutive_404s = 0  # Reset — stream is fine
+                        self.logger.info("FFmpeg: segment 404 — playlist changed, restarting with fresh URL")
+                        restart_for_playlist_update = True
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        break
                     else:
-                        self.logger.warning(f"FFmpeg: segment 404 — stream ended (status={live_status})")
-                elif consecutive_404s >= MAX_CONSECUTIVE_404S:
-                    # About to kill FFmpeg — confirm the stream is really gone
-                    try:
-                        live_status = self.getStatus()
-                    except Exception:
-                        live_status = None
-                    if live_status == Status.PUBLIC:
-                        self.logger.info(f"FFmpeg: {consecutive_404s} consecutive 404s but stream is still PUBLIC — resetting")
-                        consecutive_404s = 0
-                    else:
-                        self.logger.info(f"FFmpeg: {consecutive_404s} consecutive 404s — terminating (status={live_status})")
+                        self.logger.info(f"FFmpeg: segment 404 — stream ended (status={live_status})")
                         terminated_for_404 = True
                         try:
                             proc.terminate()
                         except Exception:
                             pass
                         break
-                # else: suppress — don't log the 2nd, 3rd, 4th duplicate
+                # Suppress subsequent 404s after the first one
             elif HTTP_4XX_5XX_PATTERN.search(line):
-                # Other HTTP errors (403, 5xx, etc.) — still log but reset 404 counter
-                consecutive_404s = 0
+                # Other HTTP errors (403, 5xx, etc.) — log them
                 self.logger.error(f"FFmpeg: {line}")
             else:
-                consecutive_404s = 0  # Reset on any non-404 output
                 # Check for actual errors
                 is_error = any(pattern.search(line) for pattern in ERROR_PATTERNS)
                 is_warning = any(pattern.search(line) for pattern in WARNING_PATTERNS)
@@ -740,7 +778,11 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
         pass
 
     # Log diagnostics on failure (especially quick failures)
-    if terminated_for_404:
+    if restart_for_playlist_update:
+        # Intentional restart for fresh playlist — this is normal, not an error
+        self.logger.debug(f"FFmpeg restarted for playlist update after {elapsed:.1f}s")
+        return "RESTART"  # Special return value to indicate restart needed
+    elif terminated_for_404:
         # Intentional termination — stream ended, no need for noisy warnings
         pass
     elif rc != 0:

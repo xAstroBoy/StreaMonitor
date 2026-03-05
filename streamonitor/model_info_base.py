@@ -17,6 +17,7 @@ once per process lifetime, preventing log spam.
 
 import logging
 from typing import Dict, FrozenSet, List, Optional, Set
+import parameters
 
 _logger = logging.getLogger("modelinfo")
 
@@ -75,14 +76,16 @@ def check_unknown_fields(
                 dedup_key = f"{site}:{full_path}"
                 if dedup_key not in _reported_keys:
                     _reported_keys.add(dedup_key)
-                    val = obj[key]
-                    vtype = type(val).__name__
-                    vpreview = repr(val)
-                    if len(vpreview) > 120:
-                        vpreview = vpreview[:117] + "..."
-                    log.info(
-                        f"[{site}] New API field '{full_path}' ({vtype}): {vpreview} — model={username}"
-                    )
+                    # Only log new API fields in DEBUG mode to prevent spam
+                    if parameters.DEBUG:
+                        val = obj[key]
+                        vtype = type(val).__name__
+                        vpreview = repr(val)
+                        if len(vpreview) > 120:
+                            vpreview = vpreview[:117] + "..."
+                        _logger.debug(
+                            f"[{site}] New API field '{full_path}' ({vtype}): {vpreview} — model={username}"
+                        )
 
             # Recurse into sub-dicts that we have expectations for
             child = f"{prefix}.{key}" if prefix else key
