@@ -851,8 +851,11 @@ namespace sm
         state.videoDecCtx->time_base = inStream->time_base;
         state.videoDecCtx->framerate = av_guess_frame_rate(state.inputCtx, inStream, nullptr);
 
-        // Use multiple threads for decoding
-        state.videoDecCtx->thread_count = 0; // auto
+        // Limit decode threads per instance.  With N concurrent recorders,
+        // auto (0) would spawn ~32 threads EACH on a 16-core CPU, totalling
+        // hundreds of threads that fight for cores.  2 is plenty for live
+        // stream decoding (real-time 30fps HEVC at 1080p).
+        state.videoDecCtx->thread_count = 2;
         state.videoDecCtx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
         ret = avcodec_open2(state.videoDecCtx, decoder, nullptr);
@@ -986,8 +989,13 @@ namespace sm
             }
         }
 
-        // Threading
-        state.videoEncCtx->thread_count = encCfg.threads > 0 ? encCfg.threads : 0;
+        // Threading — limit per-instance threads to prevent CPU starvation
+        // when running many concurrent recorders.  Auto (0) would spawn ~32
+        // threads per encoder on a 16-core system; with 7 recorders that's
+        // 224 x265 threads all competing for cores.
+        // 4 threads per encoder is a good balance for live-stream encoding.
+        int encThreads = encCfg.threads > 0 ? encCfg.threads : 4;
+        state.videoEncCtx->thread_count = encThreads;
 
         // GOP / keyframe interval (every 2 seconds)
         if (state.videoEncCtx->framerate.num > 0)
