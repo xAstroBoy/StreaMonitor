@@ -26,7 +26,7 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: '01f602195983451bc83e72f4214af2cbc495aa94'  # 2024.05.24
+          vcpkgGitCommitId: 'e0edebd1dc2d03cf7d02349df91de74ef4d0c00e'  # 2026.02.27
 
       - name: Configure
         run: |
@@ -54,7 +54,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: StreaMonitor-Windows-x64-zip
-          path: '*.zip'
+          path: 'StreaMonitor-Windows*.zip'
 
   # ═══════════════════════════════════════════
   # Linux — system libraries + GCC
@@ -103,7 +103,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: StreaMonitor-Linux-x64-tar
-          path: '*.tar.gz'
+          path: 'StreaMonitor-Linux*.tar.gz'
 
   # ═══════════════════════════════════════════
   # Create GitHub Release on tag push

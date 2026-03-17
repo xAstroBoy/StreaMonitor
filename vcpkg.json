@@ -1,6 +1,7 @@
 {
     "name": "streamonitor",
     "version-string": "2.0.0",
+    "builtin-baseline": "e0edebd1dc2d03cf7d02349df91de74ef4d0c00e",
     "description": "Stream monitoring and recording application with native FFmpeg, ImGui GUI",
     "dependencies": [
         {
