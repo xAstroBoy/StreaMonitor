@@ -1046,36 +1046,17 @@ namespace sm
         HLSRecorder recorder(config);
         recorder.setLogger(logger_);
 
-        // Only capture preview frame when GUI is running and site has preview support
-        std::string previewJpegPath;
-        if (config.enablePreviewCapture && !getPreviewUrl().empty())
+        recorder.setProgressCallback([this](const RecordingProgress &prog)
         {
-            auto previewDir = fs::path(".cache") / "previews" / (username_ + " [" + siteSlug_ + "]");
-            fs::create_directories(previewDir);
-            previewJpegPath = (previewDir / "preview.jpg").string();
-            recorder.setPreviewPath(previewJpegPath);
-        }
-
-        recorder.setProgressCallback([this, previewJpegPath](const RecordingProgress &prog)
-                                     {
-            StateChangeCallback cb;
-            BotState snapshot;
-            {
-                std::lock_guard lock(stateMutex_);
-                state_.recordingStats.bytesWritten = prog.bytesWritten;
-                state_.recordingStats.currentSpeed = prog.speed;
-                // Keep preview pointing to captured stream frame while recording
-                if (!previewJpegPath.empty())
-                {
-                    std::error_code ec;
-                    if (fs::exists(previewJpegPath, ec))
-                        state_.previewUrl = previewJpegPath;
-                }
-                cb = stateCallback_;
-                snapshot = state_;
-            }
-            if (cb)
-                cb(snapshot); });
+            // Update stats silently — do NOT fire stateCallback here.
+            // The GUI refreshes bot states every 2s, which is fast enough
+            // to show updated size/speed. Firing stateCallback on every
+            // progress update (every 100 packets) would call
+            // glfwPostEmptyEvent, keeping the GUI pinned at 30fps.
+            std::lock_guard lock(stateMutex_);
+            state_.recordingStats.bytesWritten = prog.bytesWritten;
+            state_.recordingStats.currentSpeed = prog.speed;
+        });
 
         // Set pause/resume callback — when the stream ends (model goes
         // private/offline), keep the output file open and poll for the

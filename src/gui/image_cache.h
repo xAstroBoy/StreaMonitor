@@ -94,6 +94,9 @@ namespace sm
         // Textures queued for deletion — must be freed on GL thread
         std::mutex deleteMutex_;
         std::vector<GLuint> pendingDeletes_;
+
+        // Concurrency limiter for download threads
+        std::atomic<int> activeDownloads_{0};
     };
 
 } // namespace sm

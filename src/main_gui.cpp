@@ -106,8 +106,7 @@ int guiMain(int argc, char **argv)
         spdlog::info("Loaded app settings from {}", appConfigPath.string());
     }
 
-    // Enable live preview capture for GUI thumbnails
-    config.enablePreviewCapture = true;
+    // Preview is on-demand only (CDN URL loaded when user opens bot detail panel)
 
     sm::ModelConfigStore configStore;
     std::filesystem::path configPath = "config.json";

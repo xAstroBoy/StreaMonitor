@@ -59,7 +59,7 @@ namespace sm
                 if (isLocal)
                 {
                     auto age = std::chrono::steady_clock::now() - it->second.loadedAt;
-                    if (std::chrono::duration_cast<std::chrono::seconds>(age).count() >= 10)
+                    if (std::chrono::duration_cast<std::chrono::seconds>(age).count() >= 30)
                     {
                         // Stale — delete texture and re-fetch
                         if (it->second.textureId)
@@ -100,11 +100,22 @@ namespace sm
             }
         }
 
-        // Start async download
-        cache_[url] = Entry{State::Loading, 0, 0, 0, std::chrono::steady_clock::now()};
-        std::thread([this, url]()
-                    { downloadAndDecode(url); })
-            .detach();
+        // Start async download (limit concurrent threads)
+        if (activeDownloads_.load() < 4)
+        {
+            cache_[url] = Entry{State::Loading, 0, 0, 0, std::chrono::steady_clock::now()};
+            activeDownloads_.fetch_add(1);
+            std::thread([this, url]()
+                        {
+                            downloadAndDecode(url);
+                            activeDownloads_.fetch_sub(1); })
+                .detach();
+        }
+        else
+        {
+            // Too many concurrent downloads — don't cache as Loading,
+            // let it retry next frame when a slot opens
+        }
 
         return 0;
     }
@@ -240,9 +251,11 @@ namespace sm
             return false;
         }
 
-        // Set timeouts (10s)
-        DWORD timeout = 10000;
+        // Set timeouts (8s — prevent hangs on slow/dead CDN URLs)
+        DWORD timeout = 8000;
+        WinHttpSetOption(request, WINHTTP_OPTION_RESOLVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(request, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+        WinHttpSetOption(request, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(request, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
 
         if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,

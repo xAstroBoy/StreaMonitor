@@ -438,7 +438,8 @@ namespace sm
     {
         std::unique_lock lock(sleepMutex_);
         sleepCv_.wait_for(lock, std::chrono::seconds(seconds),
-                          [this] { return !running_.load() || quitting_.load(); });
+                          [this]
+                          { return !running_.load() || quitting_.load(); });
     }
 
 } // namespace sm
