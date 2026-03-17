@@ -152,6 +152,10 @@ namespace sm
         // Site filter for searchable combo popups
         char siteFilterBuf_[128] = {};
 
+        // JSON search in bot detail panel
+        char jsonSearchBuf_[128] = {};
+        bool jsonShowRaw_ = false;
+
         // Cached bot states
         std::vector<BotState> cachedStates_;
         TimePoint lastRefresh_;

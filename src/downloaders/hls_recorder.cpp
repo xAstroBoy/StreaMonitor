@@ -1515,47 +1515,49 @@ namespace sm
             {
                 state.gotKeyframe = true;
                 log_->info("First video keyframe received — starting mux");
-
-                // ── Capture preview frame (stream-copy mode) ────────
-                // Decode this keyframe to produce a JPEG preview image.
-                // Re-capture every ~15 seconds for a live thumbnail.
-                if (!previewPath_.empty())
-                {
-                    auto now = std::chrono::steady_clock::now();
-                    bool shouldCapture = !previewCaptured_ ||
-                                         std::chrono::duration_cast<std::chrono::seconds>(now - lastPreviewTime_).count() >= 15;
-                    if (shouldCapture)
-                    {
-                        auto *codecpar = state.inputCtx->streams[state.videoIdx]->codecpar;
-                        const AVCodec *dec = avcodec_find_decoder(codecpar->codec_id);
-                        if (dec)
-                        {
-                            AVCodecContext *tmpDec = avcodec_alloc_context3(dec);
-                            if (tmpDec)
-                            {
-                                avcodec_parameters_to_context(tmpDec, codecpar);
-                                if (avcodec_open2(tmpDec, dec, nullptr) == 0)
-                                {
-                                    avcodec_send_packet(tmpDec, pkt);
-                                    AVFrame *tmpFrame = av_frame_alloc();
-                                    if (avcodec_receive_frame(tmpDec, tmpFrame) == 0)
-                                    {
-                                        savePreviewJpeg(tmpFrame, previewPath_);
-                                        previewCaptured_ = true;
-                                        lastPreviewTime_ = now;
-                                    }
-                                    av_frame_free(&tmpFrame);
-                                }
-                                avcodec_free_context(&tmpDec);
-                            }
-                        }
-                    }
-                }
             }
             else
             {
                 packetsDropped++;
                 return true; // skip everything until keyframe
+            }
+        }
+
+        // ── Capture preview frame (stream-copy mode) ────────────────
+        // Decode keyframes to produce a JPEG preview thumbnail.
+        // Re-capture every ~15 seconds for a live thumbnail.
+        if (!previewPath_.empty() &&
+            pkt->stream_index == state.videoIdx &&
+            (pkt->flags & AV_PKT_FLAG_KEY))
+        {
+            auto now = std::chrono::steady_clock::now();
+            bool shouldCapture = !previewCaptured_ ||
+                                 std::chrono::duration_cast<std::chrono::seconds>(now - lastPreviewTime_).count() >= 15;
+            if (shouldCapture)
+            {
+                auto *codecpar = state.inputCtx->streams[state.videoIdx]->codecpar;
+                const AVCodec *dec = avcodec_find_decoder(codecpar->codec_id);
+                if (dec)
+                {
+                    AVCodecContext *tmpDec = avcodec_alloc_context3(dec);
+                    if (tmpDec)
+                    {
+                        avcodec_parameters_to_context(tmpDec, codecpar);
+                        if (avcodec_open2(tmpDec, dec, nullptr) == 0)
+                        {
+                            avcodec_send_packet(tmpDec, pkt);
+                            AVFrame *tmpFrame = av_frame_alloc();
+                            if (avcodec_receive_frame(tmpDec, tmpFrame) == 0)
+                            {
+                                savePreviewJpeg(tmpFrame, previewPath_);
+                                previewCaptured_ = true;
+                                lastPreviewTime_ = now;
+                            }
+                            av_frame_free(&tmpFrame);
+                        }
+                        avcodec_free_context(&tmpDec);
+                    }
+                }
             }
         }
 

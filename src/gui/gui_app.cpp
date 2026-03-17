@@ -20,6 +20,7 @@
 #include <iomanip>
 #include <filesystem>
 #include <thread>
+#include <nlohmann/json.hpp>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -291,6 +292,214 @@ namespace sm
         }
 #endif
         return "127.0.0.1";
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // JSON Tree Viewer — renders a collapsible, color-coded JSON tree
+    // ─────────────────────────────────────────────────────────────────
+    static const ImVec4 kJsonKeyColor    = {0.55f, 0.82f, 1.00f, 1.0f}; // light blue
+    static const ImVec4 kJsonStringColor = {0.80f, 0.95f, 0.55f, 1.0f}; // green
+    static const ImVec4 kJsonNumberColor = {0.95f, 0.70f, 0.40f, 1.0f}; // orange
+    static const ImVec4 kJsonBoolColor   = {0.95f, 0.55f, 0.85f, 1.0f}; // pink/magenta
+    static const ImVec4 kJsonNullColor   = {0.55f, 0.55f, 0.60f, 1.0f}; // gray
+    static const ImVec4 kJsonBraceColor  = {0.60f, 0.60f, 0.65f, 1.0f}; // dim gray
+
+    static void renderJsonValue(const nlohmann::json &j, const std::string &key, bool isArrayElem, int depth);
+
+    static void renderJsonInline(const nlohmann::json &j)
+    {
+        if (j.is_string())
+        {
+            std::string val = "\"" + j.get<std::string>() + "\"";
+            ImGui::TextColored(kJsonStringColor, "%s", val.c_str());
+        }
+        else if (j.is_number_integer())
+        {
+            ImGui::TextColored(kJsonNumberColor, "%lld", (long long)j.get<int64_t>());
+        }
+        else if (j.is_number_float())
+        {
+            ImGui::TextColored(kJsonNumberColor, "%g", j.get<double>());
+        }
+        else if (j.is_boolean())
+        {
+            ImGui::TextColored(kJsonBoolColor, "%s", j.get<bool>() ? "true" : "false");
+        }
+        else if (j.is_null())
+        {
+            ImGui::TextColored(kJsonNullColor, "null");
+        }
+    }
+
+    static void renderJsonValue(const nlohmann::json &j, const std::string &key, bool isArrayElem, int depth)
+    {
+        if (j.is_object() || j.is_array())
+        {
+            // Collapsible node
+            bool isObj = j.is_object();
+            std::string label;
+            if (isArrayElem)
+                label = "[" + key + "]";
+            else if (!key.empty())
+                label = key;
+            else
+                label = isObj ? "{...}" : "[...]";
+
+            std::string sizeHint = isObj
+                ? " {" + std::to_string(j.size()) + "}"
+                : " [" + std::to_string(j.size()) + "]";
+
+            // Use tree node with a unique ID
+            ImGui::PushID(key.c_str());
+            ImGuiTreeNodeFlags flags = (depth < 1) ? ImGuiTreeNodeFlags_DefaultOpen : 0;
+            // Small items (≤3 entries) auto-expand at any depth
+            if (j.size() <= 3 && depth < 3)
+                flags |= ImGuiTreeNodeFlags_DefaultOpen;
+
+            bool open;
+            if (!key.empty())
+            {
+                ImGui::TextColored(kJsonKeyColor, "%s", label.c_str());
+                ImGui::SameLine(0, 0);
+                ImGui::TextColored(kJsonBraceColor, "%s", sizeHint.c_str());
+                ImGui::SameLine(0, 4);
+                open = ImGui::TreeNodeEx("##node", flags);
+            }
+            else
+            {
+                ImGui::TextColored(kJsonBraceColor, "%s", sizeHint.c_str());
+                ImGui::SameLine(0, 4);
+                open = ImGui::TreeNodeEx("##node", flags);
+            }
+
+            if (open)
+            {
+                if (isObj)
+                {
+                    for (auto it = j.begin(); it != j.end(); ++it)
+                        renderJsonValue(it.value(), it.key(), false, depth + 1);
+                }
+                else
+                {
+                    int idx = 0;
+                    for (const auto &elem : j)
+                    {
+                        renderJsonValue(elem, std::to_string(idx), true, depth + 1);
+                        idx++;
+                    }
+                }
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+        else
+        {
+            // Leaf value
+            if (!key.empty())
+            {
+                if (isArrayElem)
+                    ImGui::TextColored(kJsonBraceColor, "[%s]", key.c_str());
+                else
+                    ImGui::TextColored(kJsonKeyColor, "%s:", key.c_str());
+                ImGui::SameLine(0, 4);
+            }
+            renderJsonInline(j);
+        }
+    }
+
+    static void renderJsonTree(const std::string &jsonStr, const char *searchBuf)
+    {
+        nlohmann::json parsed;
+        try
+        {
+            parsed = nlohmann::json::parse(jsonStr);
+        }
+        catch (...)
+        {
+            // Not valid JSON — fall back to raw text
+            ImGui::TextColored(COL_TEXT_DIM, "%s", jsonStr.c_str());
+            return;
+        }
+
+        // If user typed a search query, show matching keys/values highlighted
+        if (searchBuf && searchBuf[0] != '\0')
+        {
+            std::string query(searchBuf);
+            std::transform(query.begin(), query.end(), query.begin(), ::tolower);
+
+            // Flatten JSON and filter matches
+            std::function<void(const nlohmann::json &, const std::string &)> searchTree;
+            searchTree = [&](const nlohmann::json &node, const std::string &path)
+            {
+                if (node.is_object())
+                {
+                    for (auto it = node.begin(); it != node.end(); ++it)
+                    {
+                        std::string k = it.key();
+                        std::string kLower = k;
+                        std::transform(kLower.begin(), kLower.end(), kLower.begin(), ::tolower);
+                        std::string childPath = path.empty() ? k : path + "." + k;
+
+                        if (kLower.find(query) != std::string::npos)
+                        {
+                            ImGui::TextColored(kJsonKeyColor, "%s:", childPath.c_str());
+                            ImGui::SameLine(0, 4);
+                            if (it.value().is_primitive())
+                                renderJsonInline(it.value());
+                            else
+                                ImGui::TextColored(kJsonBraceColor, "(%zu items)",
+                                                   it.value().size());
+                        }
+                        else if (it.value().is_primitive())
+                        {
+                            std::string valStr = it.value().dump();
+                            std::string valLower = valStr;
+                            std::transform(valLower.begin(), valLower.end(), valLower.begin(), ::tolower);
+                            if (valLower.find(query) != std::string::npos)
+                            {
+                                ImGui::TextColored(kJsonKeyColor, "%s:", childPath.c_str());
+                                ImGui::SameLine(0, 4);
+                                renderJsonInline(it.value());
+                            }
+                        }
+                        else
+                        {
+                            searchTree(it.value(), childPath);
+                        }
+                    }
+                }
+                else if (node.is_array())
+                {
+                    int idx = 0;
+                    for (const auto &elem : node)
+                    {
+                        std::string childPath = path + "[" + std::to_string(idx) + "]";
+                        if (elem.is_primitive())
+                        {
+                            std::string valStr = elem.dump();
+                            std::string valLower = valStr;
+                            std::transform(valLower.begin(), valLower.end(), valLower.begin(), ::tolower);
+                            if (valLower.find(query) != std::string::npos)
+                            {
+                                ImGui::TextColored(kJsonBraceColor, "%s:", childPath.c_str());
+                                ImGui::SameLine(0, 4);
+                                renderJsonInline(elem);
+                            }
+                        }
+                        else
+                        {
+                            searchTree(elem, childPath);
+                        }
+                        idx++;
+                    }
+                }
+            };
+            searchTree(parsed, "");
+        }
+        else
+        {
+            renderJsonValue(parsed, "", false, 0);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -595,9 +804,21 @@ namespace sm
             return 1;
         initImGui();
 
+        // Frame timing — cap at ~60fps to avoid burning CPU
+        constexpr double kTargetFrameTime = 1.0 / 60.0; // 16.67ms
+        double lastFrameTime = glfwGetTime();
+
         while (!glfwWindowShouldClose(window_))
         {
-            glfwPollEvents();
+            // Wait for events with timeout instead of polling continuously.
+            // This sleeps the thread when idle, dramatically reducing CPU usage.
+            double waitTime = kTargetFrameTime - (glfwGetTime() - lastFrameTime);
+            if (waitTime > 0.001)
+                glfwWaitEventsTimeout(waitTime);
+            else
+                glfwPollEvents();
+
+            double frameStart = glfwGetTime();
 
             auto now = Clock::now();
             animTime_ = std::chrono::duration<float>(now.time_since_epoch()).count();
@@ -635,6 +856,17 @@ namespace sm
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
             glfwSwapBuffers(window_);
+
+            // Enforce frame time floor — sleep if we're way ahead of target
+            double elapsed = glfwGetTime() - frameStart;
+            if (elapsed < kTargetFrameTime)
+            {
+                double sleepMs = (kTargetFrameTime - elapsed) * 1000.0;
+                if (sleepMs > 1.0)
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(static_cast<int>(sleepMs)));
+            }
+            lastFrameTime = glfwGetTime();
         }
 
         return 0;
@@ -2666,18 +2898,9 @@ namespace sm
                         break;
                     }
                 }
-                // Auto-add
-                std::vector<std::string> sitesToAdd;
-                sitesToAdd.push_back(parsedSite);
-                if (parsedSite == "StripChat")
-                    sitesToAdd.push_back("StripChatVR");
-                else if (parsedSite == "StripChatVR")
-                    sitesToAdd.push_back("StripChat");
-                for (const auto &site : sitesToAdd)
-                {
-                    manager_.addBot(parsedUser, site, true);
-                    addLog("info", "system", "Added from URL: " + parsedUser + " on " + site);
-                }
+                // Auto-add — only the detected site (no automatic counterpart)
+                manager_.addBot(parsedUser, parsedSite, true);
+                addLog("info", "system", "Added from URL: " + parsedUser + " on " + parsedSite);
                 std::memset(addUrlInput_, 0, sizeof(addUrlInput_));
                 std::memset(addUsername_, 0, sizeof(addUsername_));
                 addAlsoCounterpart_ = false;
@@ -3294,15 +3517,49 @@ namespace sm
             {
                 ImGui::Spacing();
                 ImGui::Text("Last API Response:");
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 4));
-                ImGui::BeginChild("##ApiJson", ImVec2(0, 150), true, ImGuiWindowFlags_HorizontalScrollbar);
-                ImGui::PushStyleColor(ImGuiCol_Text, COL_TEXT_DIM);
-                ImGui::TextUnformatted(bot.lastApiResponse.c_str());
-                ImGui::PopStyleColor();
-                ImGui::EndChild();
-                ImGui::PopStyleVar();
+
+                // Search bar + view toggle
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 140 * dpiScale_);
+                ImGui::InputTextWithHint("##JsonSearch", "Search keys/values...",
+                                         jsonSearchBuf_, sizeof(jsonSearchBuf_));
+                ImGui::SameLine();
+                ImGui::Checkbox("Raw", &jsonShowRaw_);
+                ImGui::SameLine();
                 if (ImGui::SmallButton("Copy JSON"))
                     copyToClipboard(bot.lastApiResponse);
+
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 6));
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.07f, 0.07f, 0.09f, 1.0f});
+                ImGui::BeginChild("##ApiJson", ImVec2(0, 250 * dpiScale_), true,
+                                  ImGuiWindowFlags_HorizontalScrollbar);
+
+                if (jsonShowRaw_)
+                {
+                    // Pretty-printed raw text
+                    try
+                    {
+                        auto parsed = nlohmann::json::parse(bot.lastApiResponse);
+                        std::string pretty = parsed.dump(2);
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_TEXT_DIM);
+                        ImGui::TextUnformatted(pretty.c_str());
+                        ImGui::PopStyleColor();
+                    }
+                    catch (...)
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_TEXT_DIM);
+                        ImGui::TextUnformatted(bot.lastApiResponse.c_str());
+                        ImGui::PopStyleColor();
+                    }
+                }
+                else
+                {
+                    // Interactive tree viewer
+                    renderJsonTree(bot.lastApiResponse, jsonSearchBuf_);
+                }
+
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+                ImGui::PopStyleVar();
             }
         }
 
