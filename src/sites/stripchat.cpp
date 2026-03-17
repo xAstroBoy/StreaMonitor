@@ -18,7 +18,8 @@ namespace sm
     static std::string generateUniq()
     {
         static const char chars[] = "abcdefghijklmnopqrstuvwxyz0123456789";
-        static std::mt19937 rng(std::random_device{}());
+        // thread_local to avoid data races from multiple bot threads
+        thread_local std::mt19937 rng(std::random_device{}());
         std::uniform_int_distribution<> dist(0, sizeof(chars) - 2);
         std::string result;
         result.reserve(16);

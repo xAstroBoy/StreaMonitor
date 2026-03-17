@@ -17,6 +17,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <set>
@@ -213,6 +214,10 @@ namespace sm
         std::atomic<bool> quitting_{false};
         std::atomic<bool> resyncPending_{false}; // Force immediate status check
         CancellationToken cancelToken_;
+
+        // Condition variable for efficient sleeping (replaces 1-second polling)
+        std::mutex sleepMutex_;
+        std::condition_variable sleepCv_;
 
         mutable std::mutex stateMutex_;
         BotState state_;

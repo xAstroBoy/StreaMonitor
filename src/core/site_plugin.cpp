@@ -202,6 +202,7 @@ namespace sm
     {
         running_.store(false);
         cancelToken_.cancel();
+        sleepCv_.notify_all(); // Wake sleepInterruptible immediately
 
         StateChangeCallback cb;
         {
@@ -222,6 +223,7 @@ namespace sm
         quitting_.store(true);
         running_.store(false);
         cancelToken_.cancel();
+        sleepCv_.notify_all(); // Wake sleepInterruptible immediately
     }
 
     bool SitePlugin::isRunning() const { return running_.load(); }
@@ -338,6 +340,7 @@ namespace sm
     {
         resyncPending_.store(true);
         cancelToken_.cancel(); // Wake up any sleeping operation
+        sleepCv_.notify_all(); // Wake sleepInterruptible immediately
         logger_->info("Force resync requested");
     }
 
@@ -1169,16 +1172,15 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void SitePlugin::sleepInterruptible(int seconds)
     {
-        for (int i = 0; i < seconds && running_.load() && !quitting_.load(); i++)
+        std::unique_lock lock(sleepMutex_);
+        sleepCv_.wait_for(lock, std::chrono::seconds(seconds), [this]()
+                          { return !running_.load() || quitting_.load() || resyncPending_.load(); });
+
+        if (resyncPending_.load())
         {
-            if (resyncPending_.load())
-            {
-                resyncPending_.store(false);
-                cancelToken_.reset(); // Reset the cancel token after resync
-                logger_->info("Sleep interrupted by resync request");
-                return;
-            }
-            std::this_thread::sleep_for(1s);
+            resyncPending_.store(false);
+            cancelToken_.reset();
+            logger_->info("Sleep interrupted by resync request");
         }
     }
 

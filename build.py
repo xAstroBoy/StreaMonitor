@@ -86,12 +86,12 @@ def get_triplet(args) -> str:
 
 def run(cmd: list, cwd: Path | None = None, env=None):
     """Run a command, print it, stream output, die on failure."""
-    print(f"\n{'─'*60}")
+    print(f"\n{'-'*60}")
     print(f"  {' '.join(str(c) for c in cmd)}")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
     proc = subprocess.run(cmd, cwd=str(cwd or ROOT), env=env)
     if proc.returncode != 0:
-        print(f"\n✘ Command failed (exit {proc.returncode})")
+        print(f"\n[X] Command failed (exit {proc.returncode})")
         sys.exit(proc.returncode)
 
 
@@ -163,7 +163,7 @@ def package(args):
         src = BUILD_DIR  # Ninja/Make single-config
     
     if not src.exists():
-        print(f"✘ Build output not found: {src}")
+        print(f"[X] Build output not found: {src}")
         sys.exit(1)
 
     # Prepare clean dist directory
@@ -190,22 +190,22 @@ def package(args):
                 try:
                     shutil.copy2(exe, dist / exe.name)
                     copied.append(exe.name)
-                    print(f"  ✓ {exe.name}")
+                    print(f"  [OK] {exe.name}")
                 except PermissionError:
-                    print(f"  ⚠ {exe.name} is locked (running?), trying copy via temp...")
+                    print(f"  [!] {exe.name} is locked (running?), trying copy via temp...")
                     try:
                         tmp = dist / f"{exe.stem}_new{exe.suffix}"
                         shutil.copy2(exe, tmp)
                         tmp.rename(dist / exe.name)
                         copied.append(exe.name)
-                        print(f"  ✓ {exe.name} (via temp)")
+                        print(f"  [OK] {exe.name} (via temp)")
                     except Exception as e:
-                        print(f"  ✘ Failed to copy {exe.name}: {e}")
+                        print(f"  [X] Failed to copy {exe.name}: {e}")
         if copied:
             break
 
     if not copied:
-        print("✘ No executables found in build output")
+        print("[X] No executables found in build output")
         sys.exit(1)
 
     # Copy libraries (only for shared builds on Windows)
@@ -229,7 +229,7 @@ def package(args):
     if web_src.is_dir():
         web_dst = dist / "web"
         shutil.copytree(web_src, web_dst, dirs_exist_ok=True)
-        print(f"  ✓ web/ dashboard")
+        print(f"  [OK] web/ dashboard")
 
     # ── Create release archive ──
     arch = platform.machine().lower()
@@ -249,7 +249,7 @@ def package(args):
             for f in dist.rglob("*"):
                 if f.is_file():
                     zf.write(f, f.relative_to(dist))
-        print(f"  📦 {archive_name}")
+        print(f"  [PKG] {archive_name}")
     else:
         os_name = "macOS" if IS_MACOS else "Linux"
         archive_name = f"StreaMonitor-{os_name}{suffix}.tar.gz"
@@ -263,9 +263,9 @@ def package(args):
                         info.mode = 0o755
                     with open(f, 'rb') as fh:
                         tf.addfile(info, fh)
-        print(f"  📦 {archive_name}")
+        print(f"  [PKG] {archive_name}")
 
-    print(f"\n{'═'*60}")
+    print(f"\n{'='*60}")
     print(f"  Platform:      {SYSTEM} ({platform.machine()})")
     print(f"  Output:        {dist}")
     print(f"  Executables:   {', '.join(copied)}")
@@ -274,7 +274,7 @@ def package(args):
     elif not args.shared:
         print(f"  Mode:          STATIC (standalone portable)")
     print(f"  Archive:       {archive_path}")
-    print(f"{'═'*60}")
+    print(f"{'='*60}")
 
 # ──────────────────────────────────────────────
 # Main
@@ -303,7 +303,7 @@ def main():
     # Package-only mode: just package what's already built
     if args.package_only:
         package(args)
-        print(f"\n✓ Packaging done")
+        print(f"\n[OK] Packaging done")
         return
     
     # Find vcpkg (optional on Linux with --system-libs)
@@ -312,10 +312,10 @@ def main():
         print(f"vcpkg: {vcpkg}")
     elif not args.system_libs:
         if IS_LINUX:
-            print("⚠ vcpkg not found. Use --system-libs to build with system packages.")
+            print("[!] vcpkg not found. Use --system-libs to build with system packages.")
             print("  Or set VCPKG_ROOT environment variable.")
         else:
-            print("✘ vcpkg not found. Set VCPKG_ROOT env var or install vcpkg.")
+            print("[X] vcpkg not found. Set VCPKG_ROOT env var or install vcpkg.")
             print("  Windows: C:\\vcpkg")
             print("  macOS/Linux: ~/vcpkg or /opt/vcpkg")
         sys.exit(1)
@@ -349,7 +349,7 @@ def main():
     # Package
     package(args)
 
-    print(f"\n✓ Build complete — output in: {Path(args.dist_dir) if args.dist_dir else DIST_DIR}")
+    print(f"\n[OK] Build complete -- output in: {Path(args.dist_dir) if args.dist_dir else DIST_DIR}")
 
 
 if __name__ == "__main__":

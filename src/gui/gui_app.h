@@ -228,6 +228,17 @@ namespace sm
         bool editProxyEnabled_ = false;
         int editProxyType_ = 0; // 0=HTTP, 1=HTTPS, 2=SOCKS4, 3=SOCKS4A, 4=SOCKS5, 5=SOCKS5H
         char editProxyUrl_[512] = {};
+
+        // ── Adaptive frame rate (CPU idle optimization) ─────────────
+        double lastInputTime_ = 0.0;          // glfwGetTime() of last user input
+        std::atomic<bool> guiDirty_{true};     // set by bot threads to wake GUI
+        static void glfwCursorPosCallback(GLFWwindow *w, double, double);
+        static void glfwMouseButtonCallback(GLFWwindow *w, int, int, int);
+        static void glfwScrollCallback(GLFWwindow *w, double, double);
+        static void glfwKeyCallback(GLFWwindow *w, int, int, int, int);
+        static void glfwCharCallback(GLFWwindow *w, unsigned int);
+        static void glfwWindowFocusCallback(GLFWwindow *w, int);
+        void markActive();
     };
 
 } // namespace sm
