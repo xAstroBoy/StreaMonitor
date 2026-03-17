@@ -207,7 +207,7 @@ namespace sm
     // ── Encoding configuration ──────────────────────────────────────
     struct EncodingConfig
     {
-        EncoderType encoder = EncoderType::X265; // Default: x265 software encoding
+        EncoderType encoder = EncoderType::Copy; // Default: stream copy (no re-encoding, near-zero CPU)
         bool enableCuda = false;                 // CUDA/NVENC OFF by default
         int crf = 23;                            // Constant Rate Factor (0-51, lower=better, 23=default)
         std::string preset = "medium";           // Encoding speed/quality trade-off

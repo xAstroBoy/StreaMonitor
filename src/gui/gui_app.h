@@ -192,7 +192,7 @@ namespace sm
         bool editDirtyFlag_ = false;
 
         // Encoding config edit state (mirrors EncodingConfig)
-        int editEncoderType_ = 1; // 0=Copy, 1=X265, 2=X264, 3=NVENC_HEVC, 4=NVENC_H264
+        int editEncoderType_ = 0; // 0=Copy, 1=X265, 2=X264, 3=NVENC_HEVC, 4=NVENC_H264
         bool editEnableCuda_ = false;
         int editCrf_ = 23;           // 0-51, lower=better quality
         int editPresetIdx_ = 5;      // preset index (ultrafast..placebo)
