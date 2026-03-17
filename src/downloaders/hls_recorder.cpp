@@ -2268,6 +2268,9 @@ namespace sm
                     }
 
                     // ── Process packet (transcoding or stream copy) ─────
+                    // Save PTS BEFORE processing — av_interleaved_write_frame
+                    // unrefs the packet, zeroing pkt->pts/size/etc.
+                    int64_t savedPts = pkt->pts;
                     bool packetOk = false;
                     if (state.transcoding)
                     {
@@ -2285,7 +2288,7 @@ namespace sm
                     }
 
                     // ── Stall detection ─────────────────────────────────
-                    stall.onPacket(pkt->pts, bytesWritten);
+                    stall.onPacket(savedPts, bytesWritten);
 
                     // Only check stalls after startup grace period
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
