@@ -1047,7 +1047,7 @@ namespace sm
         recorder.setLogger(logger_);
 
         recorder.setProgressCallback([this](const RecordingProgress &prog)
-        {
+                                     {
             // Update stats silently — do NOT fire stateCallback here.
             // The GUI refreshes bot states every 2s, which is fast enough
             // to show updated size/speed. Firing stateCallback on every
@@ -1055,8 +1055,7 @@ namespace sm
             // glfwPostEmptyEvent, keeping the GUI pinned at 30fps.
             std::lock_guard lock(stateMutex_);
             state_.recordingStats.bytesWritten = prog.bytesWritten;
-            state_.recordingStats.currentSpeed = prog.speed;
-        });
+            state_.recordingStats.currentSpeed = prog.speed; });
 
         // Set pause/resume callback — when the stream ends (model goes
         // private/offline), keep the output file open and poll for the

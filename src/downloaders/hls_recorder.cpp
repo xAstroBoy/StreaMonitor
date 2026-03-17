@@ -203,6 +203,16 @@ namespace sm
     {
         cancel = &cancelToken;
 
+        // ── Reset state from any previous stop() cycle ──────────────
+        // Without this, readCallback sees finished=true from the old
+        // session and immediately returns EOF → instant "stream ended".
+        {
+            std::lock_guard lock(bufMutex);
+            finished = false;
+            hasError = false;
+            ringBuf.clear();
+        }
+
         // ── Initial fetch + validation ──────────────────────────────
         HttpClient http;
         http.setDefaultUserAgent(userAgent);
