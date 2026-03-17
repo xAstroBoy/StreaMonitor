@@ -260,9 +260,12 @@ namespace sm
         auto preview = getPreviewUrl();
 
         std::lock_guard lock(stateMutex_);
+        bool statusChanged = (state_.status != status);
         state_.prevStatus = state_.status;
         state_.status = status;
-        state_.lastStatusChange = Clock::now();
+        // Only update lastStatusChange when status actually changes
+        if (statusChanged)
+            state_.lastStatusChange = Clock::now();
         // Preserve local captured preview while recording; only overwrite
         // from site preview URL when we don't already have a local file path.
         bool hasLocalPreview = false;
@@ -271,9 +274,15 @@ namespace sm
 #else
         hasLocalPreview = (!state_.previewUrl.empty() && state_.previewUrl[0] == '/');
 #endif
+        bool previewChanged = false;
         if (!preview.empty() && !(state_.recording && hasLocalPreview))
+        {
+            previewChanged = (state_.previewUrl != preview);
             state_.previewUrl = preview;
-        if (stateCallback_)
+        }
+        // Only fire callback when something actually changed — avoids
+        // spamming glfwPostEmptyEvent when 20 bots check status every 5s
+        if ((statusChanged || previewChanged) && stateCallback_)
             stateCallback_(state_);
     }
 

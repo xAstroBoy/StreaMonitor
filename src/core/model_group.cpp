@@ -129,6 +129,7 @@ namespace sm
     {
         running_.store(false);
         cancelToken_.cancel();
+        sleepCv_.notify_all(); // Instant wake from sleepInterruptible
 
         {
             std::lock_guard lock(stateMutex_);
@@ -149,6 +150,7 @@ namespace sm
         quitting_.store(true);
         running_.store(false);
         cancelToken_.cancel();
+        sleepCv_.notify_all(); // Instant wake from sleepInterruptible
     }
 
     bool ModelGroup::isRunning() const { return running_.load(); }
@@ -434,8 +436,9 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void ModelGroup::sleepInterruptible(int seconds)
     {
-        for (int i = 0; i < seconds && running_.load() && !quitting_.load(); i++)
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::unique_lock lock(sleepMutex_);
+        sleepCv_.wait_for(lock, std::chrono::seconds(seconds),
+                          [this] { return !running_.load() || quitting_.load(); });
     }
 
 } // namespace sm

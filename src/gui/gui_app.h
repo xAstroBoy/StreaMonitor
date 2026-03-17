@@ -230,8 +230,8 @@ namespace sm
         char editProxyUrl_[512] = {};
 
         // ── Adaptive frame rate (CPU idle optimization) ─────────────
-        double lastInputTime_ = 0.0;          // glfwGetTime() of last user input
-        std::atomic<bool> guiDirty_{true};     // set by bot threads to wake GUI
+        double lastInputTime_ = 0.0;       // glfwGetTime() of last user input
+        std::atomic<bool> guiDirty_{true}; // set by bot threads to wake GUI
         static void glfwCursorPosCallback(GLFWwindow *w, double, double);
         static void glfwMouseButtonCallback(GLFWwindow *w, int, int, int);
         static void glfwScrollCallback(GLFWwindow *w, double, double);

@@ -818,9 +818,9 @@ namespace sm
         // GUI from its idle sleep so the UI updates immediately.
         manager_.setEventCallback([this](const ManagerEvent &)
                                   {
-            guiDirty_.store(true);
-            glfwPostEmptyEvent(); // Wake glfwWaitEventsTimeout
-        });
+                                      guiDirty_.store(true);
+                                      glfwPostEmptyEvent(); // Wake glfwWaitEventsTimeout
+                                  });
 
         // ── Adaptive frame rate ─────────────────────────────────────
         // Active:  30 fps (user interacting / recent state changes)
@@ -828,7 +828,7 @@ namespace sm
         // This alone drops CPU from ~30-60% to <2% when the app is idle.
         constexpr double kActiveFrameTime = 1.0 / 30.0; // 33ms
         constexpr double kIdleFrameTime = 1.0 / 4.0;    // 250ms
-        constexpr double kIdleTimeout = 2.0;             // seconds before going idle
+        constexpr double kIdleTimeout = 2.0;            // seconds before going idle
 
         lastInputTime_ = glfwGetTime();
 
@@ -849,19 +849,20 @@ namespace sm
             auto now = Clock::now();
             animTime_ = std::chrono::duration<float>(now.time_since_epoch()).count();
 
-            // Refresh bot states every 500ms
+            // Refresh bot states periodically (state changes push via events,
+            // this is just a safety net)
             if (std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - lastRefresh_)
-                    .count() > 500)
+                    .count() > 2000)
             {
                 refreshBotStates();
                 lastRefresh_ = now;
             }
 
-            // Refresh disk usage every 10 seconds
+            // Refresh disk usage every 60 seconds (recursive dir scan is expensive)
             if (std::chrono::duration_cast<std::chrono::seconds>(
                     now - lastDiskRefresh_)
-                    .count() > 10)
+                    .count() > 60)
             {
                 cachedDiskUsage_ = manager_.getDiskUsage();
                 lastDiskRefresh_ = now;

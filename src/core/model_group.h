@@ -19,6 +19,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <functional>
 
 namespace sm
@@ -108,6 +109,8 @@ namespace sm
         std::atomic<bool> running_{false};
         std::atomic<bool> quitting_{false};
         CancellationToken cancelToken_;
+        std::mutex sleepMutex_;
+        std::condition_variable sleepCv_;
 
         mutable std::mutex stateMutex_;
         ModelGroupState state_;
