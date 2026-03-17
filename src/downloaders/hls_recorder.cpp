@@ -1532,37 +1532,18 @@ namespace sm
         }
 
         // ── Timestamp fixup ─────────────────────────────────────────
-        // LIVE STREAM: Rebuild timestamps from 0!
-        // Don't use original stream timestamps — they can be huge values
-        // since the stream may have been running for hours/days.
+        // LIVE STREAM: Rebuild timestamps from 0.
+        // Subtract the first DTS of each stream from BOTH PTS and DTS.
+        // Using a SINGLE offset preserves the composition time offset
+        // (CTO = PTS − DTS), which is critical for HEVC B-frame ordering.
+        // The Matroska muxer only writes PTS, so corrupted CTO = broken
+        // seeking and playback.
 
-        // Record first PTS/DTS for offset calculation
-        if (pkt->stream_index == state.videoIdx)
-        {
-            if (state.firstVideoPts == INT64_MIN && pkt->pts != AV_NOPTS_VALUE)
-                state.firstVideoPts = pkt->pts;
-            if (state.videoStartDts == 0 && pkt->dts != AV_NOPTS_VALUE)
-                state.videoStartDts = pkt->dts;
-        }
-        if (pkt->stream_index == state.audioIdx)
-        {
-            if (state.firstAudioPts == INT64_MIN && pkt->pts != AV_NOPTS_VALUE)
-                state.firstAudioPts = pkt->pts;
-            if (state.audioStartDts == 0 && pkt->dts != AV_NOPTS_VALUE)
-                state.audioStartDts = pkt->dts;
-        }
-
-        // Fix invalid timestamps
+        // Fix invalid timestamps FIRST (before offset capture)
         if (pkt->dts == AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE)
             pkt->dts = pkt->pts;
         if (pkt->pts == AV_NOPTS_VALUE && pkt->dts != AV_NOPTS_VALUE)
             pkt->pts = pkt->dts;
-
-        // Ensure PTS >= DTS
-        if (pkt->pts != AV_NOPTS_VALUE && pkt->dts != AV_NOPTS_VALUE && pkt->pts < pkt->dts)
-        {
-            pkt->pts = pkt->dts;
-        }
 
         // Drop packets with completely invalid timestamps
         if (pkt->dts == AV_NOPTS_VALUE && pkt->pts == AV_NOPTS_VALUE)
@@ -1571,32 +1552,38 @@ namespace sm
             return true; // not fatal, just skip
         }
 
-        // ── Rebuild timestamps from 0 (subtract first PTS) ──────────
-        int64_t ptsOffset = 0;
-        int64_t dtsOffset = 0;
-        if (pkt->stream_index == state.videoIdx)
+        // Capture first DTS as the offset (once per stream).
+        // Using DTS (not PTS) because DTS ≤ PTS, guaranteeing that
+        // after subtraction both PTS and DTS stay ≥ 0.
+        if (pkt->stream_index == state.videoIdx && !state.videoOffsetCaptured)
         {
-            ptsOffset = (state.firstVideoPts != INT64_MIN) ? state.firstVideoPts : state.videoStartDts;
-            dtsOffset = state.videoStartDts;
+            state.videoTsOffset = pkt->dts;
+            state.videoOffsetCaptured = true;
+            log_->debug("Video timestamp offset captured: {} (tb={}/{})",
+                        state.videoTsOffset, inStream->time_base.num, inStream->time_base.den);
         }
-        else if (pkt->stream_index == state.audioIdx)
+        else if (pkt->stream_index == state.audioIdx && !state.audioOffsetCaptured)
         {
-            ptsOffset = (state.firstAudioPts != INT64_MIN) ? state.firstAudioPts : state.audioStartDts;
-            dtsOffset = state.audioStartDts;
+            state.audioTsOffset = pkt->dts;
+            state.audioOffsetCaptured = true;
+            log_->debug("Audio timestamp offset captured: {} (tb={}/{})",
+                        state.audioTsOffset, inStream->time_base.num, inStream->time_base.den);
         }
 
-        // Subtract offset to start from 0
-        if (pkt->pts != AV_NOPTS_VALUE && ptsOffset > 0)
-            pkt->pts -= ptsOffset;
-        if (pkt->dts != AV_NOPTS_VALUE && dtsOffset > 0)
-            pkt->dts -= dtsOffset;
+        // Subtract offset from BOTH PTS and DTS (same offset → preserves CTO)
+        int64_t offset = (pkt->stream_index == state.videoIdx)
+                             ? state.videoTsOffset
+                             : state.audioTsOffset;
+
+        pkt->pts -= offset;
+        pkt->dts -= offset;
 
         // Rescale timestamps to output stream timebase
         pkt->stream_index = outStreamIdx;
         av_packet_rescale_ts(pkt, inStream->time_base, outStream->time_base);
 
         // ── Restart continuity offset (stream-copy mode) ────────────
-        // After a restart, the new input's PTS starts from 0 again.
+        // After a restart, the new input's timestamps start from 0 again.
         // Add the accumulated offset so timestamps continue from where
         // the previous iteration left off → one continuous output file.
         if (outStreamIdx == state.outVideoIdx && state.videoRestartOffset > 0)
@@ -1610,13 +1597,12 @@ namespace sm
             pkt->dts += state.audioRestartOffset;
         }
 
-        // Make timestamps non-negative (safety clamp)
-        if (pkt->dts < 0)
-            pkt->dts = 0;
-        if (pkt->pts < 0)
-            pkt->pts = 0;
-        if (pkt->pts < pkt->dts)
-            pkt->pts = pkt->dts;
+        // NOTE: Do NOT clamp PTS or force PTS >= DTS here!
+        // HEVC B-frames legitimately have PTS < DTS (negative composition
+        // time offset). The muxer's "avoid_negative_ts = make_zero" option
+        // handles any truly negative timestamps at write time.
+        // Manually forcing PTS = DTS would destroy B-frame display order
+        // and corrupt seeking in MKV/MP4.
 
         // Set packet duration (helps muxer calculate total stream duration)
         if (outStreamIdx == state.outVideoIdx && state.lastVideoOutPts > 0 && pkt->pts > state.lastVideoOutPts)
@@ -2362,10 +2348,10 @@ namespace sm
                         }
 
                         // Reset per-input-session state
-                        state.firstVideoPts = INT64_MIN;
-                        state.firstAudioPts = INT64_MIN;
-                        state.videoStartDts = 0;
-                        state.audioStartDts = 0;
+                        state.videoTsOffset = 0;
+                        state.audioTsOffset = 0;
+                        state.videoOffsetCaptured = false;
+                        state.audioOffsetCaptured = false;
                         state.gotKeyframe = false;
 
                         // Close ONLY the input (keep output + encoder alive)
@@ -2430,10 +2416,10 @@ namespace sm
                 if (state.transcoding && state.videoDecCtx)
                     avcodec_flush_buffers(state.videoDecCtx);
 
-                state.firstVideoPts = INT64_MIN;
-                state.firstAudioPts = INT64_MIN;
-                state.videoStartDts = 0;
-                state.audioStartDts = 0;
+                state.videoTsOffset = 0;
+                state.audioTsOffset = 0;
+                state.videoOffsetCaptured = false;
+                state.audioOffsetCaptured = false;
                 state.gotKeyframe = false;
 
                 // Close input + feeder but keep output open
