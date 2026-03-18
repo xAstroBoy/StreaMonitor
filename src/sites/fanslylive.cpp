@@ -5,6 +5,7 @@
 #include "sites/fanslylive.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 
 namespace sm
 {
@@ -37,8 +38,19 @@ namespace sm
             for (const auto &acct : response)
             {
                 auto uname = acct.value("username", "");
-                if (uname == username())
+                // Case-insensitive comparison — Fansly API is case-sensitive
+                // on CDN paths, so we must use the canonical username.
+                std::string unameLower = uname;
+                std::string selfLower = username();
+                std::transform(unameLower.begin(), unameLower.end(), unameLower.begin(), ::tolower);
+                std::transform(selfLower.begin(), selfLower.end(), selfLower.begin(), ::tolower);
+                if (unameLower == selfLower)
                 {
+                    if (!uname.empty() && uname != username())
+                    {
+                        logger_->info("Username case fix: {} → {}", username(), uname);
+                        setUsername(uname);
+                    }
                     roomId_ = acct.value("id", "");
                     return !roomId_.empty();
                 }

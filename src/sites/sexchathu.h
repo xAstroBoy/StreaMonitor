@@ -47,6 +47,8 @@ namespace sm
 
         nlohmann::json lastInfo_;
         std::string roomId_;
+        // Set by findRoomIdFromList to the canonical screen name
+        static thread_local std::string canonicalUsername_;
     };
 
 } // namespace sm

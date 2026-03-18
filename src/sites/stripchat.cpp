@@ -176,6 +176,14 @@ namespace sm
             // Model ID from user.user.id
             modelId_ = userInner.value("id", (int64_t)0);
 
+            // Canonical username from API — CDN paths may be case-sensitive
+            std::string apiUsername = userInner.value("username", "");
+            if (!apiUsername.empty() && apiUsername != username())
+            {
+                logger_->info("Username case fix: {} → {}", username(), apiUsername);
+                setUsername(apiUsername);
+            }
+
             // Gender detection - priority: broadcastGender > genderCategory > user
             std::string genderStr;
             if (userInner.contains("broadcastGender") && userInner["broadcastGender"].is_string())

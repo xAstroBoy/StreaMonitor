@@ -12,6 +12,8 @@ namespace sm
 
     REGISTER_SITE(SexChatHU);
 
+    thread_local std::string SexChatHU::canonicalUsername_;
+
     SexChatHU::CachedPerformerList &SexChatHU::getCache()
     {
         static CachedPerformerList cache;
@@ -73,7 +75,11 @@ namespace sm
             {
                 auto perfid = perf.value("perfid", 0);
                 if (perfid > 0)
+                {
+                    // Store canonical screenname for caller to use
+                    canonicalUsername_ = screenname;
                     return std::to_string(perfid);
+                }
             }
         }
 
@@ -97,7 +103,15 @@ namespace sm
         {
             auto resolved = findRoomIdFromList(username, http(), logger_);
             if (resolved)
+            {
                 roomId_ = *resolved;
+                // Update to canonical casing from performer list
+                if (!canonicalUsername_.empty() && canonicalUsername_ != username)
+                {
+                    logger_->info("Username case fix: {} \u2192 {}", username, canonicalUsername_);
+                    setUsername(canonicalUsername_);
+                }
+            }
         }
     }
 

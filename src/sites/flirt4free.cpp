@@ -110,6 +110,22 @@ namespace sm
             if (it != modelCache_.end())
             {
                 roomId_ = it->second;
+
+                // Update username to canonical casing from model_seo_name
+                for (const auto &m : modelsArr)
+                {
+                    if (!m.is_object()) continue;
+                    auto seoName = m.value("model_seo_name", "");
+                    std::string seoLower = seoName;
+                    std::transform(seoLower.begin(), seoLower.end(), seoLower.begin(), ::tolower);
+                    if (seoLower == lowerUser && seoName != username())
+                    {
+                        logger_->info("Username case fix: {} → {}", username(), seoName);
+                        setUsername(seoName);
+                        break;
+                    }
+                }
+
                 return true;
             }
         }

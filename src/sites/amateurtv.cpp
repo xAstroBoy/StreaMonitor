@@ -100,6 +100,14 @@ namespace sm
             if (message == "NOT_FOUND")
                 return Status::NotExist;
 
+            // Canonical username from API — update if different
+            std::string apiUsername = lastInfo_.value("username", "");
+            if (!apiUsername.empty() && apiUsername != username())
+            {
+                logger_->info("Username case fix: {} → {}", username(), apiUsername);
+                setUsername(apiUsername);
+            }
+
             // Check for KO result
             std::string result = lastInfo_.value("result", "");
             if (result == "KO")
