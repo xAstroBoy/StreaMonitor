@@ -338,9 +338,9 @@ namespace sm
     void SitePlugin::setLastApiResponse(const std::string &json)
     {
         std::lock_guard lock(stateMutex_);
-        // Truncate if too long (keep first 8KB for inspection)
-        if (json.size() > 8192)
-            state_.lastApiResponse = json.substr(0, 8192) + "... (truncated)";
+        // Truncate if too long (keep first 64KB for inspection / JSON tree viewer)
+        if (json.size() > 65536)
+            state_.lastApiResponse = json.substr(0, 65536) + "... (truncated)";
         else
             state_.lastApiResponse = json;
     }

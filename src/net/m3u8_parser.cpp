@@ -169,7 +169,13 @@ namespace sm
                 std::string fr = extractAttribute(line, "FRAME-RATE");
                 if (!fr.empty())
                 {
-                    try { variant.frameRate = std::stof(fr); } catch (...) {}
+                    try
+                    {
+                        variant.frameRate = std::stof(fr);
+                    }
+                    catch (...)
+                    {
+                    }
                 }
 
                 // RESOLUTION=WxH

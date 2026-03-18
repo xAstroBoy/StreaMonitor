@@ -404,10 +404,66 @@ namespace sm
 
     static void renderJsonTree(const std::string &jsonStr, const char *searchBuf)
     {
+        // Strip truncation suffix if present (setLastApiResponse adds it)
+        std::string cleanJson = jsonStr;
+        {
+            const std::string kTruncSuffix = "... (truncated)";
+            if (cleanJson.size() > kTruncSuffix.size() &&
+                cleanJson.compare(cleanJson.size() - kTruncSuffix.size(),
+                                  kTruncSuffix.size(), kTruncSuffix) == 0)
+            {
+                cleanJson.erase(cleanJson.size() - kTruncSuffix.size());
+                // Try to make the truncated JSON parseable by closing open structures.
+                // Find the last complete value by scanning backwards for a comma or brace.
+                // Strategy: trim trailing partial value back to last comma, then close
+                // all open braces/brackets.
+                // First, strip any trailing partial string/value
+                while (!cleanJson.empty())
+                {
+                    char ch = cleanJson.back();
+                    if (ch == ',' || ch == '{' || ch == '[' || ch == ':' || ch == '}'  || ch == ']')
+                        break;
+                    cleanJson.pop_back();
+                }
+                // Remove trailing comma if present
+                if (!cleanJson.empty() && cleanJson.back() == ',')
+                    cleanJson.pop_back();
+                // Remove trailing colon (partial key:value)
+                if (!cleanJson.empty() && cleanJson.back() == ':')
+                {
+                    cleanJson.pop_back();
+                    // Also remove the key string
+                    while (!cleanJson.empty() && cleanJson.back() != ',')
+                    {
+                        char ch = cleanJson.back();
+                        cleanJson.pop_back();
+                        if (ch == '{' || ch == '[')
+                        {
+                            cleanJson.push_back(ch);
+                            break;
+                        }
+                    }
+                    if (!cleanJson.empty() && cleanJson.back() == ',')
+                        cleanJson.pop_back();
+                }
+                // Count open braces/brackets and close them
+                int braces = 0, brackets = 0;
+                for (char ch : cleanJson)
+                {
+                    if (ch == '{') braces++;
+                    else if (ch == '}') braces--;
+                    else if (ch == '[') brackets++;
+                    else if (ch == ']') brackets--;
+                }
+                while (brackets > 0) { cleanJson += ']'; brackets--; }
+                while (braces > 0)   { cleanJson += '}'; braces--; }
+            }
+        }
+
         nlohmann::json parsed;
         try
         {
-            parsed = nlohmann::json::parse(jsonStr);
+            parsed = nlohmann::json::parse(cleanJson);
         }
         catch (...)
         {
@@ -1856,9 +1912,14 @@ namespace sm
         }
 
         // ── Sort by column headers ─────────────────────────────────
+        // NOTE: visibleRows is rebuilt from scratch every frame, so we
+        // must always apply the sort (not just when SpecsDirty).
         if (ImGuiTableSortSpecs *sortSpecs = ImGui::TableGetSortSpecs())
         {
-            if (sortSpecs->SpecsDirty && sortSpecs->SpecsCount > 0)
+            if (sortSpecs->SpecsDirty)
+                sortSpecs->SpecsDirty = false;
+
+            if (sortSpecs->SpecsCount > 0)
             {
                 const auto &spec = sortSpecs->Specs[0];
                 bool asc = (spec.SortDirection == ImGuiSortDirection_Ascending);
@@ -1893,11 +1954,11 @@ namespace sm
                                   break;
                               case 8: // Size
                                   cmp = (a->combinedSize < b->combinedSize) ? -1 : (a->combinedSize > b->combinedSize) ? 1
-                                                                                                                        : 0;
+                                                                                                                       : 0;
                                   break;
                               case 9: // Speed
                                   cmp = (a->maxSpeed < b->maxSpeed) ? -1 : (a->maxSpeed > b->maxSpeed) ? 1
-                                                                                                        : 0;
+                                                                                                       : 0;
                                   break;
                               case 10: // Uptime
                                   cmp = (a->earliestStart < b->earliestStart) ? -1 : (a->earliestStart > b->earliestStart) ? 1
@@ -1908,7 +1969,6 @@ namespace sm
                               }
                               return asc ? (cmp < 0) : (cmp > 0);
                           });
-                sortSpecs->SpecsDirty = false;
             }
         }
 
@@ -3765,30 +3825,53 @@ namespace sm
         ImGui::SameLine();
         ImGui::TextColored(statusColor(bot.status), "(%s)", statusToString(bot.status));
 
-        // Preview thumbnail
-        if (!bot.previewUrl.empty())
+        // Preview thumbnail — always show a placeholder box
         {
-            GLuint tex = imageCache_.getTexture(bot.previewUrl);
+            ImGui::Spacing();
+            float avail = ImGui::GetContentRegionAvail().x;
+            float imgW = std::min(avail, 320.0f * dpiScale_);
+            float imgH = imgW * 0.5625f; // 16:9
+
+            GLuint tex = 0;
+            if (!bot.previewUrl.empty())
+                tex = imageCache_.getTexture(bot.previewUrl);
+
             if (tex != 0)
             {
-                ImGui::Spacing();
-                float avail = ImGui::GetContentRegionAvail().x;
-                float imgW = std::min(avail, 320.0f);
-                float imgH = imgW * 0.5625f; // 16:9
                 ImGui::Image((ImTextureID)(intptr_t)tex, {imgW, imgH});
-
                 // Right-click to refresh
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-                {
                     imageCache_.invalidate(bot.previewUrl);
-                }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Right-click to refresh preview");
             }
             else
             {
-                ImGui::Spacing();
-                ImGui::TextColored(COL_TEXT_DIM, "Loading preview...");
+                // Draw a dark placeholder box
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                ImDrawList *dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(pos, {pos.x + imgW, pos.y + imgH},
+                                  IM_COL32(20, 20, 28, 255));
+                dl->AddRect(pos, {pos.x + imgW, pos.y + imgH},
+                            IM_COL32(60, 60, 70, 255));
+
+                // Center status text in the placeholder
+                const char *label = bot.previewUrl.empty()
+                                        ? "No preview available"
+                                        : "Loading preview...";
+                ImVec2 textSz = ImGui::CalcTextSize(label);
+                ImVec2 textPos = {pos.x + (imgW - textSz.x) * 0.5f,
+                                  pos.y + (imgH - textSz.y) * 0.5f};
+                dl->AddText(textPos, IM_COL32(120, 120, 140, 255), label);
+
+                // Advance cursor past the placeholder
+                ImGui::Dummy({imgW, imgH});
+
+                // Right-click to force retry
+                if (!bot.previewUrl.empty() && ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                    imageCache_.invalidate(bot.previewUrl);
+                if (ImGui::IsItemHovered() && !bot.previewUrl.empty())
+                    ImGui::SetTooltip("Right-click to retry loading preview");
             }
         }
 
