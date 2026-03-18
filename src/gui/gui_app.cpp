@@ -680,6 +680,19 @@ namespace sm
         glfwMakeContextCurrent(window_);
         glfwSwapInterval(0); // Disable VSync — we use our own frame limiter
 
+        // Set window icon (embedded RGBA pixel data)
+        {
+            #include "resources/icon_data.h"
+            GLFWimage icons[2];
+            icons[0].width  = kIconWidth;
+            icons[0].height = kIconHeight;
+            icons[0].pixels = const_cast<unsigned char *>(kIconPixels);
+            icons[1].width  = kIconSmallWidth;
+            icons[1].height = kIconSmallHeight;
+            icons[1].pixels = const_cast<unsigned char *>(kIconSmallPixels);
+            glfwSetWindowIcon(window_, 2, icons);
+        }
+
         // Register input callbacks for idle detection
         glfwSetWindowUserPointer(window_, this);
         glfwSetCursorPosCallback(window_, glfwCursorPosCallback);

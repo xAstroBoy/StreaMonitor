@@ -235,6 +235,7 @@ if(WIN32)
         src/main_gui.cpp
         src/main_cli.cpp
         ${GUI_SOURCES}
+        src/resources/app.rc
     )
 elseif(APPLE)
     add_executable(StreaMonitor MACOSX_BUNDLE
