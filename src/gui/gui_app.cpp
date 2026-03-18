@@ -1795,14 +1795,15 @@ namespace sm
         // ── Table ──────────────────────────────────────────────────
         ImGuiTableFlags tableFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                      ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersInnerV |
-                                     ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp;
+                                     ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp |
+                                     ImGuiTableFlags_Sortable;
 
         if (!ImGui::BeginTable("##Models", 11, tableFlags))
             return;
 
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("##Chk", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 28.0f * s);
-        ImGui::TableSetupColumn("##Icon", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 55.0f * s);
+        ImGui::TableSetupColumn("##Chk", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort, 28.0f * s);
+        ImGui::TableSetupColumn("##Icon", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort, 55.0f * s);
         ImGui::TableSetupColumn("Username", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_NoHide, 3.5f);
         ImGui::TableSetupColumn("Sites", 0, 2.0f);
         ImGui::TableSetupColumn("Group", 0, 2.0f);
@@ -1852,6 +1853,63 @@ namespace sm
         {
             ImGui::TableSetColumnIndex(col);
             ImGui::TableHeader(ImGui::TableGetColumnName(col));
+        }
+
+        // ── Sort by column headers ─────────────────────────────────
+        if (ImGuiTableSortSpecs *sortSpecs = ImGui::TableGetSortSpecs())
+        {
+            if (sortSpecs->SpecsDirty && sortSpecs->SpecsCount > 0)
+            {
+                const auto &spec = sortSpecs->Specs[0];
+                bool asc = (spec.SortDirection == ImGuiSortDirection_Ascending);
+                std::sort(visibleRows.begin(), visibleRows.end(),
+                          [&](const GroupedRow *a, const GroupedRow *b) -> bool
+                          {
+                              int cmp = 0;
+                              switch (spec.ColumnIndex)
+                              {
+                              case 2: // Username
+                              {
+                                  std::string la = a->username, lb = b->username;
+                                  std::transform(la.begin(), la.end(), la.begin(), ::tolower);
+                                  std::transform(lb.begin(), lb.end(), lb.begin(), ::tolower);
+                                  cmp = la.compare(lb);
+                                  break;
+                              }
+                              case 3: // Sites
+                                  cmp = a->sitesStr.compare(b->sitesStr);
+                                  break;
+                              case 4: // Group
+                                  cmp = a->groupName.compare(b->groupName);
+                                  break;
+                              case 5: // URL
+                                  cmp = a->primaryUrl.compare(b->primaryUrl);
+                                  break;
+                              case 6: // Status
+                                  cmp = statusPrio(a->bestStatus) - statusPrio(b->bestStatus);
+                                  break;
+                              case 7: // Recording
+                                  cmp = (int)a->anyRecording - (int)b->anyRecording;
+                                  break;
+                              case 8: // Size
+                                  cmp = (a->combinedSize < b->combinedSize) ? -1 : (a->combinedSize > b->combinedSize) ? 1
+                                                                                                                        : 0;
+                                  break;
+                              case 9: // Speed
+                                  cmp = (a->maxSpeed < b->maxSpeed) ? -1 : (a->maxSpeed > b->maxSpeed) ? 1
+                                                                                                        : 0;
+                                  break;
+                              case 10: // Uptime
+                                  cmp = (a->earliestStart < b->earliestStart) ? -1 : (a->earliestStart > b->earliestStart) ? 1
+                                                                                                                           : 0;
+                                  break;
+                              default:
+                                  break;
+                              }
+                              return asc ? (cmp < 0) : (cmp > 0);
+                          });
+                sortSpecs->SpecsDirty = false;
+            }
         }
 
         for (auto *rp : visibleRows)
@@ -2480,7 +2538,8 @@ namespace sm
             for (const auto &entry : logEntries_)
             {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                                   entry.time.time_since_epoch()).count();
+                                   entry.time.time_since_epoch())
+                                   .count();
                 int hours = (int)(elapsed / 3600) % 24;
                 int mins = (int)(elapsed / 60) % 60;
                 int secs = (int)elapsed % 60;

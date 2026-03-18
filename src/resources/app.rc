@@ -1,6 +1,7 @@
 // StreaMonitor Windows resource file — embeds the application icon
 // into the .exe so Windows Explorer, taskbar, and Alt-Tab show it.
 #include <winresrc.h>
+#include "resource.h"
 
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.

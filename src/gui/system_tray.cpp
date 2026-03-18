@@ -14,10 +14,8 @@
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 
-// Resource ID from app.rc  (IDI_ICON1 = first icon in resources)
-#ifndef IDI_ICON1
-#define IDI_ICON1 101
-#endif
+// Resource ID from shared resource.h (must match app.rc)
+#include "resources/resource.h"
 
 namespace sm
 {
