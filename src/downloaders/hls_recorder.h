@@ -75,6 +75,19 @@ namespace sm
     };
     using PauseResumeCallback = std::function<PauseResumeResult()>;
 
+    // ── Resolution change detection ────────────────────────────────
+    // Called when the input stream resolution changes (e.g. desktop→mobile).
+    // Receives new width, height, and whether it looks like portrait/mobile.
+    // Must return the new output file path for the recorder to switch to.
+    // If empty string is returned, the recorder continues in the same file.
+    struct ResolutionInfo
+    {
+        int width = 0;
+        int height = 0;
+        bool isMobile = false; // true if height > width (portrait)
+    };
+    using ResolutionChangeCallback = std::function<std::string(const ResolutionInfo &)>;
+
     // ── HLS Recorder (native FFmpeg API) ────────────────────────────
     class HLSRecorder
     {
@@ -111,6 +124,13 @@ namespace sm
         // the same file, or Stop to finalize and close.
         void setPauseResumeCallback(PauseResumeCallback cb) { pauseResumeCb_ = std::move(cb); }
 
+        // ── Resolution change callback ───────────────────────────────
+        // When the input stream's resolution changes (model switched to
+        // mobile, or desktop changed res), the recorder closes the current
+        // file and calls this to get the new output path. If not set or
+        // returns empty, recording continues into the same file.
+        void setResolutionChangeCallback(ResolutionChangeCallback cb) { resChangeCb_ = std::move(cb); }
+
         // ── Logger (optional — defaults to global spdlog) ───────────
         void setLogger(std::shared_ptr<spdlog::logger> lg) { log_ = std::move(lg); }
 
@@ -123,6 +143,7 @@ namespace sm
         std::shared_ptr<spdlog::logger> log_ = spdlog::default_logger();
         ProgressCallback progressCb_;
         PauseResumeCallback pauseResumeCb_;
+        ResolutionChangeCallback resChangeCb_;
         mutable std::mutex statsMutex_;
         RecordingStats stats_;
 
@@ -174,6 +195,10 @@ namespace sm
             // Live HLS streams may start mid-GOP — the HEVC decoder cannot decode
             // P/B frames without their reference (IDR) frame, causing POC errors.
             bool gotKeyframe = false;
+
+            // Output resolution tracking (for resolution-change detection)
+            int outputWidth = 0;
+            int outputHeight = 0;
 
             // Restart continuity (stream-copy mode): accumulated PTS offset
             // from previous restart iterations, in OUTPUT timebase units.

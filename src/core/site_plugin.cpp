@@ -1126,6 +1126,24 @@ namespace sm
             return {PauseAction::Wait, ""}; });
 
         cancelToken_.reset();
+
+        // Set resolution change callback — when the stream's resolution
+        // changes (e.g. model switches mobile↔desktop), close the current
+        // file and start a new one in the appropriate subfolder.
+        // This detects mobile at the FFmpeg level (portrait = height > width)
+        // instead of relying on the SC API which can be slow.
+        recorder.setResolutionChangeCallback([this, &config](const ResolutionInfo &ri) -> std::string
+                                             {
+            logger_->info("Resolution change detected: {}x{} (mobile={})",
+                          ri.width, ri.height, ri.isMobile);
+
+            // Update mobile state from the actual video resolution — faster
+            // and more reliable than waiting for the next SC API response.
+            setMobile(ri.isMobile);
+
+            // Generate a new output path (picks up the Mobile subfolder change)
+            return generateOutputPath(config); });
+
         auto result = recorder.record(videoUrl, outputPath, cancelToken_, config.userAgent);
 
         setRecording(false);

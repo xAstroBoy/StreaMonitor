@@ -1046,17 +1046,19 @@ namespace sm
         {
             if (ImGui::MenuItem("Start All"))
             {
-                std::thread([this]() {
+                std::thread([this]()
+                            {
                     manager_.startAll();
-                    manager_.startAllGroups();
-                }).detach();
+                    manager_.startAllGroups(); })
+                    .detach();
             }
             if (ImGui::MenuItem("Stop All"))
             {
-                std::thread([this]() {
+                std::thread([this]()
+                            {
                     manager_.stopAll();
-                    manager_.stopAllGroups();
-                }).detach();
+                    manager_.stopAllGroups(); })
+                    .detach();
             }
             if (ImGui::MenuItem("Resync All"))
             {
@@ -1127,18 +1129,20 @@ namespace sm
         ImGui::SameLine();
         if (ImGui::Button(" Start All "))
         {
-            std::thread([this]() {
+            std::thread([this]()
+                        {
                 manager_.startAll();
-                manager_.startAllGroups();
-            }).detach();
+                manager_.startAllGroups(); })
+                .detach();
         }
         ImGui::SameLine();
         if (ImGui::Button(" Stop All "))
         {
-            std::thread([this]() {
+            std::thread([this]()
+                        {
                 manager_.stopAll();
-                manager_.stopAllGroups();
-            }).detach();
+                manager_.stopAllGroups(); })
+                .detach();
         }
         ImGui::SameLine();
         ImGui::TextColored(COL_TEXT_DIM, "(auto-saved)");
@@ -1416,12 +1420,13 @@ namespace sm
                         for (int idx : grp.indices)
                             bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
-                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]() {
+                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
+                            {
                     for (auto &gn : groupNames)
                         manager_.startGroup(gn);
                     for (auto &[u, s] : bots)
-                        manager_.startBot(u, s);
-                }).detach();
+                        manager_.startBot(u, s); })
+                    .detach();
             }
             ImGui::PopStyleColor();
 
@@ -1442,12 +1447,13 @@ namespace sm
                         for (int idx : grp.indices)
                             bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
-                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]() {
+                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
+                            {
                     for (auto &gn : groupNames)
                         manager_.stopGroup(gn);
                     for (auto &[u, s] : bots)
-                        manager_.stopBot(u, s);
-                }).detach();
+                        manager_.stopBot(u, s); })
+                    .detach();
             }
             ImGui::PopStyleColor();
 
@@ -1830,36 +1836,39 @@ namespace sm
                     {
                         if (ImGui::MenuItem("Stop All"))
                         {
-                            std::vector<std::pair<std::string,std::string>> targets;
+                            std::vector<std::pair<std::string, std::string>> targets;
                             for (int idx : grp.indices)
                                 targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
-                            std::thread([this, targets = std::move(targets)]() {
+                            std::thread([this, targets = std::move(targets)]()
+                                        {
                                 for (auto& [u, s] : targets)
-                                    manager_.stopBot(u, s);
-                            }).detach();
+                                    manager_.stopBot(u, s); })
+                                .detach();
                         }
                         if (ImGui::MenuItem("Restart All"))
                         {
-                            std::vector<std::pair<std::string,std::string>> targets;
+                            std::vector<std::pair<std::string, std::string>> targets;
                             for (int idx : grp.indices)
                                 targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
-                            std::thread([this, targets = std::move(targets)]() {
+                            std::thread([this, targets = std::move(targets)]()
+                                        {
                                 for (auto& [u, s] : targets)
-                                    manager_.restartBot(u, s);
-                            }).detach();
+                                    manager_.restartBot(u, s); })
+                                .detach();
                         }
                     }
                     else
                     {
                         if (ImGui::MenuItem("Start All"))
                         {
-                            std::vector<std::pair<std::string,std::string>> targets;
+                            std::vector<std::pair<std::string, std::string>> targets;
                             for (int idx : grp.indices)
                                 targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
-                            std::thread([this, targets = std::move(targets)]() {
+                            std::thread([this, targets = std::move(targets)]()
+                                        {
                                 for (auto& [u, s] : targets)
-                                    manager_.startBot(u, s);
-                            }).detach();
+                                    manager_.startBot(u, s); })
+                                .detach();
                         }
                     }
                 }

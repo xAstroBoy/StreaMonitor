@@ -1276,6 +1276,15 @@ namespace sm
 
         state.headerWritten = true;
 
+        // Track output resolution for change detection
+        if (state.videoIdx >= 0 && state.inputCtx)
+        {
+            auto *par = state.inputCtx->streams[state.videoIdx]->codecpar;
+            state.outputWidth = par->width;
+            state.outputHeight = par->height;
+            log_->info("Output resolution: {}x{}", state.outputWidth, state.outputHeight);
+        }
+
         if (state.transcoding)
         {
             log_->info("Output opened (transcoding): {} → {}",
@@ -2000,12 +2009,16 @@ namespace sm
     {
         RecordingResult result;
 
+        // Local mutable copy of output path — resolution changes may
+        // require switching to a different file mid-recording.
+        std::string currentOutputPath = outputPath;
+
         // Ensure output directory exists
-        auto outputDir = std::filesystem::path(outputPath).parent_path();
+        auto outputDir = std::filesystem::path(currentOutputPath).parent_path();
         if (!outputDir.empty())
             std::filesystem::create_directories(outputDir);
 
-        log_->info("Starting HLS recording: {} → {}", hlsUrl, outputPath);
+        log_->info("Starting HLS recording: {} → {}", hlsUrl, currentOutputPath);
 
         // ── Start segment feeder ────────────────────────────────────
         // Instead of writing a playlist to a temp file (which races with
@@ -2088,443 +2101,585 @@ namespace sm
         // (EOF, stall max-out, probe failure, feeder error), the pause
         // handler below it gets a chance to keep the file open.
         bool sessionContinue = false;
-        do
+
+        // RAII guard: ensure closeAll() ALWAYS runs, even if an exception
+        // is thrown during recording. Without this, any uncaught exception
+        // (filesystem error, bad_alloc, etc.) would skip av_write_trailer()
+        // leaving the output file without duration metadata.
+        auto cleanupGuard = [&]()
         {
-            sessionContinue = false;
-
-            while (!cancel.isCancelled() && restartCount <= maxRestarts)
+            if (state.transcoding && state.videoEncCtx && state.outputCtx && state.headerWritten)
             {
-                StallDetector stall;
-                stall.reset();
+                uint64_t flushBytes = 0;
+                uint32_t flushPkts = 0;
+                flushEncoder(state, flushBytes, flushPkts);
+                result.bytesWritten += flushBytes;
+                result.packetsWritten += flushPkts;
+            }
+            closeAll(state);
+            if (feeder.running.load())
+                feeder.stop();
+        };
 
-                // ── Open input ──────────────────────────────────────────
-                AVIOContext *currentAVIO = nullptr;
-                if (useFeeder)
+        try
+        {
+
+            do
+            {
+                sessionContinue = false;
+
+                while (!cancel.isCancelled() && restartCount <= maxRestarts)
                 {
-                    // Create AVIO from feeder's ring buffer
-                    currentAVIO = feeder.createAVIO();
-                    if (!currentAVIO)
+                    StallDetector stall;
+                    stall.reset();
+
+                    // ── Open input ──────────────────────────────────────────
+                    AVIOContext *currentAVIO = nullptr;
+                    if (useFeeder)
                     {
-                        result.error = "Failed to create AVIO context";
+                        // Create AVIO from feeder's ring buffer
+                        currentAVIO = feeder.createAVIO();
+                        if (!currentAVIO)
+                        {
+                            result.error = "Failed to create AVIO context";
+                            restartCount++;
+                            log_->error("{}", result.error);
+                            break;
+                        }
+                    }
+
+                    if (!openInput(state, useFeeder ? "" : inputUrl,
+                                   userAgent, cookies, headers, currentAVIO))
+                    {
+                        result.error = "Failed to open HLS stream";
                         restartCount++;
-                        log_->error("{}", result.error);
+                        if (restartCount <= maxRestarts)
+                        {
+                            // Probe the original remote URL — if stream is dead, stop immediately
+                            // (Python logic: bot layer checks getStatus() and won't re-enter download
+                            //  if the model isn't PUBLIC. We mirror that here for the inner loop.)
+                            if (!hlsUrl.empty())
+                            {
+                                HttpClient probe;
+                                std::string ua = userAgent.empty() ? config_.userAgent : userAgent;
+                                probe.setDefaultUserAgent(ua);
+                                applyProxyConfig(probe, config_);
+                                auto probeResp = probe.get(hlsUrl, 8);
+                                if (!probeResp.ok() || probeResp.body.find("#EXTM3U") == std::string::npos)
+                                {
+                                    log_->info("Stream no longer available (HTTP {}), stopping",
+                                               probeResp.statusCode);
+                                    break;
+                                }
+                            }
+
+                            // Progressive backoff: 3s, 5s, 8s, 10s, 10s, ...
+                            int backoff = std::min(3 + restartCount * 2, 10);
+                            log_->warn("Restart {}/{}: {} (retry in {}s)",
+                                       restartCount, maxRestarts, result.error, backoff);
+                            std::this_thread::sleep_for(std::chrono::seconds(backoff));
+                            continue;
+                        }
                         break;
                     }
-                }
 
-                if (!openInput(state, useFeeder ? "" : inputUrl,
-                               userAgent, cookies, headers, currentAVIO))
-                {
-                    result.error = "Failed to open HLS stream";
-                    restartCount++;
-                    if (restartCount <= maxRestarts)
-                    {
-                        // Probe the original remote URL — if stream is dead, stop immediately
-                        // (Python logic: bot layer checks getStatus() and won't re-enter download
-                        //  if the model isn't PUBLIC. We mirror that here for the inner loop.)
-                        if (!hlsUrl.empty())
-                        {
-                            HttpClient probe;
-                            std::string ua = userAgent.empty() ? config_.userAgent : userAgent;
-                            probe.setDefaultUserAgent(ua);
-                            applyProxyConfig(probe, config_);
-                            auto probeResp = probe.get(hlsUrl, 8);
-                            if (!probeResp.ok() || probeResp.body.find("#EXTM3U") == std::string::npos)
-                            {
-                                log_->info("Stream no longer available (HTTP {}), stopping",
-                                           probeResp.statusCode);
-                                break;
-                            }
-                        }
-
-                        // Progressive backoff: 3s, 5s, 8s, 10s, 10s, ...
-                        int backoff = std::min(3 + restartCount * 2, 10);
-                        log_->warn("Restart {}/{}: {} (retry in {}s)",
-                                   restartCount, maxRestarts, result.error, backoff);
-                        std::this_thread::sleep_for(std::chrono::seconds(backoff));
-                        continue;
-                    }
-                    break;
-                }
-
-                // Set cancellation on interrupt callback
-                auto *interruptData = static_cast<InterruptData *>(
-                    state.inputCtx->interrupt_callback.opaque);
-                if (interruptData)
-                    interruptData->cancel = &cancel;
-
-                // ── Open output ONCE (on first successful input) ────────
-                if (!outputOpened)
-                {
-                    if (!openOutput(state, outputPath, vrConfig))
-                    {
-                        result.error = "Failed to open output file";
-                        closeAll(state);
-                        break; // Output failures are fatal
-                    }
-                    outputOpened = true;
-                }
-
-                // ── Packet reading loop ─────────────────────────────────
-                AVPacket *pkt = av_packet_alloc();
-                if (!pkt)
-                {
-                    result.error = "Failed to allocate packet";
-                    break;
-                }
-
-                uint64_t bytesWritten = 0;
-                uint32_t packetsWritten = 0;
-                uint32_t packetsDropped = 0;
-                auto recordStart = Clock::now();
-                bool needRestart = false;
-
-                {
-                    std::lock_guard lock(statsMutex_);
-                    stats_.recordingStarted = recordStart;
-                    stats_.currentFile = outputPath;
-                }
-
-                while (!cancel.isCancelled())
-                {
-                    // Set read timeout via interrupt callback
+                    // Set cancellation on interrupt callback
+                    auto *interruptData = static_cast<InterruptData *>(
+                        state.inputCtx->interrupt_callback.opaque);
                     if (interruptData)
-                    {
-                        interruptData->deadline = Clock::now() +
-                                                  std::chrono::seconds(config_.ffmpeg.rwTimeoutSec * 2);
-                        interruptData->hasDeadline = true;
-                    }
+                        interruptData->cancel = &cancel;
 
-                    int ret = av_read_frame(state.inputCtx, pkt);
-
-                    if (ret < 0)
+                    // ── Open output ONCE (on first successful input) ────────
+                    if (!outputOpened)
                     {
-                        if (ret == AVERROR_EOF)
+                        if (!openOutput(state, currentOutputPath, vrConfig))
                         {
-                            // With SegmentFeeder: EOF means the feeder's ring buffer
-                            // is empty and `finished` is true — stream really ended
-                            // (went offline / 404 / too many errors).
-                            // With direct HLS URL: normal HLS EOF behavior.
-                            if (useFeeder)
+                            result.error = "Failed to open output file";
+                            closeAll(state);
+                            break; // Output failures are fatal
+                        }
+                        outputOpened = true;
+                    }
+                    else if (state.videoIdx >= 0 && state.inputCtx)
+                    {
+                        // ── Resolution change detection ─────────────────────
+                        // After a restart or resume, the new input may have a
+                        // different resolution (model switched mobile↔desktop).
+                        // Rather than muxing mixed resolutions into one MKV
+                        // (which produces ugly variable-res files), close the
+                        // current output and start a new file.
+                        auto *par = state.inputCtx->streams[state.videoIdx]->codecpar;
+                        int newW = par->width;
+                        int newH = par->height;
+                        if (newW > 0 && newH > 0 &&
+                            (newW != state.outputWidth || newH != state.outputHeight))
+                        {
+                            log_->info("Resolution changed: {}x{} → {}x{}",
+                                       state.outputWidth, state.outputHeight, newW, newH);
+
+                            std::string newPath;
+                            if (resChangeCb_)
                             {
-                                // SegmentFeeder sets finished=true only when the
-                                // stream is truly gone. Trust it.
-                                if (feeder.hasError)
-                                    log_->warn("SegmentFeeder reported error — stream ended");
-                                else
-                                    log_->info("SegmentFeeder finished — stream ended");
+                                ResolutionInfo ri;
+                                ri.width = newW;
+                                ri.height = newH;
+                                ri.isMobile = (newH > newW); // portrait = mobile
+                                newPath = resChangeCb_(ri);
+                            }
+
+                            if (!newPath.empty())
+                            {
+                                // Finalize current output (writes trailer → valid file)
+                                if (state.transcoding && state.videoEncCtx &&
+                                    state.outputCtx && state.headerWritten)
+                                {
+                                    uint64_t flushBytes = 0;
+                                    uint32_t flushPkts = 0;
+                                    flushEncoder(state, flushBytes, flushPkts);
+                                    result.bytesWritten += flushBytes;
+                                    result.packetsWritten += flushPkts;
+                                }
+
+                                // Close output + encoder (keep input open)
+                                if (state.outputCtx)
+                                {
+                                    if (state.headerWritten)
+                                    {
+                                        int wr = av_write_trailer(state.outputCtx);
+                                        if (wr < 0)
+                                            log_->warn("Error writing trailer on res change: {}", ffError(wr));
+                                    }
+                                    if (!(state.outputCtx->oformat->flags & AVFMT_NOFILE) && state.outputCtx->pb)
+                                        avio_closep(&state.outputCtx->pb);
+                                    avformat_free_context(state.outputCtx);
+                                    state.outputCtx = nullptr;
+                                }
+                                if (state.videoEncCtx)
+                                {
+                                    avcodec_free_context(&state.videoEncCtx);
+                                }
+                                if (state.videoDecCtx)
+                                {
+                                    avcodec_free_context(&state.videoDecCtx);
+                                }
+                                if (state.swsCtx)
+                                {
+                                    sws_freeContext(state.swsCtx);
+                                    state.swsCtx = nullptr;
+                                }
+                                if (state.decFrame)
+                                    av_frame_free(&state.decFrame);
+                                if (state.encFrame)
+                                    av_frame_free(&state.encFrame);
+
+                                state.headerWritten = false;
+                                state.transcoding = false;
+                                state.outVideoIdx = -1;
+                                state.outAudioIdx = -1;
+
+                                // Reset PTS offsets for new file
+                                state.lastVideoOutPts = 0;
+                                state.lastAudioOutPts = 0;
+                                state.videoRestartOffset = 0;
+                                state.audioRestartOffset = 0;
+                                state.videoTsOffset = 0;
+                                state.audioTsOffset = 0;
+                                state.videoOffsetCaptured = false;
+                                state.audioOffsetCaptured = false;
+                                state.gotKeyframe = false;
+
+                                log_->info("Switching output file: {}", newPath);
+                                currentOutputPath = newPath;
+
+                                // Open fresh output with the new resolution
+                                if (!openOutput(state, currentOutputPath, vrConfig))
+                                {
+                                    result.error = "Failed to open new output after res change";
+                                    break;
+                                }
                             }
                             else
                             {
-                                // Direct HLS URL: check if stream is still alive
-                                if (!cancel.isCancelled())
-                                {
-                                    HttpClient probe;
-                                    std::string ua = userAgent.empty()
-                                                         ? config_.userAgent
-                                                         : userAgent;
-                                    probe.setDefaultUserAgent(ua);
-                                    applyProxyConfig(probe, config_);
-                                    auto probeResp = probe.get(hlsUrl, 8);
-                                    if (probeResp.ok() && !probeResp.body.empty() &&
-                                        probeResp.body.find("#EXTM3U") != std::string::npos)
-                                    {
-                                        needRestart = true;
-                                        break;
-                                    }
-                                }
-                                log_->info("Stream appears to have ended");
+                                // No callback or empty path — update tracking, continue same file
+                                log_->info("Resolution changed but no callback — continuing same file");
+                                state.outputWidth = newW;
+                                state.outputHeight = newH;
                             }
-                            break;
                         }
-                        if (ret == AVERROR_EXIT)
-                        {
-                            log_->info("Recording cancelled");
-                            break;
-                        }
-                        if (cancel.isCancelled())
-                            break;
+                    }
 
-                        // Read error — for SegmentFeeder this shouldn't happen
-                        // (AVIO returns clean data). For direct URL, probe stream.
-                        log_->warn("Read error: {} (restart {}/{})",
-                                   ffError(ret), restartCount, maxRestarts);
-                        if (!useFeeder)
+                    // ── Packet reading loop ─────────────────────────────────
+                    AVPacket *pkt = av_packet_alloc();
+                    if (!pkt)
+                    {
+                        result.error = "Failed to allocate packet";
+                        break;
+                    }
+
+                    uint64_t bytesWritten = 0;
+                    uint32_t packetsWritten = 0;
+                    uint32_t packetsDropped = 0;
+                    auto recordStart = Clock::now();
+                    bool needRestart = false;
+
+                    {
+                        std::lock_guard lock(statsMutex_);
+                        stats_.recordingStarted = recordStart;
+                        stats_.currentFile = currentOutputPath;
+                    }
+
+                    while (!cancel.isCancelled())
+                    {
+                        // Set read timeout via interrupt callback
+                        if (interruptData)
                         {
-                            HttpClient probe;
-                            std::string ua = userAgent.empty() ? config_.userAgent : userAgent;
-                            probe.setDefaultUserAgent(ua);
-                            applyProxyConfig(probe, config_);
-                            auto probeResp = probe.get(hlsUrl, 8);
-                            if (probeResp.ok() && !probeResp.body.empty() &&
-                                probeResp.body.find("#EXTM3U") != std::string::npos)
+                            interruptData->deadline = Clock::now() +
+                                                      std::chrono::seconds(config_.ffmpeg.rwTimeoutSec * 2);
+                            interruptData->hasDeadline = true;
+                        }
+
+                        int ret = av_read_frame(state.inputCtx, pkt);
+
+                        if (ret < 0)
+                        {
+                            if (ret == AVERROR_EOF)
                             {
+                                // With SegmentFeeder: EOF means the feeder's ring buffer
+                                // is empty and `finished` is true — stream really ended
+                                // (went offline / 404 / too many errors).
+                                // With direct HLS URL: normal HLS EOF behavior.
+                                if (useFeeder)
+                                {
+                                    // SegmentFeeder sets finished=true only when the
+                                    // stream is truly gone. Trust it.
+                                    if (feeder.hasError)
+                                        log_->warn("SegmentFeeder reported error — stream ended");
+                                    else
+                                        log_->info("SegmentFeeder finished — stream ended");
+                                }
+                                else
+                                {
+                                    // Direct HLS URL: check if stream is still alive
+                                    if (!cancel.isCancelled())
+                                    {
+                                        HttpClient probe;
+                                        std::string ua = userAgent.empty()
+                                                             ? config_.userAgent
+                                                             : userAgent;
+                                        probe.setDefaultUserAgent(ua);
+                                        applyProxyConfig(probe, config_);
+                                        auto probeResp = probe.get(hlsUrl, 8);
+                                        if (probeResp.ok() && !probeResp.body.empty() &&
+                                            probeResp.body.find("#EXTM3U") != std::string::npos)
+                                        {
+                                            needRestart = true;
+                                            break;
+                                        }
+                                    }
+                                    log_->info("Stream appears to have ended");
+                                }
+                                break;
+                            }
+                            if (ret == AVERROR_EXIT)
+                            {
+                                log_->info("Recording cancelled");
+                                break;
+                            }
+                            if (cancel.isCancelled())
+                                break;
+
+                            // Read error — for SegmentFeeder this shouldn't happen
+                            // (AVIO returns clean data). For direct URL, probe stream.
+                            log_->warn("Read error: {} (restart {}/{})",
+                                       ffError(ret), restartCount, maxRestarts);
+                            if (!useFeeder)
+                            {
+                                HttpClient probe;
+                                std::string ua = userAgent.empty() ? config_.userAgent : userAgent;
+                                probe.setDefaultUserAgent(ua);
+                                applyProxyConfig(probe, config_);
+                                auto probeResp = probe.get(hlsUrl, 8);
+                                if (probeResp.ok() && !probeResp.body.empty() &&
+                                    probeResp.body.find("#EXTM3U") != std::string::npos)
+                                {
+                                    needRestart = true;
+                                    break;
+                                }
+                            }
+                            log_->info("Stream appears to have ended");
+                            break;
+                        }
+
+                        // ── Process packet (transcoding or stream copy) ─────
+                        // Save PTS BEFORE processing — av_interleaved_write_frame
+                        // unrefs the packet, zeroing pkt->pts/size/etc.
+                        int64_t savedPts = pkt->pts;
+                        bool packetOk = false;
+                        if (state.transcoding)
+                        {
+                            packetOk = transcodePacket(state, pkt, bytesWritten, packetsWritten, packetsDropped);
+                        }
+                        else
+                        {
+                            packetOk = processPacket(state, pkt, bytesWritten, packetsWritten, packetsDropped);
+                        }
+
+                        if (!packetOk)
+                        {
+                            log_->error("Fatal packet processing error");
+                            break;
+                        }
+
+                        // ── Stall detection ─────────────────────────────────
+                        stall.onPacket(savedPts, bytesWritten);
+
+                        // Only check stalls after startup grace period
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                           Clock::now() - recordStart)
+                                           .count();
+                        if (elapsed > config_.ffmpeg.startupGraceSec)
+                        {
+                            if (stall.checkStall(config_.ffmpeg))
+                            {
+                                log_->warn("Stall detected! No progress for {}s",
+                                           config_.ffmpeg.stallSameTimeSec);
+                                result.stallsDetected++;
                                 needRestart = true;
                                 break;
                             }
                         }
-                        log_->info("Stream appears to have ended");
-                        break;
-                    }
 
-                    // ── Process packet (transcoding or stream copy) ─────
-                    // Save PTS BEFORE processing — av_interleaved_write_frame
-                    // unrefs the packet, zeroing pkt->pts/size/etc.
-                    int64_t savedPts = pkt->pts;
-                    bool packetOk = false;
-                    if (state.transcoding)
-                    {
-                        packetOk = transcodePacket(state, pkt, bytesWritten, packetsWritten, packetsDropped);
-                    }
-                    else
-                    {
-                        packetOk = processPacket(state, pkt, bytesWritten, packetsWritten, packetsDropped);
-                    }
-
-                    if (!packetOk)
-                    {
-                        log_->error("Fatal packet processing error");
-                        break;
-                    }
-
-                    // ── Stall detection ─────────────────────────────────
-                    stall.onPacket(savedPts, bytesWritten);
-
-                    // Only check stalls after startup grace period
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                                       Clock::now() - recordStart)
-                                       .count();
-                    if (elapsed > config_.ffmpeg.startupGraceSec)
-                    {
-                        if (stall.checkStall(config_.ffmpeg))
+                        // ── Progress reporting ──────────────────────────────
+                        if (progressCb_ && packetsWritten % 100 == 0)
                         {
-                            log_->warn("Stall detected! No progress for {}s",
-                                       config_.ffmpeg.stallSameTimeSec);
-                            result.stallsDetected++;
-                            needRestart = true;
-                            break;
-                        }
-                    }
-
-                    // ── Progress reporting ──────────────────────────────
-                    if (progressCb_ && packetsWritten % 100 == 0)
-                    {
-                        double dur = static_cast<double>(elapsed);
-                        RecordingProgress prog;
-                        prog.bytesWritten = bytesWritten;
-                        prog.packetsWritten = packetsWritten;
-                        prog.durationSec = dur;
-                        prog.speed = dur > 0 ? (bytesWritten / 1024.0 / dur) : 0;
-                        prog.isStalled = stall.isStalled;
-                        progressCb_(prog);
-                    }
-
-                    // Update stats
-                    {
-                        std::lock_guard lock(statsMutex_);
-                        stats_.bytesWritten = result.bytesWritten + bytesWritten;
-                        stats_.segmentsRecorded = packetsWritten;
-                    }
-
-                    av_packet_unref(pkt);
-                }
-
-                av_packet_free(&pkt);
-
-                // Accumulate results
-                result.bytesWritten += bytesWritten;
-                result.packetsWritten += packetsWritten;
-                result.packetsDropped += packetsDropped;
-
-                auto dur = std::chrono::duration_cast<std::chrono::seconds>(
-                               Clock::now() - recordStart)
-                               .count();
-                result.durationSec += static_cast<double>(dur);
-
-                // ── Handle restart ──────────────────────────────────────
-                if (needRestart && !cancel.isCancelled())
-                {
-                    restartCount++;
-                    result.restartsPerformed++;
-
-                    if (restartCount <= maxRestarts)
-                    {
-                        // Flush decoder to clear stale reference frames
-                        if (state.transcoding && state.videoDecCtx)
-                            avcodec_flush_buffers(state.videoDecCtx);
-
-                        // For stream-copy: save restart offsets
-                        if (!state.transcoding)
-                        {
-                            state.videoRestartOffset = state.lastVideoOutPts + 1;
-                            state.audioRestartOffset = state.lastAudioOutPts + 1;
+                            double dur = static_cast<double>(elapsed);
+                            RecordingProgress prog;
+                            prog.bytesWritten = bytesWritten;
+                            prog.packetsWritten = packetsWritten;
+                            prog.durationSec = dur;
+                            prog.speed = dur > 0 ? (bytesWritten / 1024.0 / dur) : 0;
+                            prog.isStalled = stall.isStalled;
+                            progressCb_(prog);
                         }
 
-                        // Reset per-input-session state
-                        state.videoTsOffset = 0;
-                        state.audioTsOffset = 0;
-                        state.videoOffsetCaptured = false;
-                        state.audioOffsetCaptured = false;
-                        state.gotKeyframe = false;
-
-                        // Close ONLY the input (keep output + encoder alive)
-                        closeInput(state);
-
-                        // For SegmentFeeder: must stop old feeder and start fresh
-                        // (new init segment + fresh segments for FFmpeg to probe)
-                        if (useFeeder)
+                        // Update stats
                         {
-                            feeder.stop();
+                            std::lock_guard lock(statsMutex_);
+                            stats_.bytesWritten = result.bytesWritten + bytesWritten;
+                            stats_.segmentsRecorded = packetsWritten;
+                        }
 
-                            // Brief wait before re-creating feeder
-                            for (int i = 0; i < 20 && !cancel.isCancelled(); i++)
-                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        // ── Periodic flush for crash safety ─────────────────
+                        // Flush the output to disk every 500 packets (~10-20s of
+                        // video). If the process is killed (Task Manager, power
+                        // loss), all flushed data survives. The MKV will lack a
+                        // trailer but is recoverable via remux (ffmpeg -c copy).
+                        if (packetsWritten % 500 == 0 && state.outputCtx && state.outputCtx->pb)
+                        {
+                            avio_flush(state.outputCtx->pb);
+                        }
 
-                            if (!feeder.start(hlsUrl, feederUa, cancel, feederDecoder))
+                        av_packet_unref(pkt);
+                    }
+
+                    av_packet_free(&pkt);
+
+                    // Accumulate results
+                    result.bytesWritten += bytesWritten;
+                    result.packetsWritten += packetsWritten;
+                    result.packetsDropped += packetsDropped;
+
+                    auto dur = std::chrono::duration_cast<std::chrono::seconds>(
+                                   Clock::now() - recordStart)
+                                   .count();
+                    result.durationSec += static_cast<double>(dur);
+
+                    // ── Handle restart ──────────────────────────────────────
+                    if (needRestart && !cancel.isCancelled())
+                    {
+                        restartCount++;
+                        result.restartsPerformed++;
+
+                        if (restartCount <= maxRestarts)
+                        {
+                            // Flush decoder to clear stale reference frames
+                            if (state.transcoding && state.videoDecCtx)
+                                avcodec_flush_buffers(state.videoDecCtx);
+
+                            // For stream-copy: save restart offsets
+                            if (!state.transcoding)
                             {
-                                log_->error("SegmentFeeder restart failed");
-                                break;
+                                state.videoRestartOffset = state.lastVideoOutPts + 1;
+                                state.audioRestartOffset = state.lastAudioOutPts + 1;
                             }
-                            log_->debug("SegmentFeeder restarted for attempt {}/{}",
-                                        restartCount, maxRestarts);
-                        }
 
-                        // Delay before restart (stall cooldown)
-                        if (restartCount >= config_.ffmpeg.cooldownAfterStalls)
-                        {
-                            log_->info("Cooldown for {}s after {} stalls",
-                                       config_.ffmpeg.cooldownSleepSec, restartCount);
-                            for (int i = 0; i < config_.ffmpeg.cooldownSleepSec && !cancel.isCancelled(); i++)
-                                std::this_thread::sleep_for(1s);
-                        }
-                        else
-                        {
-                            std::this_thread::sleep_for(std::chrono::seconds(2));
-                        }
-                        continue;
-                    }
-                    log_->error("Max restarts ({}/{}) exceeded",
-                                restartCount, maxRestarts);
-                }
+                            // Reset per-input-session state
+                            state.videoTsOffset = 0;
+                            state.audioTsOffset = 0;
+                            state.videoOffsetCaptured = false;
+                            state.audioOffsetCaptured = false;
+                            state.gotKeyframe = false;
 
-                break;
-            } // end recording while loop
+                            // Close ONLY the input (keep output + encoder alive)
+                            closeInput(state);
 
-            // ── Pause/resume handler (catches ALL recording exits) ──────
-            // When model goes private/offline, keep the output file open and
-            // poll for the model to return. This runs for ANY recording exit
-            // (natural EOF, stall max-out, probe failure, feeder error).
-            // Only fatal errors (output open failure, alloc failure) or
-            // explicit cancellation skip this block.
-            if (!cancel.isCancelled() && pauseResumeCb_ && outputOpened)
-            {
-                log_->info("Stream ended — pausing (output file stays open)");
-
-                // Save restart offsets for PTS continuity when resumed
-                if (!state.transcoding)
-                {
-                    state.videoRestartOffset = state.lastVideoOutPts + 1;
-                    state.audioRestartOffset = state.lastAudioOutPts + 1;
-                }
-                if (state.transcoding && state.videoDecCtx)
-                    avcodec_flush_buffers(state.videoDecCtx);
-
-                state.videoTsOffset = 0;
-                state.audioTsOffset = 0;
-                state.videoOffsetCaptured = false;
-                state.audioOffsetCaptured = false;
-                state.gotKeyframe = false;
-
-                // Close input + feeder but keep output open
-                closeInput(state);
-                if (useFeeder && feeder.running.load())
-                    feeder.stop();
-
-                // Poll callback every ~5 seconds until resume or stop
-                while (!cancel.isCancelled())
-                {
-                    for (int i = 0; i < 5 && !cancel.isCancelled(); i++)
-                        std::this_thread::sleep_for(std::chrono::seconds(1));
-                    if (cancel.isCancelled())
-                        break;
-
-                    auto pr = pauseResumeCb_();
-                    if (pr.action == PauseAction::Resume && !pr.newUrl.empty())
-                    {
-                        inputUrl = pr.newUrl;
-
-                        // Rebuild mouflon decoder for new URL if needed
-                        if (inputUrl.find("doppiocdn") != std::string::npos)
-                        {
-                            auto parseQ = [](const std::string &u, const std::string &p) -> std::string
+                            // For SegmentFeeder: must stop old feeder and start fresh
+                            // (new init segment + fresh segments for FFmpeg to probe)
+                            if (useFeeder)
                             {
-                                auto k = p + "=";
-                                auto pos = u.find(k);
-                                if (pos == std::string::npos)
-                                    return "";
-                                auto s = pos + k.size();
-                                auto e = u.find('&', s);
-                                return (e == std::string::npos) ? u.substr(s) : u.substr(s, e - s);
-                            };
-                            MouflonKeys::MouflonInfo fb;
-                            fb.psch = parseQ(inputUrl, "psch");
-                            fb.pkey = parseQ(inputUrl, "pkey");
-                            fb.pdkey = parseQ(inputUrl, "pdkey");
-                            feederDecoder = [fb](const std::string &content) -> std::string
-                            {
-                                return MouflonKeys::instance().decodePlaylists(content, fb);
-                            };
-                        }
+                                feeder.stop();
 
-                        // Restart feeder with new URL
-                        if (useFeeder)
-                        {
-                            if (feeder.start(inputUrl, feederUa, cancel, feederDecoder))
-                            {
-                                log_->info("Recording resumed with new stream");
-                                restartCount = 0;
-                                sessionContinue = true;
-                                break;
+                                // Brief wait before re-creating feeder
+                                for (int i = 0; i < 20 && !cancel.isCancelled(); i++)
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+                                if (!feeder.start(hlsUrl, feederUa, cancel, feederDecoder))
+                                {
+                                    log_->error("SegmentFeeder restart failed");
+                                    break;
+                                }
+                                log_->debug("SegmentFeeder restarted for attempt {}/{}",
+                                            restartCount, maxRestarts);
                             }
-                            log_->warn("Feeder restart failed, will retry...");
+
+                            // Delay before restart (stall cooldown)
+                            if (restartCount >= config_.ffmpeg.cooldownAfterStalls)
+                            {
+                                log_->info("Cooldown for {}s after {} stalls",
+                                           config_.ffmpeg.cooldownSleepSec, restartCount);
+                                for (int i = 0; i < config_.ffmpeg.cooldownSleepSec && !cancel.isCancelled(); i++)
+                                    std::this_thread::sleep_for(1s);
+                            }
+                            else
+                            {
+                                std::this_thread::sleep_for(std::chrono::seconds(2));
+                            }
                             continue;
                         }
-                        log_->info("Recording resumed (direct URL)");
-                        restartCount = 0;
-                        sessionContinue = true;
-                        break;
+                        log_->error("Max restarts ({}/{}) exceeded",
+                                    restartCount, maxRestarts);
                     }
-                    else if (pr.action == PauseAction::Stop)
+
+                    break;
+                } // end recording while loop
+
+                // ── Pause/resume handler (catches ALL recording exits) ──────
+                // When model goes private/offline, keep the output file open and
+                // poll for the model to return. This runs for ANY recording exit
+                // (natural EOF, stall max-out, probe failure, feeder error).
+                // Only fatal errors (output open failure, alloc failure) or
+                // explicit cancellation skip this block.
+                if (!cancel.isCancelled() && pauseResumeCb_ && outputOpened)
+                {
+                    log_->info("Stream ended — pausing (output file stays open)");
+
+                    // Save restart offsets for PTS continuity when resumed
+                    if (!state.transcoding)
                     {
-                        log_->info("Stopping paused recording");
-                        break;
+                        state.videoRestartOffset = state.lastVideoOutPts + 1;
+                        state.audioRestartOffset = state.lastAudioOutPts + 1;
                     }
-                    // PauseAction::Wait → keep polling
+                    if (state.transcoding && state.videoDecCtx)
+                        avcodec_flush_buffers(state.videoDecCtx);
+
+                    state.videoTsOffset = 0;
+                    state.audioTsOffset = 0;
+                    state.videoOffsetCaptured = false;
+                    state.audioOffsetCaptured = false;
+                    state.gotKeyframe = false;
+
+                    // Close input + feeder but keep output open
+                    closeInput(state);
+                    if (useFeeder && feeder.running.load())
+                        feeder.stop();
+
+                    // Poll callback every ~5 seconds until resume or stop
+                    while (!cancel.isCancelled())
+                    {
+                        for (int i = 0; i < 5 && !cancel.isCancelled(); i++)
+                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                        if (cancel.isCancelled())
+                            break;
+
+                        auto pr = pauseResumeCb_();
+                        if (pr.action == PauseAction::Resume && !pr.newUrl.empty())
+                        {
+                            inputUrl = pr.newUrl;
+
+                            // Rebuild mouflon decoder for new URL if needed
+                            if (inputUrl.find("doppiocdn") != std::string::npos)
+                            {
+                                auto parseQ = [](const std::string &u, const std::string &p) -> std::string
+                                {
+                                    auto k = p + "=";
+                                    auto pos = u.find(k);
+                                    if (pos == std::string::npos)
+                                        return "";
+                                    auto s = pos + k.size();
+                                    auto e = u.find('&', s);
+                                    return (e == std::string::npos) ? u.substr(s) : u.substr(s, e - s);
+                                };
+                                MouflonKeys::MouflonInfo fb;
+                                fb.psch = parseQ(inputUrl, "psch");
+                                fb.pkey = parseQ(inputUrl, "pkey");
+                                fb.pdkey = parseQ(inputUrl, "pdkey");
+                                feederDecoder = [fb](const std::string &content) -> std::string
+                                {
+                                    return MouflonKeys::instance().decodePlaylists(content, fb);
+                                };
+                            }
+
+                            // Restart feeder with new URL
+                            if (useFeeder)
+                            {
+                                if (feeder.start(inputUrl, feederUa, cancel, feederDecoder))
+                                {
+                                    log_->info("Recording resumed with new stream");
+                                    restartCount = 0;
+                                    sessionContinue = true;
+                                    break;
+                                }
+                                log_->warn("Feeder restart failed, will retry...");
+                                continue;
+                            }
+                            log_->info("Recording resumed (direct URL)");
+                            restartCount = 0;
+                            sessionContinue = true;
+                            break;
+                        }
+                        else if (pr.action == PauseAction::Stop)
+                        {
+                            log_->info("Stopping paused recording");
+                            break;
+                        }
+                        // PauseAction::Wait → keep polling
+                    }
                 }
-            }
 
-        } while (sessionContinue);
+            } while (sessionContinue);
 
-        // ── Final cleanup: flush encoder + close everything ─────────
-        if (state.transcoding && state.videoEncCtx && state.outputCtx && state.headerWritten)
+            // Normal exit: run cleanup
+            cleanupGuard();
+
+        } // end try
+        catch (const std::exception &ex)
         {
-            uint64_t flushBytes = 0;
-            uint32_t flushPkts = 0;
-            flushEncoder(state, flushBytes, flushPkts);
-            result.bytesWritten += flushBytes;
-            result.packetsWritten += flushPkts;
+            log_->error("Exception during recording: {} — flushing output", ex.what());
+            cleanupGuard();
+            result.error = std::string("Exception: ") + ex.what();
         }
-        closeAll(state);
-
-        // ── Stop segment feeder ─────────────────────────────────────
-        if (feeder.running.load())
-            feeder.stop();
+        catch (...)
+        {
+            log_->error("Unknown exception during recording — flushing output");
+            cleanupGuard();
+            result.error = "Unknown exception during recording";
+        }
 
         // ── Clean up zero-byte output files ─────────────────────────
-        if (std::filesystem::exists(outputPath) &&
-            std::filesystem::file_size(outputPath) == 0)
+        if (std::filesystem::exists(currentOutputPath) &&
+            std::filesystem::file_size(currentOutputPath) == 0)
         {
-            std::filesystem::remove(outputPath);
+            std::filesystem::remove(currentOutputPath);
         }
 
         result.success = result.bytesWritten > 0;

@@ -375,46 +375,57 @@ namespace sm
         if (slug.empty())
             slug = pairing.site;
 
-        auto dir = config.downloadsDir /
-                   (pairing.username + " [" + slug + "]");
-
-        // Mobile subfolder
-        if (pairing.plugin->isMobile())
-            dir /= "Mobile";
-
-        std::filesystem::create_directories(dir);
-
-        const auto &fmt = getFormatInfo(config.container);
-        int fileNum = 1;
-
-        // Find next available number
-        std::error_code ec;
-        for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+        // Helper: generate next output path for a given base dir
+        auto generateNextPath = [&](bool mobile) -> std::string
         {
-            if (!entry.is_regular_file())
-                continue;
-            auto name = entry.path().stem().string();
-            try
-            {
-                int n = std::stoi(name);
-                if (n >= fileNum)
-                    fileNum = n + 1;
-            }
-            catch (...)
-            {
-            }
-        }
+            auto baseDir = config.downloadsDir /
+                           (pairing.username + " [" + slug + "]");
+            if (mobile)
+                baseDir /= "Mobile";
+            std::filesystem::create_directories(baseDir);
 
-        std::string outputPath = (dir / (std::to_string(fileNum) + fmt.extension)).string();
+            const auto &fmt2 = getFormatInfo(config.container);
+            int num = 1;
+            std::error_code ec2;
+            for (const auto &entry : std::filesystem::directory_iterator(baseDir, ec2))
+            {
+                if (!entry.is_regular_file())
+                    continue;
+                auto name = entry.path().stem().string();
+                try
+                {
+                    int n = std::stoi(name);
+                    if (n >= num)
+                        num = n + 1;
+                }
+                catch (...)
+                {
+                }
+            }
+            return (baseDir / (std::to_string(num) + fmt2.extension)).string();
+        };
+
+        std::string outputPath = generateNextPath(pairing.plugin->isMobile());
         spdlog::info("[Group:{}] Recording {} [{}] to: {}",
                      groupName_, pairing.username, pairing.site, outputPath);
 
         // Record using HLS recorder
         HLSRecorder recorder(config);
+
+        // Resolution change callback — when stream resolution changes
+        // (model switched mobile↔desktop), close current file and start
+        // a new one in the appropriate folder.
+        recorder.setResolutionChangeCallback([&](const ResolutionInfo &ri) -> std::string
+                                             {
+            spdlog::info("[Group:{}] Resolution change: {}x{} (mobile={})",
+                         groupName_, ri.width, ri.height, ri.isMobile);
+            return generateNextPath(ri.isMobile); });
+
         cancelToken_.reset();
         auto result = recorder.record(videoUrl, outputPath, cancelToken_, config.userAgent);
 
         // Post-recording validation
+        std::error_code ec;
         if (std::filesystem::exists(outputPath, ec))
         {
             auto fileSize = std::filesystem::file_size(outputPath, ec);
