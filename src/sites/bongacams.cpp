@@ -54,9 +54,15 @@ namespace sm
             auto pd = json.value("performerData", nlohmann::json::object());
             std::string showType = pd.value("showType", "");
 
-            // Check if performer username changed (redirect)
+            // Check if performer username changed (redirect / case fix)
+            // BongaCams CDN paths are case-sensitive — we must use the
+            // canonical username from the API, not what the user typed.
             std::string perfUsername = pd.value("username", "");
-            // We just log it — C++ handles this differently
+            if (!perfUsername.empty() && perfUsername != username())
+            {
+                logger_->info("Username redirect: {} → {}", username(), perfUsername);
+                setUsername(perfUsername);
+            }
 
             if (showType == "private" || showType == "group")
                 return Status::Private;

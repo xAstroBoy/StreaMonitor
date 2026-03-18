@@ -179,7 +179,7 @@ namespace sm
         int detailPreviewW_ = 0;
         int detailPreviewH_ = 0;
         std::string detailPreviewKey_; // "username|siteName" of current texture
-        TimePoint lastPreviewRequest_;  // rate-limit requests
+        TimePoint lastPreviewRequest_; // rate-limit requests
 
         // DPI scale factor (detected from monitor)
         float dpiScale_ = 1.0f;
