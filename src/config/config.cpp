@@ -191,6 +191,17 @@ namespace sm
         }
     }
 
+    void ModelConfigStore::updateRunning(const std::string &username, const std::string &siteslug,
+                                         bool running)
+    {
+        std::lock_guard lock(mutex_);
+        for (auto &m : models_)
+        {
+            if (m.username == username && (siteslug.empty() || m.site == siteslug))
+                m.running = running;
+        }
+    }
+
     std::vector<ModelConfig> ModelConfigStore::getAll() const
     {
         std::lock_guard lock(mutex_);

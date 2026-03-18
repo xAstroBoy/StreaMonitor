@@ -49,8 +49,9 @@ namespace sm
 
         // ── Initialization ──────────────────────────────────────────
         void loadFromConfig(); // creates bots from config store
-        void startAll();       // start all bots marked as running
-        void stopAll();        // stop all bots
+        void startAll();       // start bots marked as running (for launch)
+        void startAllBots();   // start ALL bots and persist running=true
+        void stopAll();        // stop all bots and persist running=false
         void shutdown();       // graceful shutdown, cancel all recordings
 
         // ── Bot management ──────────────────────────────────────────

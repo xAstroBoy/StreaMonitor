@@ -112,6 +112,8 @@ namespace sm
         bool remove(const std::string &username, const std::string &siteslug = "");
         void updateStatus(const std::string &username, const std::string &siteslug,
                           Status status, bool recording);
+        void updateRunning(const std::string &username, const std::string &siteslug,
+                           bool running);
         void setCrossRegisterGroup(const std::string &username, const std::string &site,
                                    const std::string &groupName);
 

@@ -925,7 +925,7 @@ namespace sm
                 else if (idx == startIdx)
                 {
                     std::thread([this]() {
-                        manager_.startAll();
+                        manager_.startAllBots();
                         manager_.startAllGroups();
                     }).detach();
                 }
@@ -1196,7 +1196,7 @@ namespace sm
             {
                 std::thread([this]()
                             {
-                    manager_.startAll();
+                    manager_.startAllBots();
                     manager_.startAllGroups(); })
                     .detach();
             }
@@ -1279,7 +1279,7 @@ namespace sm
         {
             std::thread([this]()
                         {
-                manager_.startAll();
+                manager_.startAllBots();
                 manager_.startAllGroups(); })
                 .detach();
         }

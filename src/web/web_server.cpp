@@ -570,7 +570,7 @@ namespace sm
         server_->Post("/api/start-all", [this](const httplib::Request &req, httplib::Response &res)
                       {
             if (!checkAuth(&req, &res)) return;
-            manager_.startAll();
+            manager_.startAllBots();
             manager_.startAllGroups();
             jsonResponse(res, {{"success", true}, {"message", "All bots and groups started"}}); });
 

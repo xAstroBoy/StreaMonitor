@@ -475,7 +475,7 @@ int cliMain(int argc, char **argv)
         {
             if (tokens.size() < 2 || tokens[1] == "*")
             {
-                manager.startAll();
+                manager.startAllBots();
                 std::cout << ansi::green << "Started all bots\n"
                           << ansi::reset;
             }

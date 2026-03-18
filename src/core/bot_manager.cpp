@@ -104,6 +104,30 @@ namespace sm
         spdlog::info("Started {} bots", started);
     }
 
+    void BotManager::startAllBots()
+    {
+        std::lock_guard lock(mutex_);
+        int started = 0;
+        for (auto &entry : bots_)
+        {
+            if (!entry.plugin->isRunning())
+            {
+                entry.plugin->setStateCallback([this](const BotState &state)
+                                               { emitEvent(ManagerEvent::BotStatusChanged, state.username + "_" + state.siteSlug); });
+                entry.plugin->start(config_);
+                started++;
+            }
+        }
+        // Persist running=true for all bots
+        for (const auto &entry : bots_)
+        {
+            auto state = entry.plugin->getState();
+            configStore_.updateRunning(state.username, state.siteSlug, true);
+        }
+        configStore_.save();
+        spdlog::info("Started all {} bots", started);
+    }
+
     void BotManager::stopAll()
     {
         std::lock_guard lock(mutex_);
@@ -112,6 +136,13 @@ namespace sm
             if (entry.plugin->isRunning())
                 entry.plugin->stop();
         }
+        // Persist running=false for all bots
+        for (const auto &entry : bots_)
+        {
+            auto state = entry.plugin->getState();
+            configStore_.updateRunning(state.username, state.siteSlug, false);
+        }
+        configStore_.save();
         spdlog::info("Stopped all bots");
     }
 
@@ -222,8 +253,10 @@ namespace sm
                               { emitEvent(ManagerEvent::BotStatusChanged, state.username + "_" + state.siteSlug); });
         bot->start(config_);
 
-        // Auto-save running state
-        configStore_.updateStatus(username, bot->siteSlug(), bot->getState().status, false);
+        // Persist running state so bot auto-starts on next launch
+        std::string slug = bot->siteSlug();
+        configStore_.updateRunning(username, slug, true);
+        configStore_.updateStatus(username, slug, bot->getState().status, false);
         configStore_.save();
 
         return true;
@@ -237,8 +270,10 @@ namespace sm
             return false;
         bot->stop();
 
-        // Auto-save stopped state
-        configStore_.updateStatus(username, bot->siteSlug(), bot->getState().status, false);
+        // Persist stopped state so bot does NOT auto-start on next launch
+        std::string slug = bot->siteSlug();
+        configStore_.updateRunning(username, slug, false);
+        configStore_.updateStatus(username, slug, bot->getState().status, false);
         configStore_.save();
 
         return true;
@@ -733,6 +768,8 @@ namespace sm
             auto state = entry.plugin->getState();
             configStore_.updateStatus(state.username, state.siteSlug,
                                       state.status, state.recording);
+            configStore_.updateRunning(state.username, state.siteSlug,
+                                       entry.plugin->isRunning());
         }
         configStore_.save();
     }

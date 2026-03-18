@@ -158,6 +158,11 @@ int guiMain(int argc, char **argv)
     spdlog::info("Shutting down...");
     if (webServer)
         webServer->stop();
+
+    // Save config BEFORE shutdown so running bots keep running=true
+    // (they should auto-start again on next launch).
+    manager.saveConfig();
+
     manager.shutdown(); // stops all groups + bots, joins all threads (writes trailers)
     sm::HttpClient::globalCleanup();
     avformat_network_deinit();
