@@ -268,7 +268,7 @@ namespace sm
             return url;
 
         // Fallback: try without mouflon (will likely get ads)
-        logger_->warn("Mouflon key extraction failed, trying direct URL (may get ads)");
+        logger_->warn("CDN playlist unavailable with mouflon keys, trying unauthenticated fallback");
 
         std::string vr = isVr_ ? "_vr" : "";
         std::string autoSuffix = isVr_ ? "" : "_auto";
@@ -302,7 +302,7 @@ namespace sm
         }
 
         // Retry loop: model might have just gone live, CDN propagation lags
-        constexpr int maxAttempts = 3;
+        constexpr int maxAttempts = 5;
         constexpr int retryDelaySec = 3;
 
         for (int attempt = 0; attempt < maxAttempts; attempt++)

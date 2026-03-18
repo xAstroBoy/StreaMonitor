@@ -2024,11 +2024,17 @@ namespace sm
                     {
                         ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
                         if (ImGui::MenuItem("Stop"))
-                            manager_.stopBot(b.username, b.siteName);
+                        {
+                            std::string u = b.username, s = b.siteName;
+                            std::thread([this, u, s]() { manager_.stopBot(u, s); }).detach();
+                        }
                         ImGui::PopStyleColor();
                         ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
                         if (ImGui::MenuItem("Restart"))
-                            manager_.restartBot(b.username, b.siteName);
+                        {
+                            std::string u = b.username, s = b.siteName;
+                            std::thread([this, u, s]() { manager_.restartBot(u, s); }).detach();
+                        }
                         ImGui::PopStyleColor();
                     }
                     else
@@ -2049,7 +2055,10 @@ namespace sm
                         {
                             ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
                             if (ImGui::MenuItem(("Stop  [" + b.siteName + "]").c_str()))
-                                manager_.stopBot(b.username, b.siteName);
+                            {
+                                std::string u = b.username, s = b.siteName;
+                                std::thread([this, u, s]() { manager_.stopBot(u, s); }).detach();
+                            }
                             ImGui::PopStyleColor();
                         }
                         else
@@ -2371,11 +2380,17 @@ namespace sm
                         {
                             ImGui::PushStyleColor(ImGuiCol_Text, COL_RED);
                             if (ImGui::MenuItem("Stop"))
-                                manager_.stopBot(b.username, b.siteName);
+                            {
+                                std::string u = b.username, s = b.siteName;
+                                std::thread([this, u, s]() { manager_.stopBot(u, s); }).detach();
+                            }
                             ImGui::PopStyleColor();
                             ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
                             if (ImGui::MenuItem("Restart"))
-                                manager_.restartBot(b.username, b.siteName);
+                            {
+                                std::string u = b.username, s = b.siteName;
+                                std::thread([this, u, s]() { manager_.restartBot(u, s); }).detach();
+                            }
                             ImGui::PopStyleColor();
                         }
                         else
@@ -3981,7 +3996,10 @@ namespace sm
             {
                 ImGui::PushStyleColor(ImGuiCol_Button, {0.5f, 0.15f, 0.15f, 1.0f});
                 if (ImGui::Button("Stop", {btnW, 0}))
-                    manager_.stopBot(bot.username, bot.siteName);
+                {
+                    std::string u = bot.username, s = bot.siteName;
+                    std::thread([this, u, s]() { manager_.stopBot(u, s); }).detach();
+                }
                 ImGui::PopStyleColor();
             }
             else
@@ -3993,7 +4011,10 @@ namespace sm
             }
             ImGui::SameLine();
             if (ImGui::Button("Restart", {btnW, 0}))
-                manager_.restartBot(bot.username, bot.siteName);
+            {
+                std::string u = bot.username, s = bot.siteName;
+                std::thread([this, u, s]() { manager_.restartBot(u, s); }).detach();
+            }
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_Button, {0.5f, 0.15f, 0.15f, 1.0f});
             if (ImGui::Button("Remove", {btnW, 0}))

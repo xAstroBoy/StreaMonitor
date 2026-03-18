@@ -204,6 +204,14 @@ namespace sm
         cancelToken_.cancel();
         sleepCv_.notify_all(); // Wake sleepInterruptible immediately
 
+        // Wait for the recording thread to fully finish (writes trailer, closes file)
+        if (thread_ && thread_->joinable())
+        {
+            thread_->request_stop();
+            thread_->join();
+        }
+        thread_.reset();
+
         StateChangeCallback cb;
         {
             std::lock_guard lock(stateMutex_);
