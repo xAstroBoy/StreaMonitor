@@ -163,12 +163,12 @@ namespace sm
             // PTS and DTS, preserving the composition time offset (B-frame
             // display order). Using separate PTS/DTS offsets would destroy
             // the CTO relationship and corrupt Matroska/MP4 timestamps.
-            int64_t videoTsOffset = 0;         // First video DTS (subtract from PTS & DTS)
-            int64_t audioTsOffset = 0;         // First audio DTS (subtract from PTS & DTS)
-            bool videoOffsetCaptured = false;  // true once videoTsOffset is set
-            bool audioOffsetCaptured = false;  // true once audioTsOffset is set
-            int64_t videoFrameCount = 0;       // Frame counter for video PTS generation
-            int64_t audioSampleCount = 0;      // Sample counter for audio PTS generation
+            int64_t videoTsOffset = 0;        // First video DTS (subtract from PTS & DTS)
+            int64_t audioTsOffset = 0;        // First audio DTS (subtract from PTS & DTS)
+            bool videoOffsetCaptured = false; // true once videoTsOffset is set
+            bool audioOffsetCaptured = false; // true once audioTsOffset is set
+            int64_t videoFrameCount = 0;      // Frame counter for video PTS generation
+            int64_t audioSampleCount = 0;     // Sample counter for audio PTS generation
 
             // Keyframe gating: skip all packets until first video keyframe.
             // Live HLS streams may start mid-GOP — the HEVC decoder cannot decode

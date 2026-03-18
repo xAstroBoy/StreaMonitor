@@ -1046,13 +1046,17 @@ namespace sm
         {
             if (ImGui::MenuItem("Start All"))
             {
-                manager_.startAll();
-                manager_.startAllGroups();
+                std::thread([this]() {
+                    manager_.startAll();
+                    manager_.startAllGroups();
+                }).detach();
             }
             if (ImGui::MenuItem("Stop All"))
             {
-                manager_.stopAll();
-                manager_.stopAllGroups();
+                std::thread([this]() {
+                    manager_.stopAll();
+                    manager_.stopAllGroups();
+                }).detach();
             }
             if (ImGui::MenuItem("Resync All"))
             {
@@ -1123,14 +1127,18 @@ namespace sm
         ImGui::SameLine();
         if (ImGui::Button(" Start All "))
         {
-            manager_.startAll();
-            manager_.startAllGroups();
+            std::thread([this]() {
+                manager_.startAll();
+                manager_.startAllGroups();
+            }).detach();
         }
         ImGui::SameLine();
         if (ImGui::Button(" Stop All "))
         {
-            manager_.stopAll();
-            manager_.stopAllGroups();
+            std::thread([this]() {
+                manager_.stopAll();
+                manager_.stopAllGroups();
+            }).detach();
         }
         ImGui::SameLine();
         ImGui::TextColored(COL_TEXT_DIM, "(auto-saved)");
@@ -1395,16 +1403,25 @@ namespace sm
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.15f, 0.40f, 0.15f, 1.0f});
             if (ImGui::Button("Start Selected"))
             {
+                // Offload to background thread — each startBot locks mutex + writes config
+                std::vector<std::string> groupNames;
+                std::vector<std::pair<std::string, std::string>> bots;
                 for (auto &grp : rows)
                 {
                     if (!selectedRows_.count(grp.key))
                         continue;
                     if (!grp.groupName.empty())
-                        manager_.startGroup(grp.groupName);
+                        groupNames.push_back(grp.groupName);
                     else
                         for (int idx : grp.indices)
-                            manager_.startBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                            bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
+                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]() {
+                    for (auto &gn : groupNames)
+                        manager_.startGroup(gn);
+                    for (auto &[u, s] : bots)
+                        manager_.startBot(u, s);
+                }).detach();
             }
             ImGui::PopStyleColor();
 
@@ -1412,16 +1429,25 @@ namespace sm
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.50f, 0.15f, 0.15f, 1.0f});
             if (ImGui::Button("Stop Selected"))
             {
+                // Offload to background thread — each stopBot locks mutex + writes config
+                std::vector<std::string> groupNames;
+                std::vector<std::pair<std::string, std::string>> bots;
                 for (auto &grp : rows)
                 {
                     if (!selectedRows_.count(grp.key))
                         continue;
                     if (!grp.groupName.empty())
-                        manager_.stopGroup(grp.groupName);
+                        groupNames.push_back(grp.groupName);
                     else
                         for (int idx : grp.indices)
-                            manager_.stopBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                            bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
+                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]() {
+                    for (auto &gn : groupNames)
+                        manager_.stopGroup(gn);
+                    for (auto &[u, s] : bots)
+                        manager_.stopBot(u, s);
+                }).detach();
             }
             ImGui::PopStyleColor();
 
@@ -1803,17 +1829,38 @@ namespace sm
                     if (grp.anyRunning)
                     {
                         if (ImGui::MenuItem("Stop All"))
+                        {
+                            std::vector<std::pair<std::string,std::string>> targets;
                             for (int idx : grp.indices)
-                                manager_.stopBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                                targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                            std::thread([this, targets = std::move(targets)]() {
+                                for (auto& [u, s] : targets)
+                                    manager_.stopBot(u, s);
+                            }).detach();
+                        }
                         if (ImGui::MenuItem("Restart All"))
+                        {
+                            std::vector<std::pair<std::string,std::string>> targets;
                             for (int idx : grp.indices)
-                                manager_.restartBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                                targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                            std::thread([this, targets = std::move(targets)]() {
+                                for (auto& [u, s] : targets)
+                                    manager_.restartBot(u, s);
+                            }).detach();
+                        }
                     }
                     else
                     {
                         if (ImGui::MenuItem("Start All"))
+                        {
+                            std::vector<std::pair<std::string,std::string>> targets;
                             for (int idx : grp.indices)
-                                manager_.startBot(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                                targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
+                            std::thread([this, targets = std::move(targets)]() {
+                                for (auto& [u, s] : targets)
+                                    manager_.startBot(u, s);
+                            }).detach();
+                        }
                     }
                 }
 
@@ -3790,7 +3837,12 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::refreshBotStates()
     {
-        cachedStates_ = manager_.getAllStates();
+        // Non-blocking: skip refresh if manager mutex is held by a
+        // background operation (file move, bulk stop, etc.).
+        // The GUI keeps the previous cachedStates_ and retries next cycle.
+        auto states = manager_.tryGetAllStates();
+        if (states)
+            cachedStates_ = std::move(*states);
     }
 
     void GuiApp::addLog(const std::string &level, const std::string &source,

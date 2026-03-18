@@ -654,6 +654,18 @@ namespace sm
         return states;
     }
 
+    std::optional<std::vector<BotState>> BotManager::tryGetAllStates() const
+    {
+        std::unique_lock lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock())
+            return std::nullopt; // Mutex busy — skip this refresh
+        std::vector<BotState> states;
+        states.reserve(bots_.size());
+        for (const auto &entry : bots_)
+            states.push_back(entry.plugin->getState());
+        return states;
+    }
+
     std::optional<BotState> BotManager::getBotState(const std::string &username,
                                                     const std::string &site) const
     {

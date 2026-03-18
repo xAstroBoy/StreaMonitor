@@ -78,6 +78,8 @@ namespace sm
 
         // ── Queries ─────────────────────────────────────────────────
         std::vector<BotState> getAllStates() const;
+        // Non-blocking version: returns nullopt if mutex is busy (GUI won't freeze)
+        std::optional<std::vector<BotState>> tryGetAllStates() const;
         std::optional<BotState> getBotState(const std::string &username,
                                             const std::string &site = "") const;
         size_t botCount() const;
