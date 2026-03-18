@@ -2180,6 +2180,45 @@ namespace sm
                         showCrossRegister_ = true;
                     }
                 }
+                else if (grp.indices.size() > 1)
+                {
+                    // Auto-grouped row (same username, multiple sites) — offer
+                    // to create a cross-register group from the non-VR members.
+                    int nonVrCount = 0;
+                    for (int idx : grp.indices)
+                    {
+                        if (!isVrSlug(cachedStates_[idx].siteSlug))
+                            nonVrCount++;
+                    }
+
+                    if (nonVrCount >= 2)
+                    {
+                        if (ImGui::MenuItem("Create Cross-Register Group"))
+                        {
+                            // Collect non-VR members
+                            std::vector<std::pair<std::string, std::string>> members;
+                            for (int idx : grp.indices)
+                            {
+                                const auto &b = cachedStates_[idx];
+                                if (!isVrSlug(b.siteSlug))
+                                    members.emplace_back(b.siteSlug, b.username);
+                            }
+                            // Use the username as the group name
+                            std::string gname = grp.username;
+                            // Stop individual bots first (group will cycle them)
+                            for (auto &[site, user] : members)
+                                manager_.stopBot(user, site);
+                            manager_.createCrossRegisterGroup(gname, members);
+                            // Auto-start the new group
+                            manager_.startGroup(gname);
+                        }
+                    }
+
+                    if (ImGui::MenuItem("Add to Group..."))
+                    {
+                        showCrossRegister_ = true;
+                    }
+                }
                 else
                 {
                     if (ImGui::MenuItem("Add to Group..."))

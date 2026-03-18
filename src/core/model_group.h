@@ -22,6 +22,16 @@
 #include <condition_variable>
 #include <functional>
 
+// ── VR slug detection (used by ModelGroup + GUI) ────────────────
+inline bool isVrSlug(const std::string &siteOrSlug)
+{
+    // VR slugs end with "VR" (e.g. "SCVR", "DCVR")
+    // VR site names end with "VR" too (e.g. "StripChatVR", "DreamCamVR")
+    return siteOrSlug.size() >= 2 &&
+           siteOrSlug[siteOrSlug.size() - 2] == 'V' &&
+           siteOrSlug[siteOrSlug.size() - 1] == 'R';
+}
+
 namespace sm
 {
 
@@ -99,6 +109,8 @@ namespace sm
     private:
         void threadFunc(const AppConfig &config);
         bool downloadFrom(GroupPairing &pairing, const AppConfig &config);
+        bool downloadFromWithToken(GroupPairing &pairing, const AppConfig &config,
+                                   CancellationToken &token);
         void sleepInterruptible(int seconds);
         void updateGroupState();
 
