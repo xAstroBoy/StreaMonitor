@@ -264,9 +264,6 @@ namespace sm
 
     void SitePlugin::setState(Status status)
     {
-        // Refresh preview URL on each status update (some sites update per-status-check)
-        auto preview = getPreviewUrl();
-
         std::lock_guard lock(stateMutex_);
         bool statusChanged = (state_.status != status);
         state_.prevStatus = state_.status;
@@ -274,23 +271,9 @@ namespace sm
         // Only update lastStatusChange when status actually changes
         if (statusChanged)
             state_.lastStatusChange = Clock::now();
-        // Preserve local captured preview while recording; only overwrite
-        // from site preview URL when we don't already have a local file path.
-        bool hasLocalPreview = false;
-#ifdef _WIN32
-        hasLocalPreview = (state_.previewUrl.size() > 2 && state_.previewUrl[1] == ':');
-#else
-        hasLocalPreview = (!state_.previewUrl.empty() && state_.previewUrl[0] == '/');
-#endif
-        bool previewChanged = false;
-        if (!preview.empty() && !(state_.recording && hasLocalPreview))
-        {
-            previewChanged = (state_.previewUrl != preview);
-            state_.previewUrl = preview;
-        }
-        // Only fire callback when something actually changed — avoids
-        // spamming glfwPostEmptyEvent when 20 bots check status every 5s
-        if ((statusChanged || previewChanged) && stateCallback_)
+        // Preview comes from the actual stream (captured by HLS recorder).
+        // We no longer use site API preview URLs.
+        if (statusChanged && stateCallback_)
             stateCallback_(state_);
     }
 
@@ -1093,6 +1076,24 @@ namespace sm
 
         HLSRecorder recorder(config);
         recorder.setLogger(logger_);
+
+        // ── Preview capture from the live stream ────────────────────
+        // Save a JPEG preview frame in the bot's download directory.
+        // This is updated every ~30s from the actual video keyframes.
+        {
+            auto previewDir = config.downloadsDir / (username_ + " [" + siteSlug_ + "]");
+            if (isMobile())
+                previewDir /= "Mobile";
+            fs::create_directories(previewDir);
+            std::string previewPath = (previewDir / "preview.jpg").string();
+            recorder.setPreviewPath(previewPath);
+            recorder.setPreviewCallback([this](const std::string &path)
+                                        {
+                std::lock_guard lock(stateMutex_);
+                state_.previewUrl = path;
+                if (stateCallback_)
+                    stateCallback_(state_); });
+        }
 
         recorder.setProgressCallback([this](const RecordingProgress &prog)
                                      {

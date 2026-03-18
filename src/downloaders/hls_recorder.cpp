@@ -1732,6 +1732,10 @@ namespace sm
                 break;
             }
 
+            // ── Preview capture (transcode mode) ────────────────────
+            // We have a decoded frame — capture it as a JPEG preview
+            maybeCapturePreviexFromFrame(state.decFrame);
+
             // Determine which frame to send to encoder
             AVFrame *frameToEncode = state.decFrame;
 
@@ -1994,6 +1998,102 @@ namespace sm
         avcodec_free_context(&jpegCtx);
 
         return ok;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Capture a preview from a raw video keyframe packet (stream-copy mode).
+    // Opens a temporary decoder, decodes the single keyframe, saves JPEG.
+    // ─────────────────────────────────────────────────────────────────
+    bool HLSRecorder::capturePreviewFromPacket(FFmpegState &state, AVPacket *pkt)
+    {
+        if (previewPath_.empty() || !pkt || !(pkt->flags & AV_PKT_FLAG_KEY))
+            return false;
+
+        // Rate-limit: first capture immediately, then every 30 seconds
+        auto now = std::chrono::steady_clock::now();
+        if (previewCaptured_)
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastPreviewTime_).count();
+            if (elapsed < 30)
+                return false;
+        }
+
+        // Find the video codec from the input stream
+        if (state.videoIdx < 0 || !state.inputCtx)
+            return false;
+
+        AVStream *videoStream = state.inputCtx->streams[state.videoIdx];
+        const AVCodec *decoder = avcodec_find_decoder(videoStream->codecpar->codec_id);
+        if (!decoder)
+            return false;
+
+        AVCodecContext *decCtx = avcodec_alloc_context3(decoder);
+        if (!decCtx)
+            return false;
+
+        avcodec_parameters_to_context(decCtx, videoStream->codecpar);
+        // Use fewer threads for this temporary decoder
+        decCtx->thread_count = 1;
+
+        if (avcodec_open2(decCtx, decoder, nullptr) < 0)
+        {
+            avcodec_free_context(&decCtx);
+            return false;
+        }
+
+        // Send the keyframe packet to the decoder
+        int ret = avcodec_send_packet(decCtx, pkt);
+        if (ret < 0)
+        {
+            avcodec_free_context(&decCtx);
+            return false;
+        }
+
+        AVFrame *frame = av_frame_alloc();
+        ret = avcodec_receive_frame(decCtx, frame);
+
+        bool ok = false;
+        if (ret == 0 && frame->width > 0 && frame->height > 0)
+        {
+            ok = savePreviewJpeg(frame, previewPath_);
+            if (ok)
+            {
+                previewCaptured_ = true;
+                lastPreviewTime_ = now;
+                if (previewCb_)
+                    previewCb_(previewPath_);
+            }
+        }
+
+        av_frame_free(&frame);
+        avcodec_free_context(&decCtx);
+        return ok;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Check timing and capture preview from an already-decoded frame
+    // (transcode mode — frame is already available).
+    // ─────────────────────────────────────────────────────────────────
+    void HLSRecorder::maybeCapturePreviexFromFrame(AVFrame *frame)
+    {
+        if (previewPath_.empty() || !frame || frame->width <= 0 || frame->height <= 0)
+            return;
+
+        auto now = std::chrono::steady_clock::now();
+        if (previewCaptured_)
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastPreviewTime_).count();
+            if (elapsed < 30)
+                return;
+        }
+
+        if (savePreviewJpeg(frame, previewPath_))
+        {
+            previewCaptured_ = true;
+            lastPreviewTime_ = now;
+            if (previewCb_)
+                previewCb_(previewPath_);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -2415,6 +2515,23 @@ namespace sm
                         // unrefs the packet, zeroing pkt->pts/size/etc.
                         int64_t savedPts = pkt->pts;
                         bool packetOk = false;
+
+                        // ── Preview capture (stream-copy mode) ──────────────
+                        // In stream-copy mode we don't decode, so grab keyframes
+                        // before processPacket consumes the packet data.
+                        if (!state.transcoding && !previewPath_.empty() &&
+                            pkt->stream_index == state.videoIdx &&
+                            (pkt->flags & AV_PKT_FLAG_KEY))
+                        {
+                            // Make a ref copy — processPacket will unref the original
+                            AVPacket *previewPkt = av_packet_clone(pkt);
+                            if (previewPkt)
+                            {
+                                capturePreviewFromPacket(state, previewPkt);
+                                av_packet_free(&previewPkt);
+                            }
+                        }
+
                         if (state.transcoding)
                         {
                             packetOk = transcodePacket(state, pkt, bytesWritten, packetsWritten, packetsDropped);

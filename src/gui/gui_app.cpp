@@ -1796,7 +1796,7 @@ namespace sm
         ImGuiTableFlags tableFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                      ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersInnerV |
                                      ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp |
-                                     ImGuiTableFlags_Sortable;
+                                     ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate;
 
         if (!ImGui::BeginTable("##Models", 11, tableFlags))
             return;
@@ -1914,6 +1914,18 @@ namespace sm
                               return asc ? (cmp < 0) : (cmp > 0);
                           });
             }
+            else
+            {
+                // No sort active (user cleared sort) — default to alphabetical by username
+                std::sort(visibleRows.begin(), visibleRows.end(),
+                          [](const GroupedRow *a, const GroupedRow *b) -> bool
+                          {
+                              std::string la = a->username, lb = b->username;
+                              std::transform(la.begin(), la.end(), la.begin(), ::tolower);
+                              std::transform(lb.begin(), lb.end(), lb.begin(), ::tolower);
+                              return la < lb;
+                          });
+            }
         }
 
         for (auto *rp : visibleRows)
@@ -2026,14 +2038,18 @@ namespace sm
                         if (ImGui::MenuItem("Stop"))
                         {
                             std::string u = b.username, s = b.siteName;
-                            std::thread([this, u, s]() { manager_.stopBot(u, s); }).detach();
+                            std::thread([this, u, s]()
+                                        { manager_.stopBot(u, s); })
+                                .detach();
                         }
                         ImGui::PopStyleColor();
                         ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
                         if (ImGui::MenuItem("Restart"))
                         {
                             std::string u = b.username, s = b.siteName;
-                            std::thread([this, u, s]() { manager_.restartBot(u, s); }).detach();
+                            std::thread([this, u, s]()
+                                        { manager_.restartBot(u, s); })
+                                .detach();
                         }
                         ImGui::PopStyleColor();
                     }
@@ -2057,7 +2073,9 @@ namespace sm
                             if (ImGui::MenuItem(("Stop  [" + b.siteName + "]").c_str()))
                             {
                                 std::string u = b.username, s = b.siteName;
-                                std::thread([this, u, s]() { manager_.stopBot(u, s); }).detach();
+                                std::thread([this, u, s]()
+                                            { manager_.stopBot(u, s); })
+                                    .detach();
                             }
                             ImGui::PopStyleColor();
                         }
@@ -2382,14 +2400,18 @@ namespace sm
                             if (ImGui::MenuItem("Stop"))
                             {
                                 std::string u = b.username, s = b.siteName;
-                                std::thread([this, u, s]() { manager_.stopBot(u, s); }).detach();
+                                std::thread([this, u, s]()
+                                            { manager_.stopBot(u, s); })
+                                    .detach();
                             }
                             ImGui::PopStyleColor();
                             ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
                             if (ImGui::MenuItem("Restart"))
                             {
                                 std::string u = b.username, s = b.siteName;
-                                std::thread([this, u, s]() { manager_.restartBot(u, s); }).detach();
+                                std::thread([this, u, s]()
+                                            { manager_.restartBot(u, s); })
+                                    .detach();
                             }
                             ImGui::PopStyleColor();
                         }
@@ -2479,12 +2501,15 @@ namespace sm
                     else
                         ImGui::TextColored(COL_TEXT_DIM, "--");
 
-                    // Size
+                    // Size (completed + in-progress, same as parent row)
                     ImGui::TableNextColumn();
-                    if (b.totalBytes > 0)
-                        ImGui::Text("%s", formatBytesHuman(b.totalBytes).c_str());
-                    else
-                        ImGui::TextColored(COL_TEXT_DIM, "--");
+                    {
+                        uint64_t subSize = b.totalBytes + b.recordingStats.bytesWritten;
+                        if (subSize > 0)
+                            ImGui::Text("%s", formatBytesHuman(subSize).c_str());
+                        else
+                            ImGui::TextColored(COL_TEXT_DIM, "--");
+                    }
 
                     // Speed
                     ImGui::TableNextColumn();
@@ -3816,7 +3841,7 @@ namespace sm
 
                 // Center status text in the placeholder
                 const char *label = bot.previewUrl.empty()
-                                        ? "No preview available"
+                                        ? (bot.recording ? "Capturing preview..." : "Preview available when recording")
                                         : "Loading preview...";
                 ImVec2 textSz = ImGui::CalcTextSize(label);
                 ImVec2 textPos = {pos.x + (imgW - textSz.x) * 0.5f,
@@ -3841,6 +3866,7 @@ namespace sm
         // Info grid
         ImGui::Text("Site:            %s (%s)", bot.siteName.c_str(), bot.siteSlug.c_str());
         ImGui::Text("Website:         %s", bot.websiteUrl.c_str());
+        ImGui::TextColored(statusColor(bot.status), "Status:          %s", statusToString(bot.status));
         ImGui::Text("Gender:          %s", genderToString(bot.gender));
         if (!bot.country.empty())
             ImGui::Text("Country:         %s", bot.country.c_str());
@@ -3998,7 +4024,9 @@ namespace sm
                 if (ImGui::Button("Stop", {btnW, 0}))
                 {
                     std::string u = bot.username, s = bot.siteName;
-                    std::thread([this, u, s]() { manager_.stopBot(u, s); }).detach();
+                    std::thread([this, u, s]()
+                                { manager_.stopBot(u, s); })
+                        .detach();
                 }
                 ImGui::PopStyleColor();
             }
@@ -4013,7 +4041,9 @@ namespace sm
             if (ImGui::Button("Restart", {btnW, 0}))
             {
                 std::string u = bot.username, s = bot.siteName;
-                std::thread([this, u, s]() { manager_.restartBot(u, s); }).detach();
+                std::thread([this, u, s]()
+                            { manager_.restartBot(u, s); })
+                    .detach();
             }
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_Button, {0.5f, 0.15f, 0.15f, 1.0f});
