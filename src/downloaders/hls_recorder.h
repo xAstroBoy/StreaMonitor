@@ -112,16 +112,14 @@ namespace sm
         // ── Progress ────────────────────────────────────────────────
         void setProgressCallback(ProgressCallback cb);
 
-        // ── Preview capture ─────────────────────────────────────────
-        // Set a path to save a JPEG preview frame captured from the
-        // live video stream. Captured on first keyframe and refreshed
-        // every ~30 seconds.
-        void setPreviewPath(const std::string &path) { previewPath_ = path; }
+        // ── Preview capture (on-demand, in-memory) ─────────────────
+        // The GUI sets a request flag via the SitePlugin; when the
+        // recorder encounters the next keyframe it decodes to RGBA
+        // and delivers pixels through the callback. No file I/O.
+        void setPreviewRequestFlag(std::atomic<bool> *flag) { previewRequestFlag_ = flag; }
 
-        // Callback fired each time a new preview JPEG is saved.
-        // Receives the absolute path to the JPEG file.
-        using PreviewCallback = std::function<void(const std::string &path)>;
-        void setPreviewCallback(PreviewCallback cb) { previewCb_ = std::move(cb); }
+        using PreviewDataCallback = std::function<void(std::vector<uint8_t> rgba, int w, int h)>;
+        void setPreviewDataCallback(PreviewDataCallback cb) { previewDataCb_ = std::move(cb); }
 
         // ── Pause/resume (keep file open when stream drops) ─────────
         // Called when stream ends naturally (model went private/offline).
@@ -148,24 +146,22 @@ namespace sm
         const AppConfig &config_;
         std::shared_ptr<spdlog::logger> log_ = spdlog::default_logger();
         ProgressCallback progressCb_;
-        PreviewCallback previewCb_;
+        PreviewDataCallback previewDataCb_;
         PauseResumeCallback pauseResumeCb_;
         ResolutionChangeCallback resChangeCb_;
         mutable std::mutex statsMutex_;
         RecordingStats stats_;
 
-        // Preview capture state
-        std::string previewPath_;
-        bool previewCaptured_ = false;
-        std::chrono::steady_clock::time_point lastPreviewTime_;
+        // Preview capture state (on-demand, in-memory)
+        std::atomic<bool> *previewRequestFlag_ = nullptr; // set by SitePlugin
 
-        // Save a decoded video frame as a JPEG preview image.
-        // Scales down to max 640px wide for efficiency.
-        bool savePreviewJpeg(AVFrame *frame, const std::string &path);
+        // Decode a video frame to RGBA pixels (max 640px wide).
+        // Returns true if successful. Pixels are stored in outRGBA.
+        bool decodeFrameToRGBA(AVFrame *frame, std::vector<uint8_t> &outRGBA, int &outW, int &outH);
 
-        // Check if it's time to capture a preview and do it.
+        // Deliver preview if requested: decode keyframe → RGBA → callback.
         // Called from the transcode path with an already-decoded frame.
-        void maybeCapturePreviexFromFrame(AVFrame *frame);
+        void maybeDeliverPreviewFrame(AVFrame *frame);
 
         // ── FFmpeg context management ───────────────────────────────
         struct FFmpegState
@@ -219,6 +215,10 @@ namespace sm
             int64_t audioRestartOffset = 0;
         };
 
+        // Deliver preview from a raw keyframe packet (stream-copy mode).
+        // Opens a temporary decoder to decode the single keyframe.
+        bool deliverPreviewFromPacket(FFmpegState &state, AVPacket *pkt);
+
         // Setup / teardown
         bool openInput(FFmpegState &state, const std::string &url,
                        const std::string &userAgent, const std::string &cookies,
@@ -251,11 +251,7 @@ namespace sm
         void flushEncoder(FFmpegState &state, uint64_t &bytesWritten,
                           uint32_t &packetsWritten);
 
-        // Preview capture from raw video keyframe packet (stream-copy mode).
-        // Opens a temporary decoder, decodes the keyframe, saves JPEG.
-        bool capturePreviewFromPacket(FFmpegState &state, AVPacket *pkt);
-
-        // CUDA/NVENC availability detection
+        // ── CUDA/NVENC availability detection ───────────────────────
         static bool isNvencAvailable();
 
         // Stall detection

@@ -412,34 +412,43 @@ namespace sm
             }
             jsonResponse(res, arr); });
 
-        // ── GET /api/preview/:username/:site — Serve preview JPEG ─
-        // Serves the preview frame captured from the live video stream,
-        // NOT the site's thumbnail image. The JPEG is saved by the
-        // HLS recorder when the first keyframe is decoded.
+        // ── GET /api/preview/:username/:site — Serve preview PNG ──
+        // Requests an on-demand preview frame from the live recorder.
+        // The recorder decodes the next keyframe to RGBA; we wait
+        // briefly and return the raw RGBA as a PNG (via stb_image_write
+        // in memory). If no frame arrives in time → 404.
         server_->Get(R"(/api/preview/([^/]+)/([^/]+))",
                      [this](const httplib::Request &req, httplib::Response &res)
                      {
                          std::string username = req.matches[1].str();
                          std::string site = req.matches[2].str();
 
-                         auto previewPath = std::filesystem::path(".cache") / "previews" /
-                                            (username + " [" + site + "]") / "preview.jpg";
+                         // Request a preview and poll for up to 3 seconds
+                         manager_.requestPreview(username, site);
 
-                         std::error_code ec;
-                         if (std::filesystem::exists(previewPath, ec))
+                         PreviewFrame frame;
+                         for (int i = 0; i < 30; ++i)
                          {
-                             std::ifstream file(previewPath, std::ios::binary);
-                             if (file.good())
-                             {
-                                 std::string content((std::istreambuf_iterator<char>(file)),
-                                                     std::istreambuf_iterator<char>());
-                                 res.set_content(content, "image/jpeg");
-                                 return;
-                             }
+                             if (manager_.consumePreview(username, site, frame))
+                                 break;
+                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
                          }
 
-                         res.status = 404;
-                         res.set_content("No preview available", "text/plain");
+                         if (frame.empty())
+                         {
+                             res.status = 404;
+                             res.set_content("No preview available", "text/plain");
+                             return;
+                         }
+
+                         // Serve raw RGBA as BMP (simplest headerless-ish format)
+                         // or just serve as raw with dimensions in headers
+                         // For web compatibility, serve as raw bitmap with content type
+                         res.set_header("X-Preview-Width", std::to_string(frame.width));
+                         res.set_header("X-Preview-Height", std::to_string(frame.height));
+                         res.set_content(std::string(reinterpret_cast<const char *>(frame.pixels.data()),
+                                                     frame.pixels.size()),
+                                         "application/octet-stream");
                      });
 
         // ── POST /api/models — Add a model ────────────────────────

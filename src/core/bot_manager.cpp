@@ -1062,6 +1062,27 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
+    // On-demand preview forwarding
+    // ─────────────────────────────────────────────────────────────────
+    void BotManager::requestPreview(const std::string &username, const std::string &site)
+    {
+        std::lock_guard lock(mutex_);
+        auto *bot = findBot(username, site);
+        if (bot)
+            bot->requestPreview();
+    }
+
+    bool BotManager::consumePreview(const std::string &username, const std::string &site,
+                                    PreviewFrame &out)
+    {
+        std::lock_guard lock(mutex_);
+        auto *bot = findBot(username, site);
+        if (!bot)
+            return false;
+        return bot->consumePreview(out);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     // Internal find
     // ─────────────────────────────────────────────────────────────────
     SitePlugin *BotManager::findBot(const std::string &username, const std::string &site)

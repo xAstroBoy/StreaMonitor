@@ -144,6 +144,21 @@ namespace sm
         bool linkStatus = true;                                   // Share status info across members
     };
 
+    // ── In-memory preview frame (RGBA pixels for GUI upload) ──────
+    struct PreviewFrame
+    {
+        std::vector<uint8_t> pixels; // RGBA, 4 bytes per pixel
+        int width = 0;
+        int height = 0;
+
+        bool empty() const { return pixels.empty() || width <= 0 || height <= 0; }
+        void clear()
+        {
+            pixels.clear();
+            width = height = 0;
+        }
+    };
+
     // ── Recording statistics ────────────────────────────────────────
     struct RecordingStats
     {

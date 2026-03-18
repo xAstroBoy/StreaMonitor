@@ -147,6 +147,14 @@ namespace sm
         // ── Force resync (immediate status check) ───────────────────
         void forceResync();
 
+        // ── On-demand preview (in-memory, no file I/O) ──────────────
+        // GUI calls requestPreview() when the detail panel is open.
+        // The active recorder will decode the next keyframe to RGBA
+        // and store it in the plugin. GUI calls consumePreview() to
+        // fetch the pixels for GL texture upload.
+        void requestPreview();
+        bool consumePreview(PreviewFrame &out);
+
         // ── Override these in site plugins ──────────────────────────
         virtual Status checkStatus() = 0;
         virtual std::string getVideoUrl() = 0;
@@ -225,6 +233,12 @@ namespace sm
         StateChangeCallback stateCallback_;
 
         HttpClient http_;
+
+        // On-demand preview state (shared between plugin thread and GUI)
+        std::atomic<bool> previewRequested_{false}; // GUI → recorder
+        std::mutex previewMutex_;
+        PreviewFrame pendingPreview_;
+        bool previewReady_ = false;
 
         // Proxy pool for round-robin proxy selection
         ProxyPool proxyPool_;

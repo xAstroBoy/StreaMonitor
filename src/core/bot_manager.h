@@ -86,6 +86,11 @@ namespace sm
         size_t recordingCount() const;
         size_t onlineCount() const;
 
+        // ── On-demand preview (forwarded to SitePlugin) ─────────────
+        void requestPreview(const std::string &username, const std::string &site);
+        bool consumePreview(const std::string &username, const std::string &site,
+                            PreviewFrame &out);
+
         // ── Events ──────────────────────────────────────────────────
         void setEventCallback(ManagerEventCallback cb);
 

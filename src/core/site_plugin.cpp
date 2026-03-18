@@ -348,6 +348,25 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
+    // On-demand preview — GUI requests, recorder delivers RGBA pixels
+    // ─────────────────────────────────────────────────────────────────
+    void SitePlugin::requestPreview()
+    {
+        previewRequested_.store(true, std::memory_order_release);
+    }
+
+    bool SitePlugin::consumePreview(PreviewFrame &out)
+    {
+        std::lock_guard lock(previewMutex_);
+        if (!previewReady_)
+            return false;
+        out = std::move(pendingPreview_);
+        pendingPreview_.clear();
+        previewReady_ = false;
+        return true;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     // Resolution selection (faithful port of Python
     // getWantedResolutionPlaylist)
     //
@@ -1077,23 +1096,17 @@ namespace sm
         HLSRecorder recorder(config);
         recorder.setLogger(logger_);
 
-        // ── Preview capture from the live stream ────────────────────
-        // Save a JPEG preview frame in the bot's download directory.
-        // This is updated every ~30s from the actual video keyframes.
-        {
-            auto previewDir = config.downloadsDir / (username_ + " [" + siteSlug_ + "]");
-            if (isMobile())
-                previewDir /= "Mobile";
-            fs::create_directories(previewDir);
-            std::string previewPath = (previewDir / "preview.jpg").string();
-            recorder.setPreviewPath(previewPath);
-            recorder.setPreviewCallback([this](const std::string &path)
+        // ── On-demand preview from the live stream ──────────────────
+        // Pass our atomic flag so the recorder knows when to capture,
+        // and a callback that stores RGBA pixels in our buffer.
+        recorder.setPreviewRequestFlag(&previewRequested_);
+        recorder.setPreviewDataCallback([this](std::vector<uint8_t> rgba, int w, int h)
                                         {
-                std::lock_guard lock(stateMutex_);
-                state_.previewUrl = path;
-                if (stateCallback_)
-                    stateCallback_(state_); });
-        }
+            std::lock_guard lock(previewMutex_);
+            pendingPreview_.pixels = std::move(rgba);
+            pendingPreview_.width = w;
+            pendingPreview_.height = h;
+            previewReady_ = true; });
 
         recorder.setProgressCallback([this](const RecordingProgress &prog)
                                      {

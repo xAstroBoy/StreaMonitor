@@ -825,6 +825,13 @@ namespace sm
 
     void GuiApp::cleanup()
     {
+        // Free preview texture
+        if (detailPreviewTex_)
+        {
+            glDeleteTextures(1, &detailPreviewTex_);
+            detailPreviewTex_ = 0;
+        }
+
         if (window_)
         {
             ImGui_ImplOpenGL3_Shutdown();
@@ -3809,29 +3816,75 @@ namespace sm
         ImGui::SameLine();
         ImGui::TextColored(statusColor(bot.status), "(%s)", statusToString(bot.status));
 
-        // Preview thumbnail — always show a placeholder box
+        // Preview thumbnail — on-demand, in-memory, direct GL texture
         {
             ImGui::Spacing();
             float avail = ImGui::GetContentRegionAvail().x;
             float imgW = std::min(avail, 320.0f * dpiScale_);
-            float imgH = imgW * 0.5625f; // 16:9
 
-            GLuint tex = 0;
-            if (!bot.previewUrl.empty())
-                tex = imageCache_.getTexture(bot.previewUrl);
+            // Determine the key for this bot
+            std::string previewKey = bot.username + "|" + bot.siteName;
 
-            if (tex != 0)
+            // If we switched to a different bot, discard the old texture
+            if (previewKey != detailPreviewKey_)
             {
-                ImGui::Image((ImTextureID)(intptr_t)tex, {imgW, imgH});
-                // Right-click to refresh
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-                    imageCache_.invalidate(bot.previewUrl);
+                if (detailPreviewTex_)
+                {
+                    glDeleteTextures(1, &detailPreviewTex_);
+                    detailPreviewTex_ = 0;
+                }
+                detailPreviewW_ = detailPreviewH_ = 0;
+                detailPreviewKey_ = previewKey;
+                lastPreviewRequest_ = {}; // force immediate request
+            }
+
+            // Request preview every 2 seconds while panel is open and bot is recording
+            if (bot.recording)
+            {
+                auto now = Clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastPreviewRequest_).count();
+                if (elapsed >= 2 || lastPreviewRequest_ == TimePoint{})
+                {
+                    manager_.requestPreview(bot.username, bot.siteName);
+                    lastPreviewRequest_ = now;
+                }
+            }
+
+            // Check for new RGBA pixels from the recorder
+            PreviewFrame frame;
+            if (manager_.consumePreview(bot.username, bot.siteName, frame))
+            {
+                // Upload RGBA pixels directly to a GL texture
+                if (detailPreviewTex_ == 0)
+                    glGenTextures(1, &detailPreviewTex_);
+
+                glBindTexture(GL_TEXTURE_2D, detailPreviewTex_);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame.width, frame.height, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, frame.pixels.data());
+                glBindTexture(GL_TEXTURE_2D, 0);
+
+                detailPreviewW_ = frame.width;
+                detailPreviewH_ = frame.height;
+            }
+
+            // Render the texture or a placeholder
+            if (detailPreviewTex_ != 0 && detailPreviewW_ > 0 && detailPreviewH_ > 0)
+            {
+                // Maintain aspect ratio
+                float aspect = static_cast<float>(detailPreviewH_) / detailPreviewW_;
+                float imgH = imgW * aspect;
+                ImGui::Image((ImTextureID)(intptr_t)detailPreviewTex_, {imgW, imgH});
+
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Right-click to refresh preview");
+                    ImGui::SetTooltip("Live preview (%dx%d)", detailPreviewW_, detailPreviewH_);
             }
             else
             {
-                // Draw a dark placeholder box
+                float imgH = imgW * 0.5625f; // 16:9 placeholder
                 ImVec2 pos = ImGui::GetCursorScreenPos();
                 ImDrawList *dl = ImGui::GetWindowDrawList();
                 dl->AddRectFilled(pos, {pos.x + imgW, pos.y + imgH},
@@ -3839,23 +3892,15 @@ namespace sm
                 dl->AddRect(pos, {pos.x + imgW, pos.y + imgH},
                             IM_COL32(60, 60, 70, 255));
 
-                // Center status text in the placeholder
-                const char *label = bot.previewUrl.empty()
-                                        ? (bot.recording ? "Capturing preview..." : "Preview available when recording")
-                                        : "Loading preview...";
+                const char *label = bot.recording
+                                        ? "Requesting preview..."
+                                        : "Preview available when recording";
                 ImVec2 textSz = ImGui::CalcTextSize(label);
                 ImVec2 textPos = {pos.x + (imgW - textSz.x) * 0.5f,
                                   pos.y + (imgH - textSz.y) * 0.5f};
                 dl->AddText(textPos, IM_COL32(120, 120, 140, 255), label);
 
-                // Advance cursor past the placeholder
                 ImGui::Dummy({imgW, imgH});
-
-                // Right-click to force retry
-                if (!bot.previewUrl.empty() && ImGui::IsItemClicked(ImGuiMouseButton_Right))
-                    imageCache_.invalidate(bot.previewUrl);
-                if (ImGui::IsItemHovered() && !bot.previewUrl.empty())
-                    ImGui::SetTooltip("Right-click to retry loading preview");
             }
         }
 

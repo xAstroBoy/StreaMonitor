@@ -174,6 +174,13 @@ namespace sm
         // Preview thumbnail cache
         ImageCache imageCache_;
 
+        // On-demand preview texture for detail panel (direct GL upload)
+        GLuint detailPreviewTex_ = 0;
+        int detailPreviewW_ = 0;
+        int detailPreviewH_ = 0;
+        std::string detailPreviewKey_; // "username|siteName" of current texture
+        TimePoint lastPreviewRequest_;  // rate-limit requests
+
         // DPI scale factor (detected from monitor)
         float dpiScale_ = 1.0f;
 

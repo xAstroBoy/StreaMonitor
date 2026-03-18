@@ -1733,8 +1733,8 @@ namespace sm
             }
 
             // ── Preview capture (transcode mode) ────────────────────
-            // We have a decoded frame — capture it as a JPEG preview
-            maybeCapturePreviexFromFrame(state.decFrame);
+            // We have a decoded frame — deliver it as RGBA if requested
+            maybeDeliverPreviewFrame(state.decFrame);
 
             // Determine which frame to send to encoder
             AVFrame *frameToEncode = state.decFrame;
@@ -1891,22 +1891,12 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Preview frame capture — decode one frame → scale → encode JPEG
+    // Decode a video frame to RGBA pixels (on-demand, in-memory).
+    // Scales down to max 640px wide. No file I/O at all.
     // ─────────────────────────────────────────────────────────────────
-    bool HLSRecorder::savePreviewJpeg(AVFrame *frame, const std::string &path)
+    bool HLSRecorder::decodeFrameToRGBA(AVFrame *frame, std::vector<uint8_t> &outRGBA, int &outW, int &outH)
     {
-        if (!frame || path.empty())
-            return false;
-
-        const AVCodec *mjpegCodec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
-        if (!mjpegCodec)
-        {
-            log_->warn("MJPEG encoder not available for preview");
-            return false;
-        }
-
-        AVCodecContext *jpegCtx = avcodec_alloc_context3(mjpegCodec);
-        if (!jpegCtx)
+        if (!frame || frame->width <= 0 || frame->height <= 0)
             return false;
 
         // Scale down for preview (max 640px wide)
@@ -1921,102 +1911,43 @@ namespace sm
         w = (w / 2) * 2;
         h = (h / 2) * 2;
         if (w <= 0 || h <= 0)
-        {
-            avcodec_free_context(&jpegCtx);
             return false;
-        }
-
-        jpegCtx->pix_fmt = AV_PIX_FMT_YUVJ420P;
-        jpegCtx->width = w;
-        jpegCtx->height = h;
-        jpegCtx->time_base = {1, 25};
-        jpegCtx->flags |= AV_CODEC_FLAG_QSCALE;
-        jpegCtx->global_quality = 5 * FF_QP2LAMBDA;
-
-        if (avcodec_open2(jpegCtx, mjpegCodec, nullptr) < 0)
-        {
-            avcodec_free_context(&jpegCtx);
-            return false;
-        }
 
         SwsContext *sws = sws_getContext(
             frame->width, frame->height, (AVPixelFormat)frame->format,
-            w, h, AV_PIX_FMT_YUVJ420P,
+            w, h, AV_PIX_FMT_RGBA,
             SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (!sws)
-        {
-            avcodec_free_context(&jpegCtx);
             return false;
-        }
 
-        AVFrame *scaledFrame = av_frame_alloc();
-        scaledFrame->format = AV_PIX_FMT_YUVJ420P;
-        scaledFrame->width = w;
-        scaledFrame->height = h;
-        if (av_frame_get_buffer(scaledFrame, 0) < 0)
-        {
-            av_frame_free(&scaledFrame);
-            sws_freeContext(sws);
-            avcodec_free_context(&jpegCtx);
-            return false;
-        }
+        // Allocate output buffer: 4 bytes per pixel (RGBA)
+        outRGBA.resize(static_cast<size_t>(w) * h * 4);
+        uint8_t *dstData[1] = {outRGBA.data()};
+        int dstLinesize[1] = {w * 4};
 
         sws_scale(sws, frame->data, frame->linesize, 0, frame->height,
-                  scaledFrame->data, scaledFrame->linesize);
-
-        scaledFrame->pts = 0;
-        avcodec_send_frame(jpegCtx, scaledFrame);
-
-        AVPacket *jpegPkt = av_packet_alloc();
-        int ret = avcodec_receive_packet(jpegCtx, jpegPkt);
-
-        bool ok = false;
-        if (ret == 0)
-        {
-            // Ensure parent directory exists
-            auto parentDir = std::filesystem::path(path).parent_path();
-            if (!parentDir.empty())
-            {
-                std::error_code ec;
-                std::filesystem::create_directories(parentDir, ec);
-            }
-
-            FILE *f = fopen(path.c_str(), "wb");
-            if (f)
-            {
-                fwrite(jpegPkt->data, 1, jpegPkt->size, f);
-                fclose(f);
-                ok = true;
-                log_->info("Preview frame captured: {} ({}x{} from {}x{})",
-                           path, w, h, frame->width, frame->height);
-            }
-        }
-
-        av_packet_free(&jpegPkt);
-        av_frame_free(&scaledFrame);
+                  dstData, dstLinesize);
         sws_freeContext(sws);
-        avcodec_free_context(&jpegCtx);
 
-        return ok;
+        outW = w;
+        outH = h;
+        log_->debug("Preview decoded to RGBA: {}x{} from {}x{}", w, h, frame->width, frame->height);
+        return true;
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Capture a preview from a raw video keyframe packet (stream-copy mode).
-    // Opens a temporary decoder, decodes the single keyframe, saves JPEG.
+    // Deliver preview from a raw keyframe packet (stream-copy mode).
+    // Only runs when previewRequestFlag_ is set. Opens a temporary
+    // decoder, decodes the keyframe, converts to RGBA, calls callback.
     // ─────────────────────────────────────────────────────────────────
-    bool HLSRecorder::capturePreviewFromPacket(FFmpegState &state, AVPacket *pkt)
+    bool HLSRecorder::deliverPreviewFromPacket(FFmpegState &state, AVPacket *pkt)
     {
-        if (previewPath_.empty() || !pkt || !(pkt->flags & AV_PKT_FLAG_KEY))
+        if (!previewRequestFlag_ || !previewRequestFlag_->load(std::memory_order_acquire))
             return false;
-
-        // Rate-limit: first capture immediately, then every 30 seconds
-        auto now = std::chrono::steady_clock::now();
-        if (previewCaptured_)
-        {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastPreviewTime_).count();
-            if (elapsed < 30)
-                return false;
-        }
+        if (!pkt || !(pkt->flags & AV_PKT_FLAG_KEY))
+            return false;
+        if (!previewDataCb_)
+            return false;
 
         // Find the video codec from the input stream
         if (state.videoIdx < 0 || !state.inputCtx)
@@ -2032,7 +1963,6 @@ namespace sm
             return false;
 
         avcodec_parameters_to_context(decCtx, videoStream->codecpar);
-        // Use fewer threads for this temporary decoder
         decCtx->thread_count = 1;
 
         if (avcodec_open2(decCtx, decoder, nullptr) < 0)
@@ -2041,7 +1971,6 @@ namespace sm
             return false;
         }
 
-        // Send the keyframe packet to the decoder
         int ret = avcodec_send_packet(decCtx, pkt);
         if (ret < 0)
         {
@@ -2055,13 +1984,13 @@ namespace sm
         bool ok = false;
         if (ret == 0 && frame->width > 0 && frame->height > 0)
         {
-            ok = savePreviewJpeg(frame, previewPath_);
-            if (ok)
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            if (decodeFrameToRGBA(frame, rgba, w, h))
             {
-                previewCaptured_ = true;
-                lastPreviewTime_ = now;
-                if (previewCb_)
-                    previewCb_(previewPath_);
+                previewRequestFlag_->store(false, std::memory_order_release);
+                previewDataCb_(std::move(rgba), w, h);
+                ok = true;
             }
         }
 
@@ -2071,28 +2000,24 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Check timing and capture preview from an already-decoded frame
-    // (transcode mode — frame is already available).
+    // Deliver preview from an already-decoded frame (transcode mode).
+    // Only runs when previewRequestFlag_ is set by the GUI.
     // ─────────────────────────────────────────────────────────────────
-    void HLSRecorder::maybeCapturePreviexFromFrame(AVFrame *frame)
+    void HLSRecorder::maybeDeliverPreviewFrame(AVFrame *frame)
     {
-        if (previewPath_.empty() || !frame || frame->width <= 0 || frame->height <= 0)
+        if (!previewRequestFlag_ || !previewRequestFlag_->load(std::memory_order_acquire))
+            return;
+        if (!frame || frame->width <= 0 || frame->height <= 0)
+            return;
+        if (!previewDataCb_)
             return;
 
-        auto now = std::chrono::steady_clock::now();
-        if (previewCaptured_)
+        std::vector<uint8_t> rgba;
+        int w = 0, h = 0;
+        if (decodeFrameToRGBA(frame, rgba, w, h))
         {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastPreviewTime_).count();
-            if (elapsed < 30)
-                return;
-        }
-
-        if (savePreviewJpeg(frame, previewPath_))
-        {
-            previewCaptured_ = true;
-            lastPreviewTime_ = now;
-            if (previewCb_)
-                previewCb_(previewPath_);
+            previewRequestFlag_->store(false, std::memory_order_release);
+            previewDataCb_(std::move(rgba), w, h);
         }
     }
 
@@ -2519,7 +2444,9 @@ namespace sm
                         // ── Preview capture (stream-copy mode) ──────────────
                         // In stream-copy mode we don't decode, so grab keyframes
                         // before processPacket consumes the packet data.
-                        if (!state.transcoding && !previewPath_.empty() &&
+                        // Only when the GUI has requested a preview.
+                        if (!state.transcoding && previewRequestFlag_ &&
+                            previewRequestFlag_->load(std::memory_order_acquire) &&
                             pkt->stream_index == state.videoIdx &&
                             (pkt->flags & AV_PKT_FLAG_KEY))
                         {
@@ -2527,7 +2454,7 @@ namespace sm
                             AVPacket *previewPkt = av_packet_clone(pkt);
                             if (previewPkt)
                             {
-                                capturePreviewFromPacket(state, previewPkt);
+                                deliverPreviewFromPacket(state, previewPkt);
                                 av_packet_free(&previewPkt);
                             }
                         }
