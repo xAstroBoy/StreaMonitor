@@ -11,6 +11,10 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <GLFW/glfw3.h>
+#ifdef _WIN32
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -337,40 +341,30 @@ namespace sm
         {
             // Collapsible node
             bool isObj = j.is_object();
-            std::string label;
-            if (isArrayElem)
-                label = "[" + key + "]";
-            else if (!key.empty())
-                label = key;
-            else
-                label = isObj ? "{...}" : "[...]";
-
             std::string sizeHint = isObj
-                                       ? " {" + std::to_string(j.size()) + "}"
-                                       : " [" + std::to_string(j.size()) + "]";
+                                       ? " {" + std::to_string(j.size()) + " keys}"
+                                       : " [" + std::to_string(j.size()) + " items]";
 
             // Use tree node with a unique ID
             ImGui::PushID(key.c_str());
-            ImGuiTreeNodeFlags flags = (depth < 1) ? ImGuiTreeNodeFlags_DefaultOpen : 0;
-            // Small items (≤3 entries) auto-expand at any depth
-            if (j.size() <= 3 && depth < 3)
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (depth < 1)
+                flags |= ImGuiTreeNodeFlags_DefaultOpen;
+            // Small items (<=4 entries) auto-expand at shallow depth
+            if (j.size() <= 4 && depth < 3)
                 flags |= ImGuiTreeNodeFlags_DefaultOpen;
 
-            bool open;
-            if (!key.empty())
-            {
-                ImGui::TextColored(kJsonKeyColor, "%s", label.c_str());
-                ImGui::SameLine(0, 0);
-                ImGui::TextColored(kJsonBraceColor, "%s", sizeHint.c_str());
-                ImGui::SameLine(0, 4);
-                open = ImGui::TreeNodeEx("##node", flags);
-            }
+            // Build the tree label inline
+            std::string nodeLabel;
+            if (isArrayElem)
+                nodeLabel = "[" + key + "]";
+            else if (!key.empty())
+                nodeLabel = key;
             else
-            {
-                ImGui::TextColored(kJsonBraceColor, "%s", sizeHint.c_str());
-                ImGui::SameLine(0, 4);
-                open = ImGui::TreeNodeEx("##node", flags);
-            }
+                nodeLabel = isObj ? "Object" : "Array";
+            nodeLabel += sizeHint;
+
+            bool open = ImGui::TreeNodeEx(nodeLabel.c_str(), flags);
 
             if (open)
             {
@@ -394,14 +388,15 @@ namespace sm
         }
         else
         {
-            // Leaf value
+            // Leaf value — show key: value on one line
+            ImGui::Bullet();
             if (!key.empty())
             {
                 if (isArrayElem)
                     ImGui::TextColored(kJsonBraceColor, "[%s]", key.c_str());
                 else
                     ImGui::TextColored(kJsonKeyColor, "%s:", key.c_str());
-                ImGui::SameLine(0, 4);
+                ImGui::SameLine(0, 6);
             }
             renderJsonInline(j);
         }
@@ -643,6 +638,12 @@ namespace sm
         editFfmpegPlaylistProbeIntervalSec_ = config.ffmpeg.playlistProbeIntervalSec;
         std::strncpy(editFfmpegProbeSize_, config.ffmpeg.probeSize.c_str(), sizeof(editFfmpegProbeSize_) - 1);
         std::strncpy(editFfmpegAnalyzeDuration_, config.ffmpeg.analyzeDuration.c_str(), sizeof(editFfmpegAnalyzeDuration_) - 1);
+
+        // System tray / behavior settings
+        editMinimizeToTray_ = config.minimizeToTray;
+#ifdef _WIN32
+        editAutoStart_ = SystemTray::isAutoStartEnabled();
+#endif
     }
 
     GuiApp::~GuiApp()
@@ -682,12 +683,12 @@ namespace sm
 
         // Set window icon (embedded RGBA pixel data)
         {
-            #include "resources/icon_data.h"
+#include "resources/icon_data.h"
             GLFWimage icons[2];
-            icons[0].width  = kIconWidth;
+            icons[0].width = kIconWidth;
             icons[0].height = kIconHeight;
             icons[0].pixels = const_cast<unsigned char *>(kIconPixels);
-            icons[1].width  = kIconSmallWidth;
+            icons[1].width = kIconSmallWidth;
             icons[1].height = kIconSmallHeight;
             icons[1].pixels = const_cast<unsigned char *>(kIconSmallPixels);
             glfwSetWindowIcon(window_, 2, icons);
@@ -701,6 +702,23 @@ namespace sm
         glfwSetKeyCallback(window_, glfwKeyCallback);
         glfwSetCharCallback(window_, glfwCharCallback);
         glfwSetWindowFocusCallback(window_, glfwWindowFocusCallback);
+
+        // ── GLFW iconify callback (minimize interception) ───────────
+        glfwSetWindowIconifyCallback(window_, [](GLFWwindow *w, int iconified)
+                                     {
+                                         auto *self = static_cast<GuiApp *>(glfwGetWindowUserPointer(w));
+                                         if (!self)
+                                             return;
+#ifdef _WIN32
+                                         if (iconified && self->config_.minimizeToTray)
+                                         {
+                                             // Hide window from taskbar → tray only
+                                             HWND hwnd = glfwGetWin32Window(w);
+                                             ShowWindow(hwnd, SW_HIDE);
+                                             self->minimizedToTray_ = true;
+                                         }
+#endif
+                                     });
 
         return true;
     }
@@ -845,6 +863,80 @@ namespace sm
 
         lastInputTime_ = glfwGetTime();
 
+#ifdef _WIN32
+        // ── Initialize system tray icon ─────────────────────────────
+        tray_.init(window_);
+
+        // Build tray context menu (rebuilt each frame for live status)
+        auto buildTrayMenu = [this]()
+        {
+            std::vector<TrayMenuItem> items;
+
+            // Status summary
+            int totalBots = 0, recording = 0, online = 0, errors = 0;
+            for (auto &s : cachedStates_)
+            {
+                totalBots++;
+                if (s.recording)
+                    recording++;
+                if (s.status == Status::Public || s.status == Status::Online)
+                    online++;
+                if (s.status == Status::Error || s.status == Status::ConnectionError)
+                    errors++;
+            }
+
+            items.push_back({"StreaMonitor v2.0", false});
+            items.push_back({"", true, true}); // separator
+            items.push_back({"Recording: " + std::to_string(recording) + " / Online: " + std::to_string(online), false});
+            items.push_back({"Total: " + std::to_string(totalBots) + " models", false});
+            if (errors > 0)
+                items.push_back({"Errors: " + std::to_string(errors), false});
+            items.push_back({"", true, true}); // separator
+            items.push_back({"Show Window"});
+            items.push_back({"Start All"});
+            items.push_back({"Stop All"});
+            items.push_back({"", true, true}); // separator
+            items.push_back({"Quit"});
+
+            tray_.setMenuItems(items, [this, errors](int idx)
+                               {
+                // Indices depend on whether "Errors" line is shown
+                int showIdx = errors > 0 ? 6 : 5;
+                int startIdx = showIdx + 1;
+                int stopIdx = showIdx + 2;
+                int quitIdx = showIdx + 4;
+
+                if (idx == showIdx)
+                {
+                    tray_.clearRestore();
+                    HWND hwnd = glfwGetWin32Window(window_);
+                    ShowWindow(hwnd, SW_SHOW);
+                    ShowWindow(hwnd, SW_RESTORE);
+                    SetForegroundWindow(hwnd);
+                    minimizedToTray_ = false;
+                }
+                else if (idx == startIdx)
+                {
+                    std::thread([this]() {
+                        manager_.startAll();
+                        manager_.startAllGroups();
+                    }).detach();
+                }
+                else if (idx == stopIdx)
+                {
+                    std::thread([this]() {
+                        manager_.stopAll();
+                        manager_.stopAllGroups();
+                    }).detach();
+                }
+                else if (idx == quitIdx)
+                {
+                    glfwSetWindowShouldClose(window_, GLFW_TRUE);
+                } });
+        };
+        buildTrayMenu(); // initial build
+#endif
+
         while (!glfwWindowShouldClose(window_))
         {
             // Determine frame rate target
@@ -858,6 +950,38 @@ namespace sm
             // the timeout expires.  Background threads call
             // glfwPostEmptyEvent() to wake us immediately on state changes.
             glfwWaitEventsTimeout(targetFrameTime);
+
+#ifdef _WIN32
+            // ── System tray message pump ────────────────────────────
+            tray_.pollEvents();
+
+            // Handle restore from tray (left-click on tray icon)
+            if (tray_.wantsRestore())
+            {
+                tray_.clearRestore();
+                HWND hwnd = glfwGetWin32Window(window_);
+                ShowWindow(hwnd, SW_SHOW);
+                ShowWindow(hwnd, SW_RESTORE);
+                SetForegroundWindow(hwnd);
+                minimizedToTray_ = false;
+                markActive();
+            }
+
+            // Update tray tooltip with live status
+            {
+                int rec = 0;
+                for (auto &s : cachedStates_)
+                    if (s.recording)
+                        rec++;
+                std::wstring tip = L"StreaMonitor";
+                if (rec > 0)
+                    tip += L" - Recording " + std::to_wstring(rec) + L" model(s)";
+                tray_.setTooltip(tip);
+            }
+
+            // Rebuild tray menu periodically (state changes)
+            buildTrayMenu();
+#endif
 
             auto now = Clock::now();
             animTime_ = std::chrono::duration<float>(now.time_since_epoch()).count();
@@ -899,6 +1023,10 @@ namespace sm
             // No secondary sleep — glfwWaitEventsTimeout at top of loop
             // is the sole rate limiter.
         }
+
+#ifdef _WIN32
+        tray_.shutdown();
+#endif
 
         return 0;
     }
@@ -1158,10 +1286,36 @@ namespace sm
                 .detach();
         }
         ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, {0.45f, 0.30f, 0.10f, 1.0f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.55f, 0.38f, 0.15f, 1.0f});
+        if (ImGui::Button(" Move to Unprocessed "))
+        {
+            std::thread([this]()
+                        { manager_.moveAllFilesToUnprocessed(); })
+                .detach();
+        }
+        ImGui::PopStyleColor(2);
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, {0.10f, 0.45f, 0.55f, 1.0f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.15f, 0.55f, 0.65f, 1.0f});
+        if (ImGui::Button(" Resync All "))
+        {
+            std::thread([this]()
+                        { manager_.resyncAll(); })
+                .detach();
+        }
+        ImGui::PopStyleColor(2);
+        ImGui::SameLine();
         ImGui::TextColored(COL_TEXT_DIM, "(auto-saved)");
 
         // Right side: search bar + filter
-        ImGui::SameLine(ImGui::GetWindowWidth() - 420 * dpiScale_);
+        float searchFilterWidth = (200 + 150 + 12) * dpiScale_;
+        float rightX = ImGui::GetWindowWidth() - searchFilterWidth;
+        float curX = ImGui::GetCursorPosX();
+        if (rightX > curX + 20 * dpiScale_)
+            ImGui::SameLine(rightX);
+        else
+            ImGui::SameLine();
         ImGui::SetNextItemWidth(200 * dpiScale_);
         ImGui::InputTextWithHint("##Search", "Search models...", searchBuf_, sizeof(searchBuf_));
 
@@ -2309,13 +2463,34 @@ namespace sm
 
         // Calculate positions for right-aligned controls
         float clearBtnWidth = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 4;
+        float copyBtnWidth = ImGui::CalcTextSize("Copy Logs").x + ImGui::GetStyle().FramePadding.x * 4;
         float checkboxWidth = ImGui::CalcTextSize("Auto-scroll").x + ImGui::GetStyle().FramePadding.x * 2 + ImGui::GetFrameHeight();
         float spacing = ImGui::GetStyle().ItemSpacing.x;
         float rightEdge = ImGui::GetContentRegionAvail().x;
-        float controlsStartX = ImGui::GetCursorPosX() + rightEdge - clearBtnWidth - checkboxWidth - spacing;
+        float controlsStartX = ImGui::GetCursorPosX() + rightEdge - clearBtnWidth - copyBtnWidth - checkboxWidth - spacing * 2;
 
         ImGui::SameLine(controlsStartX);
         ImGui::Checkbox("Auto-scroll", &autoScroll_);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy Logs"))
+        {
+            std::lock_guard lock(logMutex_);
+            std::string allLogs;
+            allLogs.reserve(logEntries_.size() * 80);
+            for (const auto &entry : logEntries_)
+            {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                   entry.time.time_since_epoch()).count();
+                int hours = (int)(elapsed / 3600) % 24;
+                int mins = (int)(elapsed / 60) % 60;
+                int secs = (int)elapsed % 60;
+                char timeBuf[16];
+                snprintf(timeBuf, sizeof(timeBuf), "[%02d:%02d:%02d]", hours, mins, secs);
+                allLogs += timeBuf;
+                allLogs += " [" + entry.source + "] " + entry.message + "\n";
+            }
+            copyToClipboard(allLogs);
+        }
         ImGui::SameLine();
         if (ImGui::SmallButton("Clear"))
         {
@@ -2578,6 +2753,13 @@ namespace sm
             config_.ffmpeg.playlistProbeIntervalSec = editFfmpegPlaylistProbeIntervalSec_;
             config_.ffmpeg.probeSize = editFfmpegProbeSize_;
             config_.ffmpeg.analyzeDuration = editFfmpegAnalyzeDuration_;
+
+            // System tray & auto-start
+            config_.minimizeToTray = editMinimizeToTray_;
+            config_.autoStartOnLogin = editAutoStart_;
+#ifdef _WIN32
+            SystemTray::setAutoStart(editAutoStart_);
+#endif
 
             // Auto-save to disk
             config_.saveToFile("app_config.json");
@@ -2924,6 +3106,24 @@ namespace sm
         static int minFreeGb = 5;
         ImGui::SliderInt("Min Free Space (GB)", &minFreeGb, 1, 100);
         ImGui::TextColored(COL_TEXT_DIM, "Pause recordings when free space drops below threshold");
+
+#ifdef _WIN32
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("System Tray");
+        if (ImGui::Checkbox("Minimize to System Tray", &editMinimizeToTray_))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "When minimized, hide window to system tray instead of taskbar");
+
+        if (ImGui::Checkbox("Start with Windows", &editAutoStart_))
+            editDirtyFlag_ = true;
+        if (SystemTray::isAutoStartEnabled())
+            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.3f, 1.0f), "Currently registered in Windows startup");
+        else
+            ImGui::TextColored(COL_TEXT_DIM, "Add to Windows startup (HKCU\\Run registry key)");
+#endif
     }
 
     void GuiApp::renderSettingsSites()
@@ -3545,6 +3745,10 @@ namespace sm
             ImGui::Text("Country:         %s", bot.country.c_str());
         ImGui::Text("Running:         %s", bot.running ? "Yes" : "No");
         ImGui::Text("Recording:       %s", bot.recording ? "Yes" : "No");
+        if (bot.recording && bot.recordingStats.recordingWidth > 0)
+            ImGui::Text("Resolution:      %dx%d", bot.recordingStats.recordingWidth, bot.recordingStats.recordingHeight);
+        else if (bot.recordingStats.recordingWidth > 0)
+            ImGui::TextColored(COL_TEXT_DIM, "Last Resolution: %dx%d", bot.recordingStats.recordingWidth, bot.recordingStats.recordingHeight);
         if (bot.mobile)
             ImGui::TextColored(COL_ORANGE, "Mobile:          Yes (broadcasting from phone)");
         ImGui::Text("Errors:          %d", bot.consecutiveErrors);
@@ -3617,7 +3821,7 @@ namespace sm
 
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 6));
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.07f, 0.07f, 0.09f, 1.0f});
-                ImGui::BeginChild("##ApiJson", ImVec2(0, 250 * dpiScale_), true,
+                ImGui::BeginChild("##ApiJson", ImVec2(0, 350 * dpiScale_), true,
                                   ImGuiWindowFlags_HorizontalScrollbar);
 
                 if (jsonShowRaw_)

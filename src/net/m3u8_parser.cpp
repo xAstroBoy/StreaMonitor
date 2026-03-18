@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <regex>
 #include <cmath>
+#include <iomanip>
 #include <spdlog/spdlog.h>
 
 namespace sm
@@ -140,11 +141,36 @@ namespace sm
             if (!line.empty() && line.back() == '\r')
                 line.pop_back();
 
+            // Parse audio renditions: #EXT-X-MEDIA:TYPE=AUDIO,...
+            if (line.find("#EXT-X-MEDIA:") == 0 || line.find("#EXT-X-MEDIA :") == 0)
+            {
+                std::string typeVal = extractAttribute(line, "TYPE");
+                if (typeVal == "AUDIO")
+                {
+                    HLSAudioRendition audio;
+                    audio.groupId = extractAttribute(line, "GROUP-ID");
+                    audio.name = extractAttribute(line, "NAME");
+                    std::string uri = extractAttribute(line, "URI");
+                    if (!uri.empty())
+                        audio.uri = resolveUrl(baseUrl, uri);
+                    audio.rawLine = line;
+                    master.audioRenditions.push_back(std::move(audio));
+                }
+            }
+
             if (line.find("#EXT-X-STREAM-INF") == 0)
             {
                 HLSVariant variant;
                 variant.bandwidth = extractIntAttribute(line, "BANDWIDTH");
                 variant.codecs = extractAttribute(line, "CODECS");
+                variant.audioGroupId = extractAttribute(line, "AUDIO");
+
+                // FRAME-RATE=
+                std::string fr = extractAttribute(line, "FRAME-RATE");
+                if (!fr.empty())
+                {
+                    try { variant.frameRate = std::stof(fr); } catch (...) {}
+                }
 
                 // RESOLUTION=WxH
                 std::string res = extractAttribute(line, "RESOLUTION");
@@ -364,6 +390,54 @@ namespace sm
         }
 
         return master.variants.front();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Build filtered master playlist for split audio/video streams
+    // Creates a proper master playlist with only the selected variant
+    // and its matching audio group, using absolute URLs throughout.
+    // FFmpeg will read both audio and video chunklists and sync them
+    // via EXT-X-PROGRAM-DATE-TIME tags.
+    // ─────────────────────────────────────────────────────────────────
+    std::string M3U8Parser::buildFilteredMaster(const HLSMasterPlaylist &master,
+                                                const HLSVariant &selectedVariant,
+                                                const std::string &baseUrl)
+    {
+        std::ostringstream out;
+        out << "#EXTM3U\n";
+        out << "#EXT-X-VERSION:6\n";
+        out << "#EXT-X-INDEPENDENT-SEGMENTS\n";
+
+        // Emit only the audio renditions that match the selected variant's audio group
+        if (!selectedVariant.audioGroupId.empty())
+        {
+            for (const auto &audio : master.audioRenditions)
+            {
+                if (audio.groupId == selectedVariant.audioGroupId && !audio.uri.empty())
+                {
+                    // Reconstruct the EXT-X-MEDIA line with absolute URI
+                    out << "#EXT-X-MEDIA:TYPE=AUDIO"
+                        << ",GROUP-ID=\"" << audio.groupId << "\""
+                        << ",NAME=\"" << audio.name << "\""
+                        << ",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,CHANNELS=\"2\""
+                        << ",URI=\"" << audio.uri << "\"\n";
+                }
+            }
+        }
+
+        // Emit the selected variant
+        out << "#EXT-X-STREAM-INF:BANDWIDTH=" << selectedVariant.bandwidth
+            << ",RESOLUTION=" << selectedVariant.width << "x" << selectedVariant.height;
+        if (selectedVariant.frameRate > 0)
+            out << ",FRAME-RATE=" << std::fixed << std::setprecision(3) << selectedVariant.frameRate;
+        if (!selectedVariant.codecs.empty())
+            out << ",CODECS=\"" << selectedVariant.codecs << "\"";
+        if (!selectedVariant.audioGroupId.empty())
+            out << ",AUDIO=\"" << selectedVariant.audioGroupId << "\"";
+        out << "\n";
+        out << selectedVariant.url << "\n";
+
+        return out.str();
     }
 
 } // namespace sm

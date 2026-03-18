@@ -208,8 +208,13 @@ namespace sm
 #ifdef _WIN32
     static bool httpDownload(const std::string &url, std::vector<unsigned char> &out)
     {
+        // Handle protocol-relative URLs (e.g. //img.strpst.com/...)
+        std::string fullUrl = url;
+        if (fullUrl.size() > 2 && fullUrl[0] == '/' && fullUrl[1] == '/')
+            fullUrl = "https:" + fullUrl;
+
         // Parse URL
-        std::wstring wurl(url.begin(), url.end());
+        std::wstring wurl(fullUrl.begin(), fullUrl.end());
 
         URL_COMPONENTS urlComp = {};
         urlComp.dwStructSize = sizeof(urlComp);
@@ -221,11 +226,14 @@ namespace sm
         urlComp.dwUrlPathLength = 2048;
 
         if (!WinHttpCrackUrl(wurl.c_str(), (DWORD)wurl.size(), 0, &urlComp))
+        {
+            spdlog::debug("[ImageCache] WinHttpCrackUrl failed for: {}", fullUrl);
             return false;
+        }
 
         bool isHttps = (urlComp.nScheme == INTERNET_SCHEME_HTTPS);
 
-        HINTERNET session = WinHttpOpen(L"StreaMonitor/2.0",
+        HINTERNET session = WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) StreaMonitor/2.0",
                                         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                         WINHTTP_NO_PROXY_NAME,
                                         WINHTTP_NO_PROXY_BYPASS, 0);
@@ -251,17 +259,26 @@ namespace sm
             return false;
         }
 
-        // Set timeouts (8s — prevent hangs on slow/dead CDN URLs)
-        DWORD timeout = 8000;
+        // Enable automatic redirect following
+        DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+        WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
+
+        // Set timeouts (10s — prevent hangs on slow/dead CDN URLs)
+        DWORD timeout = 10000;
         WinHttpSetOption(request, WINHTTP_OPTION_RESOLVE_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(request, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(request, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
         WinHttpSetOption(request, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
 
+        // Add Accept header for images
+        const wchar_t *acceptHeader = L"Accept: image/jpeg, image/png, image/webp, */*\r\n";
+        WinHttpAddRequestHeaders(request, acceptHeader, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+
         if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
             !WinHttpReceiveResponse(request, nullptr))
         {
+            spdlog::debug("[ImageCache] WinHTTP request failed for: {}", fullUrl);
             WinHttpCloseHandle(request);
             WinHttpCloseHandle(connect);
             WinHttpCloseHandle(session);
@@ -276,6 +293,7 @@ namespace sm
                             WINHTTP_NO_HEADER_INDEX);
         if (statusCode != 200)
         {
+            spdlog::debug("[ImageCache] HTTP {} for: {}", statusCode, fullUrl);
             WinHttpCloseHandle(request);
             WinHttpCloseHandle(connect);
             WinHttpCloseHandle(session);

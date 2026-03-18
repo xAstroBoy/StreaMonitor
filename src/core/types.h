@@ -152,6 +152,8 @@ namespace sm
         uint32_t stallsDetected = 0;
         uint32_t restartsPerformed = 0;
         double currentSpeed = 0.0;
+        int recordingWidth = 0;  // current recording resolution
+        int recordingHeight = 0; // current recording resolution
         std::chrono::steady_clock::time_point recordingStarted;
         std::string currentFile;
 
@@ -168,6 +170,8 @@ namespace sm
             stallsDetected = 0;
             restartsPerformed = 0;
             currentSpeed = 0.0;
+            recordingWidth = 0;
+            recordingHeight = 0;
             currentFile.clear();
         }
     };
@@ -180,6 +184,8 @@ namespace sm
         int height = 0;
         int bandwidth = 0;
         std::string codecs;
+        std::string audioGroupId; // AUDIO= attribute from EXT-X-STREAM-INF
+        float frameRate = 0.0f;   // FRAME-RATE= attribute
     };
 
     // ── Cancellation token ──────────────────────────────────────────

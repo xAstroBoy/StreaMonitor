@@ -39,9 +39,20 @@ namespace sm
     // ── Master playlist variant ─────────────────────────────────────
     // (HLSVariant already in types.h, re-used here)
 
+    // ── Audio rendition from #EXT-X-MEDIA ───────────────────────────
+    struct HLSAudioRendition
+    {
+        std::string groupId; // GROUP-ID
+        std::string name;    // NAME
+        std::string uri;     // URI (absolute, resolved)
+        std::string rawLine; // original #EXT-X-MEDIA line for reconstruction
+    };
+
     struct HLSMasterPlaylist
     {
         std::vector<HLSVariant> variants;
+        std::vector<HLSAudioRendition> audioRenditions;
+        bool hasSplitAudio() const { return !audioRenditions.empty(); }
         bool isValid() const { return !variants.empty(); }
     };
 
@@ -72,6 +83,13 @@ namespace sm
         // Extract query parameters from URL and apply to another
         static std::string inheritQueryParams(const std::string &sourceUrl,
                                               const std::string &targetUrl);
+
+        // Build a filtered master playlist string with absolute URLs
+        // containing only the selected variant and its matching audio group.
+        // Used for CB LLHLS split audio/video playlists.
+        static std::string buildFilteredMaster(const HLSMasterPlaylist &master,
+                                               const HLSVariant &selectedVariant,
+                                               const std::string &baseUrl);
     };
 
 } // namespace sm

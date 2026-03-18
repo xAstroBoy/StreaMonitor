@@ -180,6 +180,7 @@ namespace sm
         void setMobile(bool mobile);
         void setLastError(const std::string &err, int httpCode = 0);
         void setLastApiResponse(const std::string &json);
+        void setRecordingResolution(int width, int height);
 
         // Config pointer (set by start/configure)
         const AppConfig *config_ = nullptr;

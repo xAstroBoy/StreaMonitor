@@ -392,6 +392,9 @@ namespace sm
 
             logger_->info("Selected quality: {}x{}", selected->width, selected->height);
 
+            // Store selected resolution for stats reporting
+            setRecordingResolution(selected->width, selected->height);
+
             // Resolve the variant URL
             auto variantUrl = M3U8Parser::resolveUrl(playlistUrl, selected->url);
 

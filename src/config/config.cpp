@@ -360,6 +360,10 @@ namespace sm
                 userAgent = j["user_agent"];
             if (j.contains("verify_ssl"))
                 verifySsl = j["verify_ssl"];
+            if (j.contains("minimize_to_tray"))
+                minimizeToTray = j["minimize_to_tray"];
+            if (j.contains("auto_start_on_login"))
+                autoStartOnLogin = j["auto_start_on_login"];
             if (j.contains("debug"))
                 debug = j["debug"];
             if (j.contains("segment_time"))
@@ -480,6 +484,8 @@ namespace sm
         j["ffmpeg_path"] = ffmpegPath.string();
         j["user_agent"] = userAgent;
         j["verify_ssl"] = verifySsl;
+        j["minimize_to_tray"] = minimizeToTray;
+        j["auto_start_on_login"] = autoStartOnLogin;
         j["debug"] = debug;
         j["segment_time"] = segmentTimeSec;
         j["web_host"] = webHost;

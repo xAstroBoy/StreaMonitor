@@ -52,6 +52,10 @@ namespace sm
         // Disk
         float minFreeDiskPercent = 5.0f;
 
+        // Behavior
+        bool minimizeToTray = true;    // Minimize to system tray instead of taskbar
+        bool autoStartOnLogin = false; // Register in Windows startup
+
         // Debug
         bool debug = false;
 

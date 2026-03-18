@@ -9,6 +9,9 @@
 #include "config/config.h"
 #include "gui/image_cache.h"
 #include "gui/imgui_log_sink.h"
+#ifdef _WIN32
+#include "gui/system_tray.h"
+#endif
 #include <imgui.h>
 #include <string>
 #include <vector>
@@ -228,6 +231,14 @@ namespace sm
         bool editProxyEnabled_ = false;
         int editProxyType_ = 0; // 0=HTTP, 1=HTTPS, 2=SOCKS4, 3=SOCKS4A, 4=SOCKS5, 5=SOCKS5H
         char editProxyUrl_[512] = {};
+
+        // System tray (Windows)
+#ifdef _WIN32
+        SystemTray tray_;
+        bool minimizedToTray_ = false;
+#endif
+        bool editMinimizeToTray_ = true;
+        bool editAutoStart_ = false;
 
         // ── Adaptive frame rate (CPU idle optimization) ─────────────
         double lastInputTime_ = 0.0;       // glfwGetTime() of last user input

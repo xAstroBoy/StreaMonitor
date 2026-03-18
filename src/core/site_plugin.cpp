@@ -345,6 +345,13 @@ namespace sm
             state_.lastApiResponse = json;
     }
 
+    void SitePlugin::setRecordingResolution(int width, int height)
+    {
+        std::lock_guard lock(stateMutex_);
+        state_.recordingStats.recordingWidth = width;
+        state_.recordingStats.recordingHeight = height;
+    }
+
     void SitePlugin::forceResync()
     {
         resyncPending_.store(true);
@@ -387,7 +394,13 @@ namespace sm
         }
 
         for (const auto &v : master.variants)
-            logger_->debug("  Variant: {}x{} @ {} bps", v.width, v.height, v.bandwidth);
+        {
+            std::string audioInfo = v.audioGroupId.empty() ? "" : " audio=" + v.audioGroupId;
+            logger_->debug("  Variant: {}x{} @ {} bps{}", v.width, v.height, v.bandwidth, audioInfo);
+        }
+
+        if (master.hasSplitAudio())
+            logger_->info("Detected split audio/video playlist ({} audio renditions)", master.audioRenditions.size());
 
         // Use config values (not hardcoded!)
         int wantedRes = config_ ? config_->wantedResolution : 99999;
@@ -460,7 +473,38 @@ namespace sm
 
         logger_->info("Selected quality: {}x{}", selected->width, selected->height);
 
-        // Use resolveUrl (like Python's urljoin) to resolve relative URLs
+        // Store selected resolution for stats reporting
+        setRecordingResolution(selected->width, selected->height);
+
+        // If the master has split audio/video (LLHLS format), build a filtered
+        // master playlist and write it to a temp file so ffmpeg can read both
+        // audio and video chunklists and sync them via EXT-X-PROGRAM-DATE-TIME.
+        if (master.hasSplitAudio() && !selected->audioGroupId.empty())
+        {
+            std::string filteredContent = M3U8Parser::buildFilteredMaster(master, *selected, masterUrl);
+            logger_->debug("Built filtered master playlist for split audio:\n{}", filteredContent);
+
+            // Write to a temp file that ffmpeg can read
+            auto tempDir = std::filesystem::temp_directory_path() / "streamonitor";
+            std::filesystem::create_directories(tempDir);
+            auto tempFile = tempDir / (username() + "_" + siteSlug() + "_master.m3u8");
+            {
+                std::ofstream ofs(tempFile, std::ios::trunc);
+                if (ofs.good())
+                {
+                    ofs << filteredContent;
+                    ofs.close();
+                    logger_->info("Wrote filtered master playlist to {}", tempFile.string());
+                    return tempFile.string();
+                }
+                else
+                {
+                    logger_->warn("Failed to write filtered master, falling back to variant URL");
+                }
+            }
+        }
+
+        // Normal case: return the selected variant's URL directly
         return M3U8Parser::resolveUrl(masterUrl, selected->url);
     }
 
