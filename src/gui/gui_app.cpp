@@ -404,66 +404,10 @@ namespace sm
 
     static void renderJsonTree(const std::string &jsonStr, const char *searchBuf)
     {
-        // Strip truncation suffix if present (setLastApiResponse adds it)
-        std::string cleanJson = jsonStr;
-        {
-            const std::string kTruncSuffix = "... (truncated)";
-            if (cleanJson.size() > kTruncSuffix.size() &&
-                cleanJson.compare(cleanJson.size() - kTruncSuffix.size(),
-                                  kTruncSuffix.size(), kTruncSuffix) == 0)
-            {
-                cleanJson.erase(cleanJson.size() - kTruncSuffix.size());
-                // Try to make the truncated JSON parseable by closing open structures.
-                // Find the last complete value by scanning backwards for a comma or brace.
-                // Strategy: trim trailing partial value back to last comma, then close
-                // all open braces/brackets.
-                // First, strip any trailing partial string/value
-                while (!cleanJson.empty())
-                {
-                    char ch = cleanJson.back();
-                    if (ch == ',' || ch == '{' || ch == '[' || ch == ':' || ch == '}'  || ch == ']')
-                        break;
-                    cleanJson.pop_back();
-                }
-                // Remove trailing comma if present
-                if (!cleanJson.empty() && cleanJson.back() == ',')
-                    cleanJson.pop_back();
-                // Remove trailing colon (partial key:value)
-                if (!cleanJson.empty() && cleanJson.back() == ':')
-                {
-                    cleanJson.pop_back();
-                    // Also remove the key string
-                    while (!cleanJson.empty() && cleanJson.back() != ',')
-                    {
-                        char ch = cleanJson.back();
-                        cleanJson.pop_back();
-                        if (ch == '{' || ch == '[')
-                        {
-                            cleanJson.push_back(ch);
-                            break;
-                        }
-                    }
-                    if (!cleanJson.empty() && cleanJson.back() == ',')
-                        cleanJson.pop_back();
-                }
-                // Count open braces/brackets and close them
-                int braces = 0, brackets = 0;
-                for (char ch : cleanJson)
-                {
-                    if (ch == '{') braces++;
-                    else if (ch == '}') braces--;
-                    else if (ch == '[') brackets++;
-                    else if (ch == ']') brackets--;
-                }
-                while (brackets > 0) { cleanJson += ']'; brackets--; }
-                while (braces > 0)   { cleanJson += '}'; braces--; }
-            }
-        }
-
         nlohmann::json parsed;
         try
         {
-            parsed = nlohmann::json::parse(cleanJson);
+            parsed = nlohmann::json::parse(jsonStr);
         }
         catch (...)
         {
