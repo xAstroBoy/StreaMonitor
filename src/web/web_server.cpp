@@ -1040,7 +1040,8 @@ namespace sm
 
         if (ret == NO_ERROR)
         {
-            std::string fallbackIp; // IP without gateway as fallback
+            std::string ipWithGateway;  // First IP with a real gateway
+            std::string fallbackIp;     // First valid IP without gateway
 
             for (auto adapter = pAddresses; adapter; adapter = adapter->Next)
             {
@@ -1049,20 +1050,27 @@ namespace sm
                 if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
                     continue;
 
-                // Check if this adapter has a default gateway
+                // Check if this adapter has a non-zero default gateway
                 bool hasGateway = false;
                 for (auto gw = adapter->FirstGatewayAddress; gw; gw = gw->Next)
                 {
-                    auto gwSa = reinterpret_cast<sockaddr_in *>(gw->Address.lpSockaddr);
-                    if (gwSa->sin_addr.s_addr != 0) // Non-zero gateway = has route
+                    if (gw->Address.lpSockaddr->sa_family == AF_INET)
                     {
-                        hasGateway = true;
-                        break;
+                        auto gwSa = reinterpret_cast<sockaddr_in *>(gw->Address.lpSockaddr);
+                        // Check for non-zero gateway (0.0.0.0 means no gateway)
+                        if (gwSa->sin_addr.s_addr != 0)
+                        {
+                            hasGateway = true;
+                            break;
+                        }
                     }
                 }
 
                 for (auto unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next)
                 {
+                    if (unicast->Address.lpSockaddr->sa_family != AF_INET)
+                        continue;
+
                     auto sa = reinterpret_cast<sockaddr_in *>(unicast->Address.lpSockaddr);
                     char ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
@@ -1073,18 +1081,30 @@ namespace sm
                         continue;
 
                     // Prefer interfaces with gateway (routable to internet/LAN)
-                    if (hasGateway)
-                        return ipStr;
-
-                    // Store first valid IP as fallback
-                    if (fallbackIp.empty())
+                    if (hasGateway && ipWithGateway.empty())
+                    {
+                        ipWithGateway = ipStr;
+                        spdlog::debug("Found IP with gateway: {}", ipStr);
+                    }
+                    else if (fallbackIp.empty())
+                    {
                         fallbackIp = ipStr;
+                        spdlog::debug("Found IP without gateway (fallback): {}", ipStr);
+                    }
                 }
             }
 
-            // No interface with gateway found — use fallback
+            // Prefer IP with gateway, fall back to any valid IP
+            if (!ipWithGateway.empty())
+            {
+                spdlog::info("Using IP with gateway: {}", ipWithGateway);
+                return ipWithGateway;
+            }
             if (!fallbackIp.empty())
+            {
+                spdlog::info("Using fallback IP (no gateway): {}", fallbackIp);
                 return fallbackIp;
+            }
         }
 #else
         struct ifaddrs *ifaddr;
