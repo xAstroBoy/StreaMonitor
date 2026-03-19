@@ -250,34 +250,65 @@ namespace sm
         std::vector<BYTE> buf(bufLen);
         auto pAddr = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
         DWORD ret = GetAdaptersAddresses(AF_INET,
-                                         GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+                                         GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_INCLUDE_GATEWAYS,
                                          nullptr, pAddr, &bufLen);
         if (ret == ERROR_BUFFER_OVERFLOW)
         {
             buf.resize(bufLen);
             pAddr = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
             ret = GetAdaptersAddresses(AF_INET,
-                                       GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+                                       GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_INCLUDE_GATEWAYS,
                                        nullptr, pAddr, &bufLen);
         }
         if (ret == NO_ERROR)
         {
+            std::string ipWithGateway;
+            std::string fallbackIp;
+
             for (auto a = pAddr; a; a = a->Next)
             {
                 if (a->OperStatus != IfOperStatusUp)
                     continue;
                 if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
                     continue;
+
+                // Check if this adapter has a non-zero gateway
+                bool hasGateway = false;
+                for (auto gw = a->FirstGatewayAddress; gw; gw = gw->Next)
+                {
+                    if (gw->Address.lpSockaddr->sa_family == AF_INET)
+                    {
+                        auto gwSa = reinterpret_cast<sockaddr_in *>(gw->Address.lpSockaddr);
+                        if (gwSa->sin_addr.s_addr != 0)
+                        {
+                            hasGateway = true;
+                            break;
+                        }
+                    }
+                }
+
                 for (auto u = a->FirstUnicastAddress; u; u = u->Next)
                 {
+                    if (u->Address.lpSockaddr->sa_family != AF_INET)
+                        continue;
                     auto sa = reinterpret_cast<sockaddr_in *>(u->Address.lpSockaddr);
                     char ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
                     std::string s(ip);
-                    if (s != "127.0.0.1" && s.substr(0, 4) != "169.")
-                        return s;
+                    if (s == "127.0.0.1" || s.substr(0, 4) == "169.")
+                        continue;
+
+                    if (hasGateway && ipWithGateway.empty())
+                        ipWithGateway = s;
+                    else if (fallbackIp.empty())
+                        fallbackIp = s;
                 }
             }
+
+            if (!ipWithGateway.empty())
+                return ipWithGateway;
+            if (!fallbackIp.empty())
+                return fallbackIp;
         }
 #else
         struct ifaddrs *ifaddr;
