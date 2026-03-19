@@ -1054,6 +1054,9 @@ namespace sm
             // Determine frame rate target
             double glfwNow = glfwGetTime();
             bool isActive = (glfwNow - lastInputTime_) < kIdleTimeout || guiDirty_.exchange(false);
+            // Stream View / Bot Detail need consistent 30fps for smooth live video
+            if (showStreamView_ || showBotDetail_)
+                isActive = true;
             double targetFrameTime = isActive ? kActiveFrameTime : kIdleFrameTime;
 
             // Wait for events OR timeout — this is the SOLE rate limiter.
@@ -4825,15 +4828,30 @@ namespace sm
         if (manager_.consumePreview(bot.username, bot.siteName, frame, previewVersion_))
         {
             if (detailPreviewTex_ == 0)
+            {
                 glGenTextures(1, &detailPreviewTex_);
+                glBindTexture(GL_TEXTURE_2D, detailPreviewTex_);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            }
+            else
+            {
+                glBindTexture(GL_TEXTURE_2D, detailPreviewTex_);
+            }
 
-            glBindTexture(GL_TEXTURE_2D, detailPreviewTex_);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame.width, frame.height, 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE, frame.pixels.data());
+            // Fast path: if dimensions unchanged, update in-place (no realloc)
+            if (frame.width == detailPreviewW_ && frame.height == detailPreviewH_)
+            {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height,
+                                GL_RGBA, GL_UNSIGNED_BYTE, frame.pixels.data());
+            }
+            else
+            {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame.width, frame.height, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, frame.pixels.data());
+            }
             glBindTexture(GL_TEXTURE_2D, 0);
 
             detailPreviewW_ = frame.width;
@@ -4927,15 +4945,25 @@ namespace sm
             {
                 // Upload RGBA pixels directly to a GL texture
                 if (detailPreviewTex_ == 0)
+                {
                     glGenTextures(1, &detailPreviewTex_);
+                    glBindTexture(GL_TEXTURE_2D, detailPreviewTex_);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+                else
+                {
+                    glBindTexture(GL_TEXTURE_2D, detailPreviewTex_);
+                }
 
-                glBindTexture(GL_TEXTURE_2D, detailPreviewTex_);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame.width, frame.height, 0,
-                             GL_RGBA, GL_UNSIGNED_BYTE, frame.pixels.data());
+                if (frame.width == detailPreviewW_ && frame.height == detailPreviewH_)
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height,
+                                    GL_RGBA, GL_UNSIGNED_BYTE, frame.pixels.data());
+                else
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame.width, frame.height, 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, frame.pixels.data());
                 glBindTexture(GL_TEXTURE_2D, 0);
 
                 detailPreviewW_ = frame.width;
