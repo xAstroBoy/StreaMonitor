@@ -1294,6 +1294,13 @@ namespace sm
             // Unknown/unexpected status: keep waiting to preserve append behavior.
             return {PauseAction::Wait, ""}; });
 
+        // ── Status check for SegmentFeeder early abort ────────────
+        // When consecutive segment downloads fail, the feeder calls
+        // this to check if the model went private/offline so it can
+        // abort immediately instead of grinding through 30 errors.
+        recorder.setStatusCheckCallback([this]() -> Status
+                                        { return checkStatus(); });
+
         cancelToken_.reset();
 
         // Set resolution change callback — when the stream's resolution

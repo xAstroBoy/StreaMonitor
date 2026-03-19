@@ -140,6 +140,15 @@ namespace sm
         // returns empty, recording continues into the same file.
         void setResolutionChangeCallback(ResolutionChangeCallback cb) { resChangeCb_ = std::move(cb); }
 
+        // ── Status check callback (for SegmentFeeder early abort) ────
+        // Called by the SegmentFeeder thread every N consecutive segment
+        // download failures to check if the model went private/offline.
+        // Returns the current model Status. If Private/Offline/NotExist/
+        // Deleted, the feeder aborts immediately instead of grinding
+        // through 30 errors.
+        using StatusCheckCallback = std::function<Status()>;
+        void setStatusCheckCallback(StatusCheckCallback cb) { statusCheckCb_ = std::move(cb); }
+
         // ── Logger (optional — defaults to global spdlog) ───────────
         void setLogger(std::shared_ptr<spdlog::logger> lg) { log_ = std::move(lg); }
 
@@ -155,6 +164,7 @@ namespace sm
         AudioDataCallback audioDataCb_;
         PauseResumeCallback pauseResumeCb_;
         ResolutionChangeCallback resChangeCb_;
+        StatusCheckCallback statusCheckCb_;
         mutable std::mutex statsMutex_;
         RecordingStats stats_;
 
@@ -354,6 +364,9 @@ namespace sm
             // ── Config ──
             std::shared_ptr<spdlog::logger> log = spdlog::default_logger();
             const AppConfig *config = nullptr;
+
+            // ── Status check (early abort on private/offline) ──
+            StatusCheckCallback statusCheckCb;
 
             bool isStale(int stallSec = 30) const
             {

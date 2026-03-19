@@ -351,6 +351,31 @@ namespace sm
                             log->info("SegmentFeeder: stream offline (404)");
                             break;
                         }
+
+                        // Every 5 consecutive errors, check if the model
+                        // changed status (private/offline/etc) — abort
+                        // early instead of grinding through 30 errors.
+                        if (consecutiveErrors % 5 == 0 && statusCheckCb)
+                        {
+                            try
+                            {
+                                Status st = statusCheckCb();
+                                if (st != Status::Public && st != Status::Online)
+                                {
+                                    log->info("SegmentFeeder: model status changed to {} "
+                                              "after {} errors — aborting",
+                                              statusToString(st), consecutiveErrors);
+                                    break;
+                                }
+                                log->debug("SegmentFeeder: model still {} after {} errors, "
+                                           "continuing", statusToString(st), consecutiveErrors);
+                            }
+                            catch (const std::exception &e)
+                            {
+                                log->debug("SegmentFeeder: status check failed: {}", e.what());
+                            }
+                        }
+
                         if (consecutiveErrors >= 30)
                         {
                             log->error("SegmentFeeder: {} consecutive errors, giving up",
@@ -2392,6 +2417,7 @@ namespace sm
                 };
             }
 
+            feeder.statusCheckCb = statusCheckCb_;
             if (feeder.start(hlsUrl, feederUa, cancel, feederDecoder))
             {
                 useFeeder = true;
@@ -2917,6 +2943,7 @@ namespace sm
                                 for (int i = 0; i < 20 && !cancel.isCancelled(); i++)
                                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
+                                feeder.statusCheckCb = statusCheckCb_;
                                 if (!feeder.start(hlsUrl, feederUa, cancel, feederDecoder))
                                 {
                                     log_->error("SegmentFeeder restart failed");
@@ -3016,6 +3043,7 @@ namespace sm
                             // Restart feeder with new URL
                             if (useFeeder)
                             {
+                                feeder.statusCheckCb = statusCheckCb_;
                                 if (feeder.start(inputUrl, feederUa, cancel, feederDecoder))
                                 {
                                     log_->info("Recording resumed with new stream");

@@ -27,9 +27,12 @@ import zipfile
 import tarfile
 from pathlib import Path
 
+import re
+
 ROOT = Path(__file__).resolve().parent
 BUILD_DIR = ROOT / "build"
 DIST_DIR = ROOT / "dist"  # Package into project-local dist/ folder
+CMAKE_FILE = ROOT / "CMakeLists.txt"
 
 # Platform detection
 SYSTEM = platform.system().lower()
@@ -99,6 +102,47 @@ def rmdir(p: Path):
     if p.exists():
         print(f"Removing {p} ...")
         shutil.rmtree(p, ignore_errors=True)
+
+
+def bump_version() -> str:
+    """Auto-increment patch version in CMakeLists.txt and return new version."""
+    content = CMAKE_FILE.read_text(encoding="utf-8")
+    
+    # Match: project(StreaMonitor VERSION X.Y.Z ...)
+    pattern = r'(project\s*\(\s*StreaMonitor\s+VERSION\s+)(\d+)\.(\d+)\.(\d+)'
+    match = re.search(pattern, content)
+    
+    if not match:
+        print("[!] Could not find version in CMakeLists.txt, skipping bump")
+        return "unknown"
+    
+    major = int(match.group(2))
+    minor = int(match.group(3))
+    patch = int(match.group(4))
+    
+    # Increment patch version
+    new_patch = patch + 1
+    new_version = f"{major}.{minor}.{new_patch}"
+    
+    # Replace in content
+    new_content = re.sub(
+        pattern,
+        rf'\g<1>{major}.{minor}.{new_patch}',
+        content
+    )
+    
+    CMAKE_FILE.write_text(new_content, encoding="utf-8")
+    print(f"\n[+] Version bumped: {major}.{minor}.{patch} -> {new_version}")
+    
+    return new_version
+
+
+def get_current_version() -> str:
+    """Read current version from CMakeLists.txt without modifying it."""
+    content = CMAKE_FILE.read_text(encoding="utf-8")
+    match = re.search(r'project\s*\(\s*StreaMonitor\s+VERSION\s+(\d+\.\d+\.\d+)', content)
+    return match.group(1) if match else "unknown"
+
 
 # ──────────────────────────────────────────────
 # Steps
@@ -296,6 +340,8 @@ def main():
                         help="Override output directory (default: ./dist)")
     parser.add_argument("--system-libs", action="store_true",
                         help="Use system libraries instead of vcpkg (Linux)")
+    parser.add_argument("--no-bump", action="store_true",
+                        help="Don't auto-increment version before building")
     args = parser.parse_args()
 
     print(f"Platform: {SYSTEM} ({platform.machine()})")
@@ -333,6 +379,13 @@ def main():
         if cache.exists():
             cache.unlink()
             print("Removed CMakeCache.txt")
+
+    # Auto-increment version before configure (unless --no-bump)
+    if not args.no_bump:
+        version = bump_version()
+    else:
+        version = get_current_version()
+        print(f"\n[i] Current version: {version} (bump skipped)")
 
     # Configure (always if no cache)
     cache = BUILD_DIR / "CMakeCache.txt"

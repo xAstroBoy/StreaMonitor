@@ -61,30 +61,23 @@ function statusBadge(bot: BotState): { label: string; color: string } {
   }
 }
 
-// Preview Thumbnail — polling snapshot for all models (recording + non-recording)
-// Uses /api/preview/:user/:site JPEG snapshot with periodic auto-refresh when recording.
-// Falls back to native site CDN thumbnail on error. NEVER uses MJPEG for card/detail previews.
+// Preview Thumbnail — MJPEG live stream for recording models, JPEG snapshot for others
+// Recording: uses /api/stream/:user/:site (MJPEG multipart) for real-time live video
+// Not recording: uses /api/preview/:user/:site (JPEG snapshot) or native CDN thumbnail
 function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl }: {
   username: string; siteSlug: string; large?: boolean; isRecording?: boolean; nativePreviewUrl?: string
 }) {
   const [errored, setErrored] = useState(false)
   const [retryKey, setRetryKey] = useState(0)
   const [useNativeFallback, setUseNativeFallback] = useState(false)
-  const errorCountRef = useRef(0)
 
-  // Auto-refresh snapshot every 2s when recording (polling, not MJPEG)
-  useEffect(() => {
-    if (!isRecording || useNativeFallback) return
-    const interval = setInterval(() => {
-      setRetryKey(k => k + 1)
-    }, 2000)
-    return () => clearInterval(interval)
-  }, [isRecording, useNativeFallback])
-
-  // Always use snapshot URL (JPEG) — never MJPEG stream for cards
-  const src = useNativeFallback && nativePreviewUrl
-    ? nativePreviewUrl
-    : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
+  // When recording → MJPEG live stream (real-time video)
+  // Otherwise → JPEG snapshot with native CDN fallback
+  const src = isRecording
+    ? getStreamUrl(username, siteSlug)
+    : useNativeFallback && nativePreviewUrl
+      ? nativePreviewUrl
+      : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
 
   // Retry errored state after delay
   useEffect(() => {
@@ -98,23 +91,17 @@ function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl
     if (isRecording) {
       setUseNativeFallback(false)
       setErrored(false)
-      errorCountRef.current = 0
     }
   }, [isRecording])
 
   const handleError = () => {
-    errorCountRef.current++
-    if (!useNativeFallback && nativePreviewUrl && errorCountRef.current >= 2) {
-      // Multiple failures — try native site thumbnail
+    if (!useNativeFallback && nativePreviewUrl) {
+      // First failure — try native site thumbnail
       setUseNativeFallback(true)
-    } else if (useNativeFallback || errorCountRef.current >= 4) {
-      // Native also failed or too many errors — show placeholder
+    } else {
+      // Native also failed or not available — show placeholder
       setErrored(true)
     }
-  }
-
-  const handleLoad = () => {
-    errorCountRef.current = 0 // Reset error count on successful load
   }
 
   if (errored) {
@@ -134,7 +121,6 @@ function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl
       src={src}
       alt=""
       className={large ? 'preview-large' : 'preview-card-img'}
-      onLoad={handleLoad}
       onError={handleError}
       loading="lazy"
     />
@@ -374,7 +360,7 @@ function ModelCard({ bot, groups, selected, onClick, onStart, onStop }: {
 
   return (
     <div className={cardCls} onClick={onClick}>
-      {/* Preview Image — auto-refreshing snapshot for recording, single frame otherwise */}
+      {/* Preview Image — MJPEG live stream for recording, snapshot otherwise */}
       <div className="grid-card-preview">
         <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} isRecording={bot.recording} nativePreviewUrl={bot.previewUrl} />
 

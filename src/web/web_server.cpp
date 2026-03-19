@@ -18,7 +18,7 @@
 
 // stb_image_write — JPEG encoding for preview frames
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#define STBI_WRITE_NO_STDIO          // we only use the callback API
+#define STBI_WRITE_NO_STDIO // we only use the callback API
 #include "stb_image_write.h"
 
 #ifdef _WIN32
