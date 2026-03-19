@@ -738,6 +738,15 @@ namespace sm
         glfwSetCharCallback(window_, glfwCharCallback);
         glfwSetWindowFocusCallback(window_, glfwWindowFocusCallback);
 
+        // ── Close callback — set shutdown flag first ────────────
+        glfwSetWindowCloseCallback(window_, [](GLFWwindow *w)
+                                   {
+                                       auto *self = static_cast<GuiApp *>(glfwGetWindowUserPointer(w));
+                                       if (self)
+                                           self->shuttingDown_.store(true);
+                                       glfwSetWindowShouldClose(w, GLFW_TRUE);
+                                   });
+
         // ── GLFW iconify callback (minimize interception) ───────────
         glfwSetWindowIconifyCallback(window_, [](GLFWwindow *w, int iconified)
                                      {
@@ -937,6 +946,8 @@ namespace sm
         // GUI from its idle sleep so the UI updates immediately.
         manager_.setEventCallback([this](const ManagerEvent &)
                                   {
+                                      if (shuttingDown_.load())
+                                          return; // Don't touch GLFW after close requested
                                       guiDirty_.store(true);
                                       glfwPostEmptyEvent(); // Wake glfwWaitEventsTimeout
                                   });
@@ -1019,6 +1030,7 @@ namespace sm
                 }
                 else if (idx == quitIdx)
                 {
+                    shuttingDown_.store(true);
                     glfwSetWindowShouldClose(window_, GLFW_TRUE);
                 } });
         };
@@ -1124,10 +1136,15 @@ namespace sm
             // is the sole rate limiter.
         }
 
+        // ── Orderly shutdown — prevent callbacks touching GLFW ──
+        shuttingDown_.store(true);
+        manager_.setEventCallback(nullptr);
+
 #ifdef _WIN32
         tray_.shutdown();
 #endif
 
+        cleanup();
         return 0;
     }
 
@@ -1273,7 +1290,10 @@ namespace sm
                 manager_.saveConfig();
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4"))
+            {
+                shuttingDown_.store(true);
                 glfwSetWindowShouldClose(window_, GLFW_TRUE);
+            }
             ImGui::EndMenu();
         }
 
@@ -2566,8 +2586,20 @@ namespace sm
                     ImGui::TableNextRow();
                     ImGui::PushID(idx + 100000);
 
-                    // Checkbox (empty for sub-rows)
+                    // Checkbox for sub-row
                     ImGui::TableNextColumn();
+                    {
+                        std::string subKey = b.username + "\t" + b.siteName;
+                        std::transform(subKey.begin(), subKey.end(), subKey.begin(), ::tolower);
+                        bool subChecked = selectedRows_.count(subKey) > 0;
+                        if (ImGui::Checkbox("##subsel", &subChecked))
+                        {
+                            if (subChecked)
+                                selectedRows_.insert(subKey);
+                            else
+                                selectedRows_.erase(subKey);
+                        }
+                    }
 
                     // Icon
                     ImGui::TableNextColumn();

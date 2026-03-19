@@ -210,7 +210,8 @@ body {
   font-weight: 500;
   transition: all 0.15s ease;
   cursor: pointer;
-  border: 1px solid transparent;
+  border: none;
+  outline: none;
   white-space: nowrap;
 }
 
@@ -219,17 +220,17 @@ body {
 .btn-primary { background: var(--accent); color: white; }
 .btn-primary:hover { background: #5558e6; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
 
-.btn-ghost { background: transparent; color: var(--text-secondary); border-color: var(--border); }
+.btn-ghost { background: rgba(255, 255, 255, 0.04); color: var(--text-secondary); }
 .btn-ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-.btn-success { background: rgba(16, 185, 129, 0.1); color: #10b981; border-color: rgba(16, 185, 129, 0.2); }
-.btn-success:hover { background: rgba(16, 185, 129, 0.2); }
+.btn-success { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+.btn-success:hover { background: rgba(16, 185, 129, 0.22); }
 
-.btn-warning { background: rgba(245, 158, 11, 0.1); color: #f59e0b; border-color: rgba(245, 158, 11, 0.2); }
-.btn-warning:hover { background: rgba(245, 158, 11, 0.2); }
+.btn-warning { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
+.btn-warning:hover { background: rgba(245, 158, 11, 0.22); }
 
-.btn-danger { background: rgba(239, 68, 68, 0.1); color: #ef4444; border-color: rgba(239, 68, 68, 0.2); }
-.btn-danger:hover { background: rgba(239, 68, 68, 0.2); }
+.btn-danger { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+.btn-danger:hover { background: rgba(239, 68, 68, 0.22); }
 
 .btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
 .btn-icon { padding: 8px; min-width: unset; }
@@ -239,13 +240,13 @@ body {
   padding: 6px 14px;
   font-size: 12px;
   border-radius: 99px;
-  border: 1px solid var(--border);
+  border: none;
   color: var(--text-secondary);
-  background: transparent;
+  background: rgba(255, 255, 255, 0.04);
   cursor: pointer;
   transition: all 0.15s;
   white-space: nowrap;
 }
 
 .filter-pill:hover { background: var(--bg-hover); color: var(--text-primary); }
-.filter-pill.active { background: var(--accent-soft); border-color: rgba(99, 102, 241, 0.3); color: var(--accent); }
+.filter-pill.active { background: var(--accent-soft); color: var(--accent); }

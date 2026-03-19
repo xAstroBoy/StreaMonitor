@@ -94,6 +94,58 @@ function PreviewThumb({ username, siteSlug, large }: { username: string; siteSlu
   )
 }
 
+// Live Stream Viewer — auto-refreshing FFmpeg preview frames
+function LiveStreamViewer({ username, siteSlug, onClose }: {
+  username: string; siteSlug: string; onClose: () => void
+}) {
+  const [ts, setTs] = useState(Date.now())
+  const [errCount, setErrCount] = useState(0)
+
+  useEffect(() => {
+    const iv = setInterval(() => { setTs(Date.now()); setErrCount(0) }, 2000)
+    return () => clearInterval(iv)
+  }, [])
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center animate-fade-in" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/90" />
+      <div className="relative w-full max-w-4xl mx-4" onClick={e => e.stopPropagation()}>
+        <button onClick={onClose}
+          className="absolute -top-10 right-0 z-10 p-2 text-zinc-400 hover:text-white transition-colors">
+          <Ico d={ic.x} cls="w-6 h-6" />
+        </button>
+        <div className="relative bg-black rounded-xl overflow-hidden shadow-2xl border border-[var(--border)]">
+          {errCount < 5 ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={`${getPreviewUrl(username, siteSlug)}?t=${ts}`}
+              alt="Live stream"
+              className="w-full aspect-video object-contain bg-black"
+              onError={() => setErrCount(c => c + 1)}
+            />
+          ) : (
+            <div className="w-full aspect-video flex items-center justify-center text-zinc-600">
+              <div className="text-center">
+                <Ico d={ic.rec} cls="w-12 h-12 mx-auto mb-3 opacity-30" />
+                <p className="text-sm">Stream not available</p>
+                <p className="text-xs text-zinc-700 mt-1">Model may not be recording</p>
+              </div>
+            </div>
+          )}
+          <div className="absolute top-3 left-3 flex items-center gap-2">
+            <span className="flex items-center gap-1.5 bg-red-600/90 text-white text-xs font-bold px-2.5 py-1 rounded-md">
+              <span className="w-2 h-2 bg-white rounded-full animate-recording" /> LIVE
+            </span>
+          </div>
+          <div className="absolute bottom-3 right-3 text-xs text-zinc-500 bg-black/60 px-2 py-1 rounded">
+            {username} [{siteSlug}]
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // Model Detail Modal
 function ModelDetailModal({ bot, onClose, onAction }: {
   bot: BotState
@@ -101,104 +153,121 @@ function ModelDetailModal({ bot, onClose, onAction }: {
   onAction: (action: () => Promise<unknown>) => void
 }) {
   const badge = statusBadge(bot)
+  const [showStream, setShowStream] = useState(false)
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center detail-overlay"
-         onClick={onClose}>
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
-      <div className="relative w-full max-w-lg mx-auto sm:mx-4 bg-[var(--bg-card)] border border-[var(--border)] rounded-t-2xl sm:rounded-2xl shadow-2xl detail-panel max-h-[90vh] overflow-y-auto"
-           onClick={e => e.stopPropagation()}>
+    <>
+      <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center detail-overlay"
+           onClick={onClose}>
+        <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+        <div className="relative w-full max-w-lg mx-auto sm:mx-4 bg-[var(--bg-card)] border border-[var(--border)] rounded-t-2xl sm:rounded-2xl shadow-2xl detail-panel max-h-[90vh] overflow-y-auto"
+             onClick={e => e.stopPropagation()}>
 
-        <button onClick={onClose} className="absolute top-4 right-4 z-10 p-2 rounded-xl bg-black/40 text-zinc-400 hover:text-white transition-colors">
-          <Ico d={ic.x} />
-        </button>
+          <button onClick={onClose} className="absolute top-4 right-4 z-10 p-2 rounded-xl bg-black/40 text-zinc-400 hover:text-white transition-colors">
+            <Ico d={ic.x} />
+          </button>
 
-        <div className="p-4 pb-0">
-          <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large />
-        </div>
-
-        <div className="p-5 space-y-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="text-xl font-bold">{bot.username}</h2>
-              <p className="text-sm text-[var(--text-secondary)] mt-0.5">{bot.site} [{bot.siteSlug}]</p>
-            </div>
-            <span className={`badge-status ${badge.color} flex-shrink-0`}>{badge.label}</span>
+          <div className="p-4 pb-0">
+            <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
-              <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Status</div>
-              <div className="flex items-center gap-2">
-                <div className={`status-dot ${statusDotClass(bot)}`} />
-                <span className="text-sm font-medium">{bot.recording ? 'Recording' : bot.status || (bot.running ? 'Running' : 'Stopped')}</span>
+          <div className="p-5 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-bold">{bot.username}</h2>
+                <p className="text-sm text-[var(--text-secondary)] mt-0.5">{bot.site} [{bot.siteSlug}]</p>
               </div>
+              <span className={`badge-status ${badge.color} flex-shrink-0`}>{badge.label}</span>
             </div>
-            <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
-              <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Uptime</div>
-              <span className="text-sm font-medium">{bot.running && bot.uptimeSeconds > 0 ? formatDuration(bot.uptimeSeconds) : '\u2014'}</span>
-            </div>
-            {bot.recording && bot.recording_stats && (
-              <>
-                <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
-                  <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Recorded</div>
-                  <span className="text-sm font-medium text-red-400">{formatBytes(bot.recording_stats.bytesWritten)}</span>
-                </div>
-                <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
-                  <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Speed</div>
-                  <span className="text-sm font-medium">{bot.recording_stats.currentSpeed > 0 ? `${bot.recording_stats.currentSpeed.toFixed(1)}x` : '\u2014'}</span>
-                </div>
-              </>
-            )}
-            {bot.totalBytes > 0 && !bot.recording && (
+
+            <div className="grid grid-cols-2 gap-3">
               <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
-                <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Total Size</div>
-                <span className="text-sm font-medium">{formatBytes(bot.totalBytes)}</span>
+                <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Status</div>
+                <div className="flex items-center gap-2">
+                  <div className={`status-dot ${statusDotClass(bot)}`} />
+                  <span className="text-sm font-medium">{bot.recording ? 'Recording' : bot.status || (bot.running ? 'Running' : 'Stopped')}</span>
+                </div>
+              </div>
+              <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
+                <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Uptime</div>
+                <span className="text-sm font-medium">{bot.running && bot.uptimeSeconds > 0 ? formatDuration(bot.uptimeSeconds) : '\u2014'}</span>
+              </div>
+              {bot.recording && bot.recording_stats && (
+                <>
+                  <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Recorded</div>
+                    <span className="text-sm font-medium text-red-400">{formatBytes(bot.recording_stats.bytesWritten)}</span>
+                  </div>
+                  <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Speed</div>
+                    <span className="text-sm font-medium">{bot.recording_stats.currentSpeed > 0 ? `${bot.recording_stats.currentSpeed.toFixed(1)}x` : '\u2014'}</span>
+                  </div>
+                </>
+              )}
+              {bot.totalBytes > 0 && !bot.recording && (
+                <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
+                  <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Total Size</div>
+                  <span className="text-sm font-medium">{formatBytes(bot.totalBytes)}</span>
+                </div>
+              )}
+            </div>
+
+            {bot.recording && bot.recording_stats?.currentFile && (
+              <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
+                <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Current File</div>
+                <p className="text-xs text-[var(--text-secondary)] font-mono truncate">{bot.recording_stats.currentFile}</p>
               </div>
             )}
-          </div>
 
-          {bot.recording && bot.recording_stats?.currentFile && (
-            <div className="bg-[var(--bg-primary)] rounded-xl p-3 border border-[var(--border-subtle)]">
-              <div className="text-[10px] uppercase tracking-wider text-[var(--text-dim)] mb-1">Current File</div>
-              <p className="text-xs text-[var(--text-secondary)] font-mono truncate">{bot.recording_stats.currentFile}</p>
+            <div className="flex gap-2 flex-wrap">
+              {bot.recording && (
+                <button onClick={() => setShowStream(true)}
+                   className="btn btn-primary flex-1">
+                  <Ico d={ic.rec} /> Watch Stream
+                </button>
+              )}
+              {bot.websiteUrl && (
+                <a href={bot.websiteUrl} target="_blank" rel="noopener noreferrer"
+                   className="btn btn-ghost flex-1">
+                  <Ico d={ic.ext} /> Open Site
+                </a>
+              )}
             </div>
-          )}
-
-          <div className="flex gap-2 flex-wrap">
-            {bot.websiteUrl && (
-              <a href={bot.websiteUrl} target="_blank" rel="noopener noreferrer"
-                 className="btn btn-primary flex-1">
-                <Ico d={ic.eye} /> Watch Stream
-              </a>
-            )}
-            {bot.running ? (
-              <button onClick={() => onAction(() => stopModel(bot.username, bot.siteSlug))}
-                className="btn btn-warning flex-1">
-                <Ico d={ic.stop} /> Stop
+            <div className="flex gap-2">
+              {bot.running ? (
+                <button onClick={() => onAction(() => stopModel(bot.username, bot.siteSlug))}
+                  className="btn btn-warning flex-1">
+                  <Ico d={ic.stop} /> Stop
+                </button>
+              ) : (
+                <button onClick={() => onAction(() => startModel(bot.username, bot.siteSlug))}
+                  className="btn btn-success flex-1">
+                  <Ico d={ic.play} /> Start
+                </button>
+              )}
+              <button onClick={() => onAction(() => restartModel(bot.username, bot.siteSlug))}
+                className="btn btn-ghost flex-1 text-sm">
+                <Ico d={ic.refresh} /> Restart
               </button>
-            ) : (
-              <button onClick={() => onAction(() => startModel(bot.username, bot.siteSlug))}
-                className="btn btn-success flex-1">
-                <Ico d={ic.play} /> Start
+              <button onClick={() => {
+                if (confirm(`Remove ${bot.username} [${bot.siteSlug}]?`))
+                  onAction(() => removeModel(bot.username, bot.siteSlug))
+              }} className="btn btn-danger flex-1 text-sm">
+                <Ico d={ic.trash} /> Remove
               </button>
-            )}
-          </div>
-          <div className="flex gap-2">
-            <button onClick={() => onAction(() => restartModel(bot.username, bot.siteSlug))}
-              className="btn btn-ghost flex-1 text-sm">
-              <Ico d={ic.refresh} /> Restart
-            </button>
-            <button onClick={() => {
-              if (confirm(`Remove ${bot.username} [${bot.siteSlug}]?`))
-                onAction(() => removeModel(bot.username, bot.siteSlug))
-            }} className="btn btn-danger flex-1 text-sm">
-              <Ico d={ic.trash} /> Remove
-            </button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+
+      {showStream && (
+        <LiveStreamViewer
+          username={bot.username}
+          siteSlug={bot.siteSlug}
+          onClose={() => setShowStream(false)}
+        />
+      )}
+    </>
   )
 }
 

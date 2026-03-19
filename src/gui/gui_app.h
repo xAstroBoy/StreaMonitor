@@ -274,6 +274,7 @@ namespace sm
         // ── Adaptive frame rate (CPU idle optimization) ─────────────
         double lastInputTime_ = 0.0;       // glfwGetTime() of last user input
         std::atomic<bool> guiDirty_{true}; // set by bot threads to wake GUI
+        std::atomic<bool> shuttingDown_{false}; // set when close requested, prevents glfwPostEmptyEvent after teardown
         static void glfwCursorPosCallback(GLFWwindow *w, double, double);
         static void glfwMouseButtonCallback(GLFWwindow *w, int, int, int);
         static void glfwScrollCallback(GLFWwindow *w, double, double);
