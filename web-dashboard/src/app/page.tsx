@@ -61,49 +61,108 @@ function statusBadge(bot: BotState): { label: string; color: string } {
   }
 }
 
-// Preview Thumbnail — MJPEG live stream for recording models, snapshot for idle
+// Preview Thumbnail — fetch-based frame delivery (no connection limit)
+// Recording: sequential fetch loop (~5fps via blob URLs, connections freed between frames)
+// Idle: single snapshot fetch
 function PreviewThumb({ username, siteSlug, large, isRecording }: {
   username: string; siteSlug: string; large?: boolean; isRecording?: boolean
 }) {
+  const [frameSrc, setFrameSrc] = useState<string | null>(null)
   const [errored, setErrored] = useState(false)
-  const [retryKey, setRetryKey] = useState(0)
-  const imgRef = useRef<HTMLImageElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(false)
+  const blobUrlRef = useRef<string | null>(null)
 
-  // Only connect MJPEG when the card is actually visible on screen
+  // Only fetch when card is visible on screen
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const obs = new IntersectionObserver(
       ([entry]) => setVisible(entry.isIntersecting),
-      { rootMargin: '100px' }
+      { rootMargin: '200px' }
     )
     obs.observe(el)
     return () => obs.disconnect()
   }, [])
 
-  // MJPEG stream for recording + visible, single snapshot otherwise
-  const src = visible && isRecording
-    ? `${getStreamUrl(username, siteSlug)}?t=${retryKey}`
-    : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
-
-  // Retry on error after 5s
+  // Frame fetch — single shot for idle, continuous loop for recording
   useEffect(() => {
-    if (!errored) return
-    const t = setTimeout(() => { setErrored(false); setRetryKey(k => k + 1) }, 5000)
-    return () => clearTimeout(t)
-  }, [errored])
+    if (!visible) return
 
-  // Reset when recording status flips
+    const controller = new AbortController()
+    const { signal } = controller
+    let cancelled = false
+
+    const revokePrev = () => {
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current)
+        blobUrlRef.current = null
+      }
+    }
+
+    const pushFrame = (blob: Blob) => {
+      if (cancelled) return
+      const url = URL.createObjectURL(blob)
+      revokePrev()
+      blobUrlRef.current = url
+      setFrameSrc(url)
+      setErrored(false)
+    }
+
+    if (!isRecording) {
+      // Single snapshot for non-recording models
+      fetch(`${getPreviewUrl(username, siteSlug)}?t=${Date.now()}`, { signal, cache: 'no-store' })
+        .then(r => r.ok ? r.blob() : Promise.reject())
+        .then(pushFrame)
+        .catch(() => { if (!cancelled) setErrored(true) })
+    } else {
+      // Continuous frame fetch loop for recording models
+      ;(async () => {
+        while (!cancelled && !signal.aborted) {
+          try {
+            const res = await fetch(
+              `${getPreviewUrl(username, siteSlug)}?t=${Date.now()}`,
+              { signal, cache: 'no-store' }
+            )
+            if (!res.ok) {
+              await new Promise(r => setTimeout(r, 1000))
+              continue
+            }
+            pushFrame(await res.blob())
+            // ~5 fps — short pause between frames
+            await new Promise(r => setTimeout(r, 200))
+          } catch {
+            if (!cancelled && !signal.aborted) {
+              setErrored(true)
+              await new Promise(r => setTimeout(r, 3000))
+            }
+          }
+        }
+      })()
+    }
+
+    return () => {
+      cancelled = true
+      controller.abort()
+      revokePrev()
+    }
+  }, [visible, isRecording, username, siteSlug])
+
+  // Reset when recording status changes
   useEffect(() => {
     setErrored(false)
-    setRetryKey(k => k + 1)
+    setFrameSrc(null)
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current)
+      blobUrlRef.current = null
+    }
   }, [isRecording])
 
-  if (errored) {
+  const cls = large ? 'preview-large' : 'preview-card-img'
+
+  if (errored || !frameSrc) {
     return (
-      <div ref={containerRef} className={large ? 'preview-large flex items-center justify-center text-zinc-700' : 'preview-card-img flex items-center justify-center text-zinc-700 text-xs'}>
+      <div ref={containerRef} className={`${cls} flex items-center justify-center text-zinc-700${large ? '' : ' text-xs'}`}>
         <svg className={large ? 'w-12 h-12 opacity-20' : 'w-10 h-10 opacity-20'} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.41a2.25 2.25 0 013.182 0l2.909 2.91m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
         </svg>
@@ -112,17 +171,9 @@ function PreviewThumb({ username, siteSlug, large, isRecording }: {
   }
 
   return (
-    <div ref={containerRef} className={large ? 'preview-large' : 'preview-card-img'}>
+    <div ref={containerRef} className={cls}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        ref={imgRef}
-        key={`${retryKey}-${isRecording}-${visible}`}
-        src={src}
-        alt=""
-        className="w-full h-full object-cover"
-        onError={() => setErrored(true)}
-        loading="lazy"
-      />
+      <img src={frameSrc} alt="" className="w-full h-full object-cover" />
     </div>
   )
 }
