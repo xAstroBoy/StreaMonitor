@@ -964,13 +964,9 @@ namespace sm
                                       glfwPostEmptyEvent(); // Wake glfwWaitEventsTimeout
                                   });
 
-        // ── Adaptive frame rate ─────────────────────────────────────
-        // Active:  30 fps (user interacting / recent state changes)
-        // Idle:     4 fps (nothing happening — minimal CPU usage)
-        // This alone drops CPU from ~30-60% to <2% when the app is idle.
-        constexpr double kActiveFrameTime = 1.0 / 30.0; // 33ms
-        constexpr double kIdleFrameTime = 1.0 / 4.0;    // 250ms
-        constexpr double kIdleTimeout = 2.0;            // seconds before going idle
+        // ── Unlocked frame rate ──────────────────────────────────────
+        // No artificial cap — renders as fast as possible.
+        // glfwPollEvents is non-blocking (no sleep/wait).
 
         lastInputTime_ = glfwGetTime();
 
@@ -1051,20 +1047,9 @@ namespace sm
 
         while (!glfwWindowShouldClose(window_))
         {
-            // Determine frame rate target
-            double glfwNow = glfwGetTime();
-            bool isActive = (glfwNow - lastInputTime_) < kIdleTimeout || guiDirty_.exchange(false);
-            // Stream View / Bot Detail need consistent 30fps for smooth live video
-            if (showStreamView_ || showBotDetail_)
-                isActive = true;
-            double targetFrameTime = isActive ? kActiveFrameTime : kIdleFrameTime;
-
-            // Wait for events OR timeout — this is the SOLE rate limiter.
-            // glfwWaitEventsTimeout sleeps the thread (near-zero CPU) until
-            // either an OS event arrives (mouse/keyboard/window message) or
-            // the timeout expires.  Background threads call
-            // glfwPostEmptyEvent() to wake us immediately on state changes.
-            glfwWaitEventsTimeout(targetFrameTime);
+            // Poll events (non-blocking — no frame rate cap)
+            glfwPollEvents();
+            guiDirty_.exchange(false); // consume dirty flag
 
 #ifdef _WIN32
             // ── System tray message pump ────────────────────────────
@@ -1147,8 +1132,6 @@ namespace sm
                 ImGui::RenderPlatformWindowsDefault();
                 glfwMakeContextCurrent(backup);
             }
-            // No secondary sleep — glfwWaitEventsTimeout at top of loop
-            // is the sole rate limiter.
         }
 
         // ── Orderly shutdown — prevent callbacks touching GLFW ──
