@@ -16,6 +16,11 @@
 #include <iomanip>
 #include <thread>
 
+// stb_image_write — JPEG encoding for preview frames
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBI_WRITE_NO_STDIO          // we only use the callback API
+#include "stb_image_write.h"
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -213,6 +218,25 @@ namespace sm
         }
 
         return bmp;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Helper: RGBA → JPEG conversion (via stb_image_write)
+    // ~30 KB per frame vs ~700 KB for BMP — much better for streaming
+    // ─────────────────────────────────────────────────────────────────
+    static void jpegWriteFunc_(void *context, void *data, int size)
+    {
+        auto *buf = static_cast<std::string *>(context);
+        buf->append(static_cast<const char *>(data), static_cast<size_t>(size));
+    }
+
+    static std::string rgbaToJpeg(const uint8_t *rgba, int w, int h, int quality = 80)
+    {
+        std::string result;
+        result.reserve(static_cast<size_t>(w) * h / 8); // rough estimate
+        // comp=4 (RGBA) — stbi_write_jpg ignores alpha channel automatically
+        stbi_write_jpg_to_func(jpegWriteFunc_, &result, w, h, 4, rgba, quality);
+        return result;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -477,15 +501,15 @@ namespace sm
                              return;
                          }
 
-                         // Convert RGBA to BMP for browser-compatible display
-                         std::string bmp = rgbaToBmp(frame.pixels.data(), frame.width, frame.height);
+                         // Convert RGBA to JPEG for efficient browser-compatible display
+                         std::string jpg = rgbaToJpeg(frame.pixels.data(), frame.width, frame.height);
                          res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
-                         res.set_content(bmp, "image/bmp");
+                         res.set_content(jpg, "image/jpeg");
                      });
 
         // ── GET /api/stream/:username/:site — MJPEG live stream ───
-        // Continuous multipart/x-mixed-replace stream of BMP frames.
-        // The browser <img> tag natively renders this as live video.
+        // Continuous multipart/x-mixed-replace stream of JPEG frames.
+        // Used only by the dedicated "Watch Stream" overlay in the dashboard.
         // Frames are pushed by the recorder at ~15fps — we block until
         // a new frame arrives instead of polling.
         server_->Get(R"(/api/stream/([^/]+)/([^/]+))",
@@ -531,19 +555,19 @@ namespace sm
                                      return sink.is_writable();
                                  }
 
-                                 // Convert RGBA to BMP
-                                 std::string bmp = rgbaToBmp(frame.pixels.data(), frame.width, frame.height);
+                                 // Convert RGBA to JPEG (~30KB vs ~700KB BMP)
+                                 std::string jpg = rgbaToJpeg(frame.pixels.data(), frame.width, frame.height);
 
-                                 // Write multipart boundary + headers + BMP data
+                                 // Write multipart boundary + headers + JPEG data
                                  std::string header = "--" + boundary + "\r\n"
-                                                                        "Content-Type: image/bmp\r\n"
+                                                                        "Content-Type: image/jpeg\r\n"
                                                                         "Content-Length: " +
-                                                      std::to_string(bmp.size()) + "\r\n"
+                                                      std::to_string(jpg.size()) + "\r\n"
                                                                                    "\r\n";
 
                                  if (!sink.write(header.data(), header.size()))
                                      return false;
-                                 if (!sink.write(bmp.data(), bmp.size()))
+                                 if (!sink.write(jpg.data(), jpg.size()))
                                      return false;
 
                                  std::string crlf = "\r\n";
