@@ -764,7 +764,6 @@ namespace sm
         ImGui::CreateContext();
 
         ImGuiIO &io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable; // Allow windows outside main viewport
         io.IniFilename = "imgui_layout.ini";
