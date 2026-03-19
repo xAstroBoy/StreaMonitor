@@ -61,53 +61,49 @@ function statusBadge(bot: BotState): { label: string; color: string } {
   }
 }
 
-// Preview Thumbnail — HTTP/2 multiplexed previews (unlimited concurrent streams!)
-// Recording: uses /api/stream/:user/:site (MJPEG) — HTTP/2 handles multiplexing
-// Not recording: uses /api/preview/:user/:site (JPEG snapshot) or native CDN thumbnail
-//
-// 🚀 HTTP/2 multiplexes ALL streams over a single TCP connection.
-// No WebSocket needed. No 6-connection limit. Just native h2 magic.
-function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl }: {
-  username: string; siteSlug: string; large?: boolean; isRecording?: boolean; nativePreviewUrl?: string
+// Preview Thumbnail — MJPEG live stream for recording models, snapshot for idle
+function PreviewThumb({ username, siteSlug, large, isRecording }: {
+  username: string; siteSlug: string; large?: boolean; isRecording?: boolean
 }) {
   const [errored, setErrored] = useState(false)
   const [retryKey, setRetryKey] = useState(0)
-  const [useNativeFallback, setUseNativeFallback] = useState(false)
   const imgRef = useRef<HTMLImageElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(false)
 
-  // For recording models: use MJPEG stream (multiplexed over HTTP/2)
-  // For non-recording: use snapshot or native CDN thumbnail
-  const src = isRecording
+  // Only connect MJPEG when the card is actually visible on screen
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const obs = new IntersectionObserver(
+      ([entry]) => setVisible(entry.isIntersecting),
+      { rootMargin: '100px' }
+    )
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [])
+
+  // MJPEG stream for recording + visible, single snapshot otherwise
+  const src = visible && isRecording
     ? `${getStreamUrl(username, siteSlug)}?t=${retryKey}`
-    : useNativeFallback && nativePreviewUrl
-      ? nativePreviewUrl
-      : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
+    : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
 
-  // Retry errored state after delay
+  // Retry on error after 5s
   useEffect(() => {
     if (!errored) return
-    const t = setTimeout(() => { setErrored(false); setRetryKey(k => k + 1) }, 8000)
+    const t = setTimeout(() => { setErrored(false); setRetryKey(k => k + 1) }, 5000)
     return () => clearTimeout(t)
   }, [errored])
 
-  // Reset fallback & force new stream when recording status changes
+  // Reset when recording status flips
   useEffect(() => {
-    setUseNativeFallback(false)
     setErrored(false)
     setRetryKey(k => k + 1)
   }, [isRecording])
 
-  const handleError = () => {
-    if (!isRecording && !useNativeFallback && nativePreviewUrl) {
-      setUseNativeFallback(true)
-    } else {
-      setErrored(true)
-    }
-  }
-
   if (errored) {
     return (
-      <div className={large ? 'preview-large flex items-center justify-center text-zinc-700' : 'preview-card-img flex items-center justify-center text-zinc-700 text-xs'}>
+      <div ref={containerRef} className={large ? 'preview-large flex items-center justify-center text-zinc-700' : 'preview-card-img flex items-center justify-center text-zinc-700 text-xs'}>
         <svg className={large ? 'w-12 h-12 opacity-20' : 'w-10 h-10 opacity-20'} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.41a2.25 2.25 0 013.182 0l2.909 2.91m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
         </svg>
@@ -116,16 +112,18 @@ function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl
   }
 
   return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      ref={imgRef}
-      key={`${retryKey}-${isRecording}-${useNativeFallback}`}
-      src={src}
-      alt=""
-      className={large ? 'preview-large' : 'preview-card-img'}
-      onError={handleError}
-      loading="lazy"
-    />
+    <div ref={containerRef} className={large ? 'preview-large' : 'preview-card-img'}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        ref={imgRef}
+        key={`${retryKey}-${isRecording}-${visible}`}
+        src={src}
+        alt=""
+        className="w-full h-full object-cover"
+        onError={() => setErrored(true)}
+        loading="lazy"
+      />
+    </div>
   )
 }
 
@@ -236,7 +234,7 @@ function ModelDetailModal({ bot, onClose, onAction }: {
           </button>
 
           <div className="p-4 pb-0">
-            <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large isRecording={bot.recording} nativePreviewUrl={bot.previewUrl} />
+            <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large isRecording={bot.recording} />
           </div>
 
           <div className="p-5 space-y-4">
@@ -362,9 +360,9 @@ function ModelCard({ bot, groups, selected, onClick, onStart, onStop }: {
 
   return (
     <div className={cardCls} onClick={onClick}>
-      {/* Preview Image — HTTP/2 multiplexed MJPEG for recording, snapshot otherwise */}
+      {/* Preview Image */}
       <div className="grid-card-preview">
-        <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} isRecording={bot.recording} nativePreviewUrl={bot.previewUrl} />
+        <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} isRecording={bot.recording} />
 
         {/* Status overlay top-left */}
         {bot.recording && (

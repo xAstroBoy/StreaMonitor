@@ -11,13 +11,14 @@
 
 // nghttp2 is a C library — needs ssize_t defined on MSVC
 #ifdef _MSC_VER
-#   include <BaseTsd.h>
-#   ifndef ssize_t
-        typedef SSIZE_T ssize_t;
-#   endif
+#include <BaseTsd.h>
+#ifndef ssize_t
+typedef SSIZE_T ssize_t;
+#endif
 #endif
 
-extern "C" {
+extern "C"
+{
 #include <nghttp2/nghttp2.h>
 }
 
@@ -179,8 +180,10 @@ namespace sm
 
         // Lifecycle
         bool listen(const std::string &host, int port);
+        bool listenHttp(const std::string &host, int port); // Plain HTTP (no TLS) for LAN/phones
         void stop();
         bool is_running() const { return running_.load(); }
+        int httpPort() const { return httpPort_; } // Returns the plain HTTP port (0 if not listening)
 
         friend struct H2Connection;
 
@@ -203,15 +206,21 @@ namespace sm
 
         // Networking
         sm_socket_t listenFd_ = SM_INVALID_SOCKET;
+        sm_socket_t httpListenFd_ = SM_INVALID_SOCKET; // Plain HTTP listener
+        int httpPort_ = 0;
         std::atomic<bool> running_{false};
         std::unique_ptr<std::thread> acceptThread_;
+        std::unique_ptr<std::thread> httpAcceptThread_; // Plain HTTP accept thread
         std::mutex connMutex_;
         std::vector<std::unique_ptr<std::thread>> connThreads_;
 
         void acceptLoop();
+        void acceptHttpLoop(); // Plain HTTP accept loop
         void handleConnection(sm_socket_t clientFd);
+        void handlePlainConnection(sm_socket_t clientFd); // Plain HTTP connection handler
         void runHttp2(H2Connection &conn);
         void runHttp11(H2Connection &conn);
+        void runPlainHttp11(sm_socket_t fd); // Plain HTTP/1.1 (no TLS)
 
         // Routes
         std::vector<Route> routes_;
@@ -245,6 +254,12 @@ namespace sm
         static bool sslWriteAll(SSL *ssl, const std::string &data);
         static std::string sslReadLine(SSL *ssl);
         static bool sslReadN(SSL *ssl, std::string &out, size_t n);
+
+        // Plain socket I/O helpers (for HTTP without TLS)
+        static bool plainWriteAll(sm_socket_t fd, const uint8_t *data, size_t len);
+        static bool plainWriteAll(sm_socket_t fd, const std::string &data);
+        static std::string plainReadLine(sm_socket_t fd);
+        static bool plainReadN(sm_socket_t fd, std::string &out, size_t n);
     };
 
 } // namespace sm

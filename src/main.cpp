@@ -4,6 +4,8 @@
 // ─────────────────────────────────────────────────────────────────
 
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 #include "core/crash_handler.h"
 
@@ -14,18 +16,99 @@
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
-#include <cstdio>
+#else
+#include <sys/file.h>
+#include <unistd.h>
+#include <cerrno>
 #endif
 
 // Forward declarations (defined in main_gui.cpp / main_cli.cpp)
 int guiMain(int argc, char **argv);
 int cliMain(int argc, char **argv);
 
+// ─────────────────────────────────────────────────────────────────
+// Anti-duplicate: only allow ONE instance of StreaMonitor at a time.
+// Windows: Named mutex   |   Linux/macOS: flock() on a temp file
+// ─────────────────────────────────────────────────────────────────
+#ifdef _WIN32
+static HANDLE g_singleInstanceMutex = nullptr;
+
+static bool acquireSingleInstance()
+{
+    g_singleInstanceMutex = CreateMutexW(nullptr, TRUE, L"Global\\StreaMonitor_SingleInstance");
+    if (!g_singleInstanceMutex)
+        return false;
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        CloseHandle(g_singleInstanceMutex);
+        g_singleInstanceMutex = nullptr;
+        return false;
+    }
+    return true;
+}
+
+static void releaseSingleInstance()
+{
+    if (g_singleInstanceMutex)
+    {
+        ReleaseMutex(g_singleInstanceMutex);
+        CloseHandle(g_singleInstanceMutex);
+        g_singleInstanceMutex = nullptr;
+    }
+}
+#else
+static int g_lockFd = -1;
+
+static bool acquireSingleInstance()
+{
+    const char *tmpDir = std::getenv("TMPDIR");
+    if (!tmpDir)
+        tmpDir = "/tmp";
+    char lockPath[512];
+    std::snprintf(lockPath, sizeof(lockPath), "%s/streamonitor.lock", tmpDir);
+
+    g_lockFd = open(lockPath, O_CREAT | O_RDWR, 0600);
+    if (g_lockFd < 0)
+        return true; // Can't create lock file — allow running anyway
+    if (flock(g_lockFd, LOCK_EX | LOCK_NB) != 0)
+    {
+        close(g_lockFd);
+        g_lockFd = -1;
+        return false;
+    }
+    return true;
+}
+
+static void releaseSingleInstance()
+{
+    if (g_lockFd >= 0)
+    {
+        flock(g_lockFd, LOCK_UN);
+        close(g_lockFd);
+        g_lockFd = -1;
+    }
+}
+#endif
+
 int main(int argc, char **argv)
 {
     // Install universal crash handler FIRST — before anything else.
     // Writes detailed stack traces to crashes/ on any unhandled crash.
     sm::installCrashHandler("crashes");
+
+    // ── Anti-duplicate: prevent running two copies at once ──────
+    if (!acquireSingleInstance())
+    {
+#ifdef _WIN32
+        MessageBoxW(nullptr,
+                    L"StreaMonitor is already running.\n\n"
+                    L"Check the system tray or Task Manager.",
+                    L"StreaMonitor", MB_OK | MB_ICONINFORMATION);
+#else
+        std::fprintf(stderr, "StreaMonitor is already running.\n");
+#endif
+        return 1;
+    }
 
     // Check if --cli flag is present anywhere in args
     bool cliMode = false;
@@ -38,6 +121,8 @@ int main(int argc, char **argv)
             break;
         }
     }
+
+    int result = 0;
 
     if (cliMode)
     {
@@ -58,9 +143,14 @@ int main(int argc, char **argv)
         std::setvbuf(stdout, nullptr, _IONBF, 0);
         std::setvbuf(stderr, nullptr, _IONBF, 0);
 #endif
-        return cliMain(argc, argv);
+        result = cliMain(argc, argv);
+    }
+    else
+    {
+        // GUI mode (default)
+        result = guiMain(argc, argv);
     }
 
-    // GUI mode (default)
-    return guiMain(argc, argv);
+    releaseSingleInstance();
+    return result;
 }

@@ -302,6 +302,77 @@ namespace sm
         return true;
     }
 
+    // ─── Plain socket I/O helpers (for HTTP without TLS) ──────────
+    bool H2Server::plainWriteAll(sm_socket_t fd, const uint8_t *data, size_t len)
+    {
+        size_t written = 0;
+        while (written < len)
+        {
+            int n = ::send(fd, reinterpret_cast<const char *>(data + written),
+                           static_cast<int>(len - written), 0);
+            if (n <= 0)
+            {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK)
+                    continue;
+#else
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    continue;
+#endif
+                return false;
+            }
+            written += static_cast<size_t>(n);
+        }
+        return true;
+    }
+
+    bool H2Server::plainWriteAll(sm_socket_t fd, const std::string &data)
+    {
+        return plainWriteAll(fd, reinterpret_cast<const uint8_t *>(data.data()), data.size());
+    }
+
+    std::string H2Server::plainReadLine(sm_socket_t fd)
+    {
+        std::string line;
+        char ch;
+        while (true)
+        {
+            int n = ::recv(fd, &ch, 1, 0);
+            if (n <= 0)
+                break;
+            if (ch == '\n')
+                break;
+            if (ch != '\r')
+                line += ch;
+        }
+        return line;
+    }
+
+    bool H2Server::plainReadN(sm_socket_t fd, std::string &out, size_t n)
+    {
+        out.resize(n);
+        size_t total = 0;
+        while (total < n)
+        {
+            int r = ::recv(fd, &out[total], static_cast<int>(n - total), 0);
+            if (r <= 0)
+            {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK)
+                    continue;
+#else
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    continue;
+#endif
+                return false;
+            }
+            total += static_cast<size_t>(r);
+        }
+        return true;
+    }
+
     // ─── Constructor / Destructor ─────────────────────────────────
     H2Server::H2Server(const std::string &certPath, const std::string &keyPath)
         : certPath_(certPath), keyPath_(keyPath) {}
@@ -381,13 +452,25 @@ namespace sm
             if (path.find(prefix) != 0)
                 continue;
             std::string relPath = path.substr(prefix.size());
-            if (relPath.empty() || relPath == "/")
-                relPath = "/index.html";
+
+            // Strip leading slashes (prefix already consumed them)
+            while (!relPath.empty() && relPath[0] == '/')
+                relPath.erase(relPath.begin());
+
+            // Default to index.html for root
+            if (relPath.empty())
+                relPath = "index.html";
+
             // Prevent path traversal
             if (relPath.find("..") != std::string::npos)
                 continue;
 
-            auto filePath = std::filesystem::path(dir) / relPath.substr(1);
+            auto filePath = std::filesystem::path(dir) / relPath;
+
+            // Directory → try index.html inside it (e.g. /login → login/index.html)
+            if (std::filesystem::is_directory(filePath))
+                filePath /= "index.html";
+
             if (std::filesystem::exists(filePath) && std::filesystem::is_regular_file(filePath))
             {
                 std::ifstream ifs(filePath, std::ios::binary);
@@ -459,21 +542,82 @@ namespace sm
         return true;
     }
 
+    // ─── Plain HTTP listener (no TLS — for phones/LAN devices) ───
+    bool H2Server::listenHttp(const std::string &host, int port)
+    {
+        if (httpListenFd_ != SM_INVALID_SOCKET)
+            return true; // Already listening
+
+#ifdef _WIN32
+        WSADATA wd;
+        WSAStartup(MAKEWORD(2, 2), &wd);
+#endif
+
+        httpListenFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (httpListenFd_ == SM_INVALID_SOCKET)
+        {
+            spdlog::error("socket() failed for HTTP listener: {}", errno);
+            return false;
+        }
+
+        int one = 1;
+        setsockopt(httpListenFd_, SOL_SOCKET, SO_REUSEADDR,
+                   reinterpret_cast<const char *>(&one), sizeof(one));
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<uint16_t>(port));
+        if (host == "0.0.0.0" || host.empty())
+            addr.sin_addr.s_addr = INADDR_ANY;
+        else
+            inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+
+        if (::bind(httpListenFd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
+        {
+            spdlog::error("bind({}:{}) failed for HTTP: {}", host, port, errno);
+            closesocket(httpListenFd_);
+            httpListenFd_ = SM_INVALID_SOCKET;
+            return false;
+        }
+
+        if (::listen(httpListenFd_, SOMAXCONN) != 0)
+        {
+            spdlog::error("listen() failed for HTTP: {}", errno);
+            closesocket(httpListenFd_);
+            httpListenFd_ = SM_INVALID_SOCKET;
+            return false;
+        }
+
+        httpPort_ = port;
+        running_.store(true);
+        httpAcceptThread_ = std::make_unique<std::thread>([this]()
+                                                          { acceptHttpLoop(); });
+        spdlog::info("Plain HTTP listener started on {}:{} (for phones/LAN)", host, port);
+        return true;
+    }
+
     void H2Server::stop()
     {
         if (!running_.load())
             return;
         running_.store(false);
 
-        // Close listen socket to unblock accept()
+        // Close listen sockets to unblock accept()
         if (listenFd_ != SM_INVALID_SOCKET)
         {
             closesocket(listenFd_);
             listenFd_ = SM_INVALID_SOCKET;
         }
+        if (httpListenFd_ != SM_INVALID_SOCKET)
+        {
+            closesocket(httpListenFd_);
+            httpListenFd_ = SM_INVALID_SOCKET;
+        }
 
         if (acceptThread_ && acceptThread_->joinable())
             acceptThread_->join();
+        if (httpAcceptThread_ && httpAcceptThread_->joinable())
+            httpAcceptThread_->join();
 
         // Wait for connection threads
         {
@@ -492,6 +636,7 @@ namespace sm
             sslCtx_ = nullptr;
         }
 
+        httpPort_ = 0;
         spdlog::info("H2Server stopped");
     }
 
@@ -523,6 +668,42 @@ namespace sm
                 { handleConnection(clientFd); }));
         }
         spdlog::info("H2Server accept loop exiting");
+    }
+
+    // ─── Plain HTTP Accept loop ───────────────────────────────────
+    void H2Server::acceptHttpLoop()
+    {
+        spdlog::info("HTTP accept loop started (plain, no TLS)");
+        while (running_.load())
+        {
+            sockaddr_in clientAddr{};
+            socklen_t len = sizeof(clientAddr);
+            sm_socket_t clientFd = ::accept(httpListenFd_,
+                                            reinterpret_cast<sockaddr *>(&clientAddr), &len);
+            if (clientFd == SM_INVALID_SOCKET)
+            {
+                if (running_.load())
+                    spdlog::debug("HTTP accept() returned error (probably shutting down)");
+                break;
+            }
+
+            char ipBuf[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(ipBuf));
+            spdlog::debug("New HTTP connection from {}", ipBuf);
+
+            std::lock_guard<std::mutex> lk(connMutex_);
+            connThreads_.push_back(std::make_unique<std::thread>(
+                [this, clientFd]()
+                { handlePlainConnection(clientFd); }));
+        }
+        spdlog::info("HTTP accept loop exiting");
+    }
+
+    // ─── Plain HTTP connection handler (no TLS) ──────────────────
+    void H2Server::handlePlainConnection(sm_socket_t clientFd)
+    {
+        runPlainHttp11(clientFd);
+        closesocket(clientFd);
     }
 
     // ─── Connection handler (TLS handshake → dispatch h2/h1.1) ───
@@ -771,30 +952,36 @@ namespace sm
             return;
         stream.responseSubmitted = true;
 
-        std::string statusStr = std::to_string(stream.response.status);
+        // Phase 1: Collect all header name/value pairs as OWNED strings.
+        // CRITICAL: makeNV() stores raw pointers into the string data, so
+        // the strings must stay alive until nghttp2_submit_response copies
+        // them. Using a stable vector of pairs ensures the string data
+        // won't be freed (no dangling pointers from temporaries!).
+        std::vector<std::pair<std::string, std::string>> hdrs;
+        hdrs.reserve(8 + defaultHeaders_.size() + stream.response.headers.size());
 
-        // Build header list
-        std::vector<nghttp2_nv> nva;
-        nva.push_back(makeNV(":status", statusStr));
+        hdrs.emplace_back(":status", std::to_string(stream.response.status));
 
-        // Content-Type
         if (!stream.response.contentType_.empty())
-            nva.push_back(makeNV("content-type", stream.response.contentType_));
+            hdrs.emplace_back("content-type", stream.response.contentType_);
 
-        // Content-Length for regular responses
-        std::string clStr;
         if (!stream.response.hasProvider_)
-        {
-            clStr = std::to_string(stream.response.body.size());
-            nva.push_back(makeNV("content-length", clStr));
-        }
+            hdrs.emplace_back("content-length", std::to_string(stream.response.body.size()));
 
         // Default headers (CORS etc.)
         for (const auto &[k, v] : defaultHeaders_)
-            nva.push_back(makeNV(k, v));
+            hdrs.emplace_back(k, v);
 
         // Response-specific headers
         for (const auto &[k, v] : stream.response.headers)
+            hdrs.emplace_back(k, v);
+
+        // Phase 2: Build nghttp2_nv array pointing into the owned hdrs.
+        // The hdrs vector is NOT modified after this point, so all
+        // pointers from .data() remain valid through submit_response.
+        std::vector<nghttp2_nv> nva;
+        nva.reserve(hdrs.size());
+        for (const auto &[k, v] : hdrs)
             nva.push_back(makeNV(k, v));
 
         // Set up data provider
@@ -805,7 +992,12 @@ namespace sm
         if (stream.response.hasProvider_)
             stream.streamingActive = true;
 
-        nghttp2_submit_response(conn.session, streamId, nva.data(), nva.size(), &dataPrd);
+        // Phase 3: Submit — nghttp2 copies the header data (FLAG_NONE).
+        int rv = nghttp2_submit_response(conn.session, streamId,
+                                         nva.data(), nva.size(), &dataPrd);
+        if (rv != 0)
+            spdlog::error("nghttp2_submit_response error: {} (stream {})",
+                          nghttp2_strerror(rv), streamId);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -830,10 +1022,18 @@ namespace sm
             {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 128},
             {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, 1 << 20}, // 1 MB
         };
-        nghttp2_submit_settings(conn.session, NGHTTP2_FLAG_NONE, iv, 2);
+        int rv = nghttp2_submit_settings(conn.session, NGHTTP2_FLAG_NONE, iv, 2);
+        if (rv != 0)
+        {
+            spdlog::error("nghttp2_submit_settings error: {}", nghttp2_strerror(rv));
+            conn.alive.store(false);
+            return;
+        }
 
         // Also bump connection-level window to allow more concurrent data
-        nghttp2_submit_window_update(conn.session, NGHTTP2_FLAG_NONE, 0, (1 << 24) - 65535);
+        rv = nghttp2_submit_window_update(conn.session, NGHTTP2_FLAG_NONE, 0, (1 << 24) - 65535);
+        if (rv != 0)
+            spdlog::warn("nghttp2_submit_window_update error: {}", nghttp2_strerror(rv));
 
         // Flush initial SETTINGS
         {
@@ -1092,6 +1292,159 @@ namespace sm
                     break;
             }
             // HTTP/1.0 default close, HTTP/1.1 default keep-alive
+            if (version == "HTTP/1.0")
+                break;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //              PLAIN HTTP/1.1 (no TLS — for phones/LAN)
+    // ═══════════════════════════════════════════════════════════════
+
+    void H2Server::runPlainHttp11(sm_socket_t fd)
+    {
+        bool alive = true;
+
+        while (alive && running_.load())
+        {
+            // Read request line
+            std::string requestLine = plainReadLine(fd);
+            if (requestLine.empty())
+                break;
+
+            std::istringstream rl(requestLine);
+            std::string method, rawPath, version;
+            rl >> method >> rawPath >> version;
+
+            // Read headers
+            std::map<std::string, std::string> hdrs;
+            while (true)
+            {
+                std::string line = plainReadLine(fd);
+                if (line.empty())
+                    break;
+                auto colon = line.find(':');
+                if (colon != std::string::npos)
+                {
+                    std::string key = line.substr(0, colon);
+                    std::string val = line.substr(colon + 1);
+                    while (!val.empty() && val[0] == ' ')
+                        val.erase(val.begin());
+                    std::string keyLower = key;
+                    std::transform(keyLower.begin(), keyLower.end(), keyLower.begin(), ::tolower);
+                    hdrs[keyLower] = val;
+                    hdrs[key] = val;
+                }
+            }
+
+            // Read body
+            std::string body;
+            auto clIt = hdrs.find("content-length");
+            if (clIt != hdrs.end())
+            {
+                size_t cl = std::stoull(clIt->second);
+                if (!plainReadN(fd, body, cl))
+                    break;
+            }
+
+            // Build H2Request
+            H2Request req;
+            req.method = method;
+            req.raw_path = rawPath;
+            req.headers = hdrs;
+            req.body = body;
+            {
+                std::string qstr;
+                splitPath(rawPath, req.path, qstr);
+                if (!qstr.empty())
+                    parseQueryString(qstr, req.params);
+            }
+
+            // Route
+            H2Response res;
+            auto handler = matchRoute(method, req.path, req.matches);
+            if (handler)
+                handler(req, res);
+            else if (tryServeStatic(req.path, res))
+            { /* ok */
+            }
+            else
+            {
+                res.status = 404;
+                res.set_content("{\"error\":\"Not Found\"}", "application/json");
+                if (errorHandler_)
+                    errorHandler_(req, res);
+            }
+
+            // Apply default headers
+            for (const auto &[k, v] : defaultHeaders_)
+            {
+                if (res.headers.find(k) == res.headers.end())
+                    res.headers[k] = v;
+            }
+
+            // ── Send response ──
+            if (!res.hasProvider_)
+            {
+                std::ostringstream oss;
+                oss << "HTTP/1.1 " << res.status << " OK\r\n";
+                if (!res.contentType_.empty())
+                    oss << "Content-Type: " << res.contentType_ << "\r\n";
+                oss << "Content-Length: " << res.body.size() << "\r\n";
+                for (const auto &[k, v] : res.headers)
+                    oss << k << ": " << v << "\r\n";
+                oss << "\r\n";
+                oss << res.body;
+                if (!plainWriteAll(fd, oss.str()))
+                    break;
+            }
+            else
+            {
+                // Streaming response (MJPEG etc.)
+                std::ostringstream oss;
+                oss << "HTTP/1.1 " << res.status << " OK\r\n";
+                if (!res.contentType_.empty())
+                    oss << "Content-Type: " << res.contentType_ << "\r\n";
+                oss << "Connection: keep-alive\r\n";
+                for (const auto &[k, v] : res.headers)
+                    oss << k << ": " << v << "\r\n";
+                oss << "\r\n";
+                if (!plainWriteAll(fd, oss.str()))
+                    break;
+
+                H2DataSink sink;
+                size_t offset = 0;
+                while (alive && running_.load())
+                {
+                    bool ok = res.provider_(offset, sink);
+                    if (sink.hasData())
+                    {
+                        if (!plainWriteAll(fd, sink.buffer_))
+                        {
+                            alive = false;
+                            break;
+                        }
+                        offset += sink.buffer_.size();
+                        sink.clear();
+                    }
+                    if (!ok)
+                        break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                }
+                if (res.providerDone_)
+                    res.providerDone_(alive);
+                break;
+            }
+
+            // Check Connection header
+            auto connHdr = hdrs.find("connection");
+            if (connHdr != hdrs.end())
+            {
+                std::string val = connHdr->second;
+                std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+                if (val == "close")
+                    break;
+            }
             if (version == "HTTP/1.0")
                 break;
         }

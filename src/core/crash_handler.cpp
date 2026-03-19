@@ -21,20 +21,20 @@
 
 // ── Platform headers ────────────────────────────────────────────
 #ifdef _WIN32
-#   ifndef WIN32_LEAN_AND_MEAN
-#       define WIN32_LEAN_AND_MEAN
-#   endif
-#   include <windows.h>
-#   include <dbghelp.h>
-#   include <psapi.h>
-#   include <csignal>
-#   pragma comment(lib, "dbghelp.lib")
-#   pragma comment(lib, "psapi.lib")
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <dbghelp.h>
+#include <psapi.h>
+#include <csignal>
+#pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "psapi.lib")
 #else
-#   include <signal.h>
-#   include <unistd.h>
-#   include <execinfo.h>    // backtrace, backtrace_symbols
-#   include <cxxabi.h>       // __cxa_demangle
+#include <signal.h>
+#include <unistd.h>
+#include <execinfo.h> // backtrace, backtrace_symbols
+#include <cxxabi.h>   // __cxa_demangle
 #endif
 
 namespace sm
@@ -106,30 +106,54 @@ namespace sm
     {
         switch (code)
         {
-        case EXCEPTION_ACCESS_VIOLATION:         return "EXCEPTION_ACCESS_VIOLATION";
-        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:    return "EXCEPTION_ARRAY_BOUNDS_EXCEEDED";
-        case EXCEPTION_BREAKPOINT:               return "EXCEPTION_BREAKPOINT";
-        case EXCEPTION_DATATYPE_MISALIGNMENT:    return "EXCEPTION_DATATYPE_MISALIGNMENT";
-        case EXCEPTION_FLT_DENORMAL_OPERAND:     return "EXCEPTION_FLT_DENORMAL_OPERAND";
-        case EXCEPTION_FLT_DIVIDE_BY_ZERO:       return "EXCEPTION_FLT_DIVIDE_BY_ZERO";
-        case EXCEPTION_FLT_INEXACT_RESULT:       return "EXCEPTION_FLT_INEXACT_RESULT";
-        case EXCEPTION_FLT_INVALID_OPERATION:    return "EXCEPTION_FLT_INVALID_OPERATION";
-        case EXCEPTION_FLT_OVERFLOW:             return "EXCEPTION_FLT_OVERFLOW";
-        case EXCEPTION_FLT_STACK_CHECK:          return "EXCEPTION_FLT_STACK_CHECK";
-        case EXCEPTION_FLT_UNDERFLOW:            return "EXCEPTION_FLT_UNDERFLOW";
-        case EXCEPTION_GUARD_PAGE:               return "EXCEPTION_GUARD_PAGE";
-        case EXCEPTION_ILLEGAL_INSTRUCTION:      return "EXCEPTION_ILLEGAL_INSTRUCTION";
-        case EXCEPTION_IN_PAGE_ERROR:            return "EXCEPTION_IN_PAGE_ERROR";
-        case EXCEPTION_INT_DIVIDE_BY_ZERO:       return "EXCEPTION_INT_DIVIDE_BY_ZERO";
-        case EXCEPTION_INT_OVERFLOW:             return "EXCEPTION_INT_OVERFLOW";
-        case EXCEPTION_INVALID_DISPOSITION:      return "EXCEPTION_INVALID_DISPOSITION";
-        case EXCEPTION_INVALID_HANDLE:           return "EXCEPTION_INVALID_HANDLE";
-        case EXCEPTION_NONCONTINUABLE_EXCEPTION: return "EXCEPTION_NONCONTINUABLE_EXCEPTION";
-        case EXCEPTION_PRIV_INSTRUCTION:         return "EXCEPTION_PRIV_INSTRUCTION";
-        case EXCEPTION_SINGLE_STEP:              return "EXCEPTION_SINGLE_STEP";
-        case EXCEPTION_STACK_OVERFLOW:           return "EXCEPTION_STACK_OVERFLOW";
-        case 0xE06D7363:                         return "C++ EXCEPTION (0xE06D7363)";
-        default:                                 return "UNKNOWN";
+        case EXCEPTION_ACCESS_VIOLATION:
+            return "EXCEPTION_ACCESS_VIOLATION";
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+            return "EXCEPTION_ARRAY_BOUNDS_EXCEEDED";
+        case EXCEPTION_BREAKPOINT:
+            return "EXCEPTION_BREAKPOINT";
+        case EXCEPTION_DATATYPE_MISALIGNMENT:
+            return "EXCEPTION_DATATYPE_MISALIGNMENT";
+        case EXCEPTION_FLT_DENORMAL_OPERAND:
+            return "EXCEPTION_FLT_DENORMAL_OPERAND";
+        case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+            return "EXCEPTION_FLT_DIVIDE_BY_ZERO";
+        case EXCEPTION_FLT_INEXACT_RESULT:
+            return "EXCEPTION_FLT_INEXACT_RESULT";
+        case EXCEPTION_FLT_INVALID_OPERATION:
+            return "EXCEPTION_FLT_INVALID_OPERATION";
+        case EXCEPTION_FLT_OVERFLOW:
+            return "EXCEPTION_FLT_OVERFLOW";
+        case EXCEPTION_FLT_STACK_CHECK:
+            return "EXCEPTION_FLT_STACK_CHECK";
+        case EXCEPTION_FLT_UNDERFLOW:
+            return "EXCEPTION_FLT_UNDERFLOW";
+        case EXCEPTION_GUARD_PAGE:
+            return "EXCEPTION_GUARD_PAGE";
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+            return "EXCEPTION_ILLEGAL_INSTRUCTION";
+        case EXCEPTION_IN_PAGE_ERROR:
+            return "EXCEPTION_IN_PAGE_ERROR";
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+            return "EXCEPTION_INT_DIVIDE_BY_ZERO";
+        case EXCEPTION_INT_OVERFLOW:
+            return "EXCEPTION_INT_OVERFLOW";
+        case EXCEPTION_INVALID_DISPOSITION:
+            return "EXCEPTION_INVALID_DISPOSITION";
+        case EXCEPTION_INVALID_HANDLE:
+            return "EXCEPTION_INVALID_HANDLE";
+        case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+            return "EXCEPTION_NONCONTINUABLE_EXCEPTION";
+        case EXCEPTION_PRIV_INSTRUCTION:
+            return "EXCEPTION_PRIV_INSTRUCTION";
+        case EXCEPTION_SINGLE_STEP:
+            return "EXCEPTION_SINGLE_STEP";
+        case EXCEPTION_STACK_OVERFLOW:
+            return "EXCEPTION_STACK_OVERFLOW";
+        case 0xE06D7363:
+            return "C++ EXCEPTION (0xE06D7363)";
+        default:
+            return "UNKNOWN";
         }
     }
 
@@ -156,8 +180,8 @@ namespace sm
             ULONG_PTR target = ep->ExceptionRecord->ExceptionInformation[1];
             fprintf(f, "  AV Type  : %s at 0x%p\n\n",
                     rw == 0 ? "READ" : rw == 1 ? "WRITE"
-                                     : rw == 8 ? "DEP"
-                                                : "UNKNOWN",
+                                   : rw == 8   ? "DEP"
+                                               : "UNKNOWN",
                     reinterpret_cast<void *>(target));
         }
 
@@ -430,13 +454,20 @@ namespace sm
     {
         switch (sig)
         {
-        case SIGSEGV:  return "SIGSEGV (Segmentation Fault)";
-        case SIGABRT:  return "SIGABRT (Aborted)";
-        case SIGFPE:   return "SIGFPE (Floating Point Exception)";
-        case SIGILL:   return "SIGILL (Illegal Instruction)";
-        case SIGBUS:   return "SIGBUS (Bus Error)";
-        case SIGTRAP:  return "SIGTRAP (Trap)";
-        default:       return "UNKNOWN SIGNAL";
+        case SIGSEGV:
+            return "SIGSEGV (Segmentation Fault)";
+        case SIGABRT:
+            return "SIGABRT (Aborted)";
+        case SIGFPE:
+            return "SIGFPE (Floating Point Exception)";
+        case SIGILL:
+            return "SIGILL (Illegal Instruction)";
+        case SIGBUS:
+            return "SIGBUS (Bus Error)";
+        case SIGTRAP:
+            return "SIGTRAP (Trap)";
+        default:
+            return "UNKNOWN SIGNAL";
         }
     }
 

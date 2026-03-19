@@ -21,9 +21,12 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#include <wincrypt.h>
+#pragma comment(lib, "crypt32.lib")
 #else
 #include <ifaddrs.h>
 #include <arpa/inet.h>
+#include <cstdlib>
 #endif
 
 namespace sm
@@ -34,6 +37,169 @@ namespace sm
         std::string certPath;
         std::string keyPath;
     };
+
+    // ─────────────────────────────────────────────────────────────
+    // Install a PEM certificate into the OS trusted root CA store
+    // so browsers trust it without warnings.
+    // Windows:  Adds to Current User "ROOT" store (no admin needed)
+    // Linux:    Copies to /usr/local/share/ca-certificates/ + update-ca-certificates
+    // macOS:    Uses 'security add-trusted-cert' to user login keychain
+    // ─────────────────────────────────────────────────────────────
+    inline bool installCertToTrustStore(const std::string &certPemPath)
+    {
+        namespace fs = std::filesystem;
+
+        if (!fs::exists(certPemPath))
+        {
+            spdlog::error("Cannot install cert: {} not found", certPemPath);
+            return false;
+        }
+
+#ifdef _WIN32
+        // ── Windows: Use Win32 Crypto API to add cert to Current User Root store ──
+        // Read the PEM file
+        FILE *fp = fopen(certPemPath.c_str(), "rb");
+        if (!fp)
+        {
+            spdlog::error("Failed to open cert file for trust store install: {}", certPemPath);
+            return false;
+        }
+        X509 *x509 = PEM_read_X509(fp, nullptr, nullptr, nullptr);
+        fclose(fp);
+        if (!x509)
+        {
+            spdlog::error("Failed to parse PEM certificate for trust store install");
+            return false;
+        }
+
+        // Convert X509 to DER (binary) format for Windows Crypto API
+        int derLen = i2d_X509(x509, nullptr);
+        if (derLen <= 0)
+        {
+            X509_free(x509);
+            spdlog::error("Failed to get DER length of certificate");
+            return false;
+        }
+        std::vector<unsigned char> derBuf(derLen);
+        unsigned char *derPtr = derBuf.data();
+        i2d_X509(x509, &derPtr);
+        X509_free(x509);
+
+        // Open the Current User "Root" (Trusted Root CAs) certificate store
+        HCERTSTORE hStore = CertOpenStore(
+            CERT_STORE_PROV_SYSTEM,
+            0,
+            0,
+            CERT_SYSTEM_STORE_CURRENT_USER,
+            L"ROOT");
+        if (!hStore)
+        {
+            spdlog::error("Failed to open Windows certificate store (error: {})", GetLastError());
+            return false;
+        }
+
+        // Check if our cert is already installed by looking for it
+        CRYPT_DATA_BLOB certBlob;
+        certBlob.pbData = derBuf.data();
+        certBlob.cbData = static_cast<DWORD>(derBuf.size());
+
+        PCCERT_CONTEXT pExisting = CertFindCertificateInStore(
+            hStore,
+            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+            0,
+            CERT_FIND_EXISTING,
+            CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                         derBuf.data(), static_cast<DWORD>(derBuf.size())),
+            nullptr);
+
+        if (pExisting)
+        {
+            CertFreeCertificateContext(pExisting);
+            CertCloseStore(hStore, 0);
+            spdlog::info("SSL certificate already installed in Windows trust store");
+            return true;
+        }
+
+        // Add the certificate to the store
+        BOOL ok = CertAddEncodedCertificateToStore(
+            hStore,
+            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+            derBuf.data(),
+            static_cast<DWORD>(derBuf.size()),
+            CERT_STORE_ADD_REPLACE_EXISTING,
+            nullptr);
+
+        CertCloseStore(hStore, 0);
+
+        if (ok)
+        {
+            spdlog::info("SSL certificate installed to Windows Trusted Root CA store (Current User)");
+            return true;
+        }
+        else
+        {
+            spdlog::warn("Failed to install cert to Windows trust store (error: {}). "
+                         "You may see browser SSL warnings.",
+                         GetLastError());
+            return false;
+        }
+
+#elif defined(__APPLE__)
+        // ── macOS: Add to user login keychain ──
+        std::string cmd = "security add-trusted-cert -r trustRoot -k "
+                          "~/Library/Keychains/login.keychain-db \"" +
+                          certPemPath + "\" 2>/dev/null";
+        int ret = std::system(cmd.c_str());
+        if (ret == 0)
+        {
+            spdlog::info("SSL certificate installed to macOS login keychain");
+            return true;
+        }
+        else
+        {
+            // Try without -db suffix (older macOS)
+            cmd = "security add-trusted-cert -r trustRoot -k "
+                  "~/Library/Keychains/login.keychain \"" +
+                  certPemPath + "\" 2>/dev/null";
+            ret = std::system(cmd.c_str());
+            if (ret == 0)
+            {
+                spdlog::info("SSL certificate installed to macOS login keychain");
+                return true;
+            }
+            spdlog::warn("Failed to install cert to macOS keychain. You may see browser SSL warnings.");
+            return false;
+        }
+
+#else
+        // ── Linux: Copy to system CA dir and update ──
+        const std::string caDir = "/usr/local/share/ca-certificates";
+        const std::string dest = caDir + "/streamonitor-local.crt";
+        // Need root for this — try with sudo
+        std::string cmd = "sudo cp \"" + certPemPath + "\" \"" + dest +
+                          "\" && sudo update-ca-certificates 2>/dev/null";
+        int ret = std::system(cmd.c_str());
+        if (ret == 0)
+        {
+            spdlog::info("SSL certificate installed to Linux system CA store");
+            return true;
+        }
+        else
+        {
+            // Try without sudo (might already have permissions or running as root)
+            cmd = "cp \"" + certPemPath + "\" \"" + dest +
+                  "\" && update-ca-certificates 2>/dev/null";
+            ret = std::system(cmd.c_str());
+            if (ret == 0)
+            {
+                spdlog::info("SSL certificate installed to Linux system CA store");
+                return true;
+            }
+            spdlog::warn("Failed to install cert to Linux CA store. You may see browser SSL warnings.");
+            return false;
+        }
+#endif
+    }
 
     // Generate a self-signed certificate and private key if they don't exist.
     // Returns paths to the cert and key PEM files.
@@ -49,6 +215,8 @@ namespace sm
         if (fs::exists(paths.certPath) && fs::exists(paths.keyPath))
         {
             spdlog::info("Using existing SSL certificate: {}", paths.certPath);
+            // Ensure cert is installed in system trust store every time
+            installCertToTrustStore(paths.certPath);
             return paths;
         }
 
@@ -231,6 +399,10 @@ namespace sm
         EVP_PKEY_free(pkey);
 
         spdlog::info("SSL certificate generated: {}", paths.certPath);
+
+        // Auto-install the new cert to system trust store
+        installCertToTrustStore(paths.certPath);
+
         return paths;
     }
 

@@ -3827,7 +3827,7 @@ namespace sm
             if (ImGui::SmallButton("Copy##net"))
                 copyToClipboard(netUrl);
 
-            ImGui::TextColored(COL_TEXT_DIM, "Use the Network URL from other devices on your WiFi/LAN");
+            ImGui::TextColored(COL_TEXT_DIM, "Use the Network URL from any device (PC, phone, tablet)");
         }
 
         ImGui::Spacing();

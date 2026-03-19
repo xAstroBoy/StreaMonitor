@@ -3,8 +3,7 @@
 // ─────────────────────────────────────────────────────────────────
 // StreaMonitor C++ — Embedded Web Server
 // REST API + static file serving for Next.js dashboard
-// HTTP/2 with TLS (single port, unlimited concurrent streams)
-// Falls back to HTTP/1.1 for non-h2 clients (curl, etc.)
+// Plain HTTP — works on all devices (PCs, phones, tablets)
 // ─────────────────────────────────────────────────────────────────
 
 #include "core/bot_manager.h"
@@ -65,8 +64,6 @@ namespace sm
         std::unique_ptr<H2Server> server_;
         std::atomic<bool> running_{false};
         std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> logRingBuffer_;
-        std::string certPath_;
-        std::string keyPath_;
     };
 
 } // namespace sm

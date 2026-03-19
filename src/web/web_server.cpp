@@ -5,7 +5,6 @@
 // ─────────────────────────────────────────────────────────────────
 
 #include "web/web_server.h"
-#include "web/ssl_cert_gen.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <filesystem>
@@ -42,20 +41,9 @@ namespace sm
                          ModelConfigStore &configStore)
         : manager_(manager), config_(config), configStore_(configStore)
     {
-        // Generate self-signed SSL certificate if needed
-        auto cert = ensureSslCert(".");
-        certPath_ = cert.certPath;
-        keyPath_ = cert.keyPath;
-
-        if (!certPath_.empty() && !keyPath_.empty())
-        {
-            server_ = std::make_unique<H2Server>(certPath_, keyPath_);
-            spdlog::info("HTTP/2 server created (HTTPS + TLS)");
-        }
-        else
-        {
-            spdlog::error("Failed to generate SSL cert — server unavailable");
-        }
+        // Create server (plain HTTP — no certs needed)
+        server_ = std::make_unique<H2Server>("", "");
+        spdlog::info("Web server created (HTTP)");
     }
 
     WebServer::~WebServer()
@@ -72,7 +60,7 @@ namespace sm
         setupRoutes();
         setupStaticFiles();
 
-        if (!server_->listen(config_.webHost, config_.webPort))
+        if (!server_->listenHttp(config_.webHost, config_.webPort))
         {
             spdlog::error("Web server failed to start on {}:{}", config_.webHost, config_.webPort);
             return false;
@@ -82,7 +70,7 @@ namespace sm
         spdlog::info("Web server started on {}:{}", config_.webHost, config_.webPort);
         spdlog::info("  Local:   {}", getLocalUrl());
         spdlog::info("  Network: {}", getNetworkUrl());
-        spdlog::info("  Protocol: HTTP/2 + HTTPS (HTTP/1.1 fallback)");
+        spdlog::info("  Protocol: HTTP/1.1 (all devices, no cert needed)");
 
         return true;
     }
@@ -106,12 +94,12 @@ namespace sm
 
     std::string WebServer::getUrl() const
     {
-        return "https://" + config_.webHost + ":" + std::to_string(config_.webPort);
+        return "http://" + config_.webHost + ":" + std::to_string(config_.webPort);
     }
 
     std::string WebServer::getLocalUrl() const
     {
-        return "https://127.0.0.1:" + std::to_string(config_.webPort);
+        return "http://127.0.0.1:" + std::to_string(config_.webPort);
     }
 
     std::string WebServer::getNetworkUrl() const
@@ -119,7 +107,7 @@ namespace sm
         std::string ip = getLocalIP();
         if (ip.empty())
             ip = "127.0.0.1";
-        return "https://" + ip + ":" + std::to_string(config_.webPort);
+        return "http://" + ip + ":" + std::to_string(config_.webPort);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -326,7 +314,7 @@ namespace sm
                         std::lock_guard lock(tokenMutex_);
                         validTokens_.insert(token);
                     }
-                    res.set_header("set-cookie", "sm_token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=86400");
+                    res.set_header("set-cookie", "sm_token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400");
                     json j = {{"success", true}, {"token", token}};
                     jsonResponse(res, j);
                     spdlog::info("Web login successful for user: {}", username);
@@ -358,7 +346,7 @@ namespace sm
                     validTokens_.erase(token);
                 }
             }
-            res.set_header("set-cookie", "sm_token=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0");
+            res.set_header("set-cookie", "sm_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
             json j = {{"success", true}};
             jsonResponse(res, j); });
 
@@ -460,7 +448,6 @@ namespace sm
                      });
 
         // ── GET /api/stream/:username/:site — MJPEG live stream ───
-        // HTTP/2 multiplexes these — no 6-connection limit!
         server_->Get(R"(/api/stream/([^/]+)/([^/]+))",
                      [this](const H2Request &req, H2Response &res)
                      {
@@ -480,7 +467,7 @@ namespace sm
                                  if (!sink.is_writable())
                                      return false;
 
-                                 // Check recording status (non-blocking)
+                                 // Check recording status periodically
                                  auto state = manager_.getBotState(username, site);
                                  if (!state || !state->recording)
                                  {
@@ -489,14 +476,15 @@ namespace sm
                                                         .count();
                                      if (elapsed > 5)
                                          return false; // Stop stream after 5s of not-recording
-                                     return true;      // No data, but keep alive
+                                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                                     return true; // No data, but keep alive
                                  }
                                  lastRecordingCheck = Clock::now();
 
-                                 // Non-blocking frame check (HTTP/2 compatible)
+                                 // Blocking wait for next frame (up to 200ms)
                                  PreviewFrame frame;
-                                 if (!manager_.consumePreview(username, site, frame, lastVersion))
-                                     return true; // No new frame yet, keep alive
+                                 if (!manager_.waitForPreview(username, site, frame, lastVersion, 200))
+                                     return true; // Timed out, keep alive
 
                                  std::string jpg = rgbaToJpeg(frame.pixels.data(), frame.width, frame.height);
 

@@ -25,6 +25,7 @@ import argparse
 import platform
 import zipfile
 import tarfile
+import time
 from pathlib import Path
 
 import re
@@ -379,6 +380,86 @@ def package(args):
     print(f"  Archive:       {archive_path}")
     print(f"{'='*60}")
 
+
+def deploy(args):
+    """Kill running StreaMonitor, copy new build to runtime dir, and launch it."""
+    dist = Path(args.dist_dir) if args.dist_dir else DIST_DIR
+    runtime_dir = ROOT.parent  # C:\Users\xAstroBoy\Desktop\StreaMonitor
+
+    exe_name = "StreaMonitor.exe" if IS_WINDOWS else "StreaMonitor"
+    src_exe = dist / exe_name
+
+    if not src_exe.exists():
+        print(f"[X] Built exe not found: {src_exe}")
+        sys.exit(1)
+
+    print(f"\n{'='*60}")
+    print(f"  DEPLOYING to {runtime_dir}")
+    print(f"{'='*60}")
+
+    # ── Step 1: Kill any running StreaMonitor process ──
+    print("\n[1/3] Killing running StreaMonitor...")
+    if IS_WINDOWS:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", exe_name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    else:
+        subprocess.run(
+            ["pkill", "-f", exe_name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    # Give the OS a moment to release file locks
+    time.sleep(1.5)
+
+    # ── Step 2: Copy exe + web/ to runtime directory ──
+    print("[2/3] Copying files to runtime directory...")
+    dest_exe = runtime_dir / exe_name
+    try:
+        shutil.copy2(src_exe, dest_exe)
+        print(f"  [OK] {exe_name}")
+    except PermissionError:
+        # Still locked — wait longer and retry once
+        print(f"  [!] {exe_name} is still locked, waiting...")
+        time.sleep(3)
+        try:
+            shutil.copy2(src_exe, dest_exe)
+            print(f"  [OK] {exe_name} (retry succeeded)")
+        except Exception as e:
+            print(f"  [X] Could not copy {exe_name}: {e}")
+            print(f"      You may need to close StreaMonitor manually.")
+            sys.exit(1)
+
+    # Copy web dashboard
+    web_src = dist / "web"
+    if web_src.is_dir():
+        web_dst = runtime_dir / "web"
+        shutil.copytree(web_src, web_dst, dirs_exist_ok=True)
+        print(f"  [OK] web/ dashboard")
+
+    # ── Step 3: Launch the new version ──
+    print("[3/3] Launching new StreaMonitor...")
+    if IS_WINDOWS:
+        # Use START to detach the process from this console
+        subprocess.Popen(
+            [str(dest_exe)],
+            cwd=str(runtime_dir),
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+        )
+    else:
+        subprocess.Popen(
+            [str(dest_exe)],
+            cwd=str(runtime_dir),
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    print(f"\n[OK] StreaMonitor deployed and launched from {runtime_dir}")
+
+
 # ──────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────
@@ -401,6 +482,8 @@ def main():
                         help="Use system libraries instead of vcpkg (Linux)")
     parser.add_argument("--no-bump", action="store_true",
                         help="Don't auto-increment version before building")
+    parser.add_argument("--no-deploy", action="store_true",
+                        help="Don't deploy to runtime directory after build")
     args = parser.parse_args()
 
     print(f"Platform: {SYSTEM} ({platform.machine()})")
@@ -460,6 +543,10 @@ def main():
 
     # Package
     package(args)
+
+    # Deploy: kill old → copy to runtime dir → launch
+    if not args.no_deploy:
+        deploy(args)
 
     print(f"\n[OK] Build complete -- output in: {Path(args.dist_dir) if args.dist_dir else DIST_DIR}")
 
