@@ -15,6 +15,8 @@
 #ifdef _WIN32
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 #endif
 #include <spdlog/spdlog.h>
 
@@ -690,6 +692,29 @@ namespace sm
 
         glfwMakeContextCurrent(window_);
         glfwSwapInterval(0); // Disable VSync — we use our own frame limiter
+
+        // ── Apply dark title bar & custom border via DWM ─────────
+#ifdef _WIN32
+        {
+            HWND hwnd = glfwGetWin32Window(window_);
+            // Enable dark mode title bar (Win10 1809+ / Win11)
+            BOOL useDarkMode = TRUE;
+            ::DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */,
+                                    &useDarkMode, sizeof(useDarkMode));
+            // Custom border color — match our dark theme
+            COLORREF borderColor = RGB(25, 25, 35); // subtle dark blue-grey
+            ::DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */,
+                                    &borderColor, sizeof(borderColor));
+            // Custom caption (title bar background) color
+            COLORREF captionColor = RGB(15, 15, 20); // near-black matching COL_BG_DARK
+            ::DwmSetWindowAttribute(hwnd, 35 /* DWMWA_CAPTION_COLOR */,
+                                    &captionColor, sizeof(captionColor));
+            // Custom title text color
+            COLORREF textColor = RGB(180, 180, 200); // subtle light text
+            ::DwmSetWindowAttribute(hwnd, 36 /* DWMWA_TEXT_COLOR */,
+                                    &textColor, sizeof(textColor));
+        }
+#endif
 
         // Set window icon (embedded RGBA pixel data)
         {

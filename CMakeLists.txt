@@ -277,7 +277,7 @@ endif()
 
 # Platform-specific libraries
 if(WIN32)
-    target_link_libraries(StreaMonitor PRIVATE winhttp)
+    target_link_libraries(StreaMonitor PRIVATE winhttp dwmapi)
 endif()
 
 # ──────────────────────────────────────────────
