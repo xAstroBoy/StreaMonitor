@@ -5,6 +5,8 @@
 
 #include <cstring>
 
+#include "core/crash_handler.h"
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -21,6 +23,10 @@ int cliMain(int argc, char **argv);
 
 int main(int argc, char **argv)
 {
+    // Install universal crash handler FIRST — before anything else.
+    // Writes detailed stack traces to crashes/ on any unhandled crash.
+    sm::installCrashHandler("crashes");
+
     // Check if --cli flag is present anywhere in args
     bool cliMode = false;
     for (int i = 1; i < argc; i++)

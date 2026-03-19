@@ -48,6 +48,12 @@ imgui_layout.ini
 # ── Downloads / data ──
 downloads/
 
+# ── Runtime generated ──
+crashes/
+ssl/
+*.pem
+*.dmp
+
 # ── OS junk ──
 .DS_Store
 Thumbs.db

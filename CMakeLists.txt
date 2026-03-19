@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(StreaMonitor VERSION 2.1.10 LANGUAGES CXX C)
+project(StreaMonitor VERSION 2.1.15 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -125,16 +125,14 @@ if(NOT spdlog_FOUND)
     FetchContent_MakeAvailable(spdlog)
 endif()
 
-# cpp-httplib (header-only embedded HTTP server for web dashboard)
-include(FetchContent)
-FetchContent_Declare(httplib
-    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-    GIT_TAG v0.18.3)
-set(HTTPLIB_COMPILE OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(httplib)
-
-# IXWebSocket (WebSocket server for real-time preview streaming)
-find_package(ixwebsocket CONFIG REQUIRED)
+# nghttp2 (HTTP/2 protocol library — replaces cpp-httplib for native h2 support)
+find_package(unofficial-nghttp2 CONFIG QUIET)
+if(NOT unofficial-nghttp2_FOUND)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(NGHTTP2 IMPORTED_TARGET libnghttp2)
+    endif()
+endif()
 
 # ImGui + GLFW + OpenGL backend
 include(FetchContent)
@@ -199,13 +197,27 @@ target_link_libraries(sm_engine PUBLIC
     OpenSSL::SSL OpenSSL::Crypto
     nlohmann_json::nlohmann_json
     spdlog::spdlog
-    httplib::httplib
-    ixwebsocket::ixwebsocket
     Threads::Threads
 )
 
+# Link nghttp2
+if(unofficial-nghttp2_FOUND)
+    target_link_libraries(sm_engine PUBLIC unofficial::nghttp2::nghttp2)
+elseif(NGHTTP2_FOUND)
+    target_link_libraries(sm_engine PUBLIC PkgConfig::NGHTTP2)
+else()
+    find_library(NGHTTP2_LIB nghttp2)
+    find_path(NGHTTP2_INCLUDE nghttp2/nghttp2.h)
+    if(NGHTTP2_LIB AND NGHTTP2_INCLUDE)
+        target_link_libraries(sm_engine PUBLIC ${NGHTTP2_LIB})
+        target_include_directories(sm_engine PUBLIC ${NGHTTP2_INCLUDE})
+    else()
+        message(FATAL_ERROR "nghttp2 not found. Install via vcpkg: vcpkg install nghttp2")
+    endif()
+endif()
+
 if(WIN32)
-    target_link_libraries(sm_engine PUBLIC ws2_32 bcrypt iphlpapi shell32 ncrypt crypt32 mfuuid mfplat strmiids)
+    target_link_libraries(sm_engine PUBLIC ws2_32 bcrypt iphlpapi shell32 ncrypt crypt32 mfuuid mfplat strmiids dbghelp psapi)
     target_compile_definitions(sm_engine PUBLIC
         _CRT_SECURE_NO_WARNINGS
         NOMINMAX

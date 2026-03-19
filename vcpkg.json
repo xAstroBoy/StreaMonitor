@@ -35,11 +35,6 @@
                 "gpl"
             ]
         },
-        {
-            "name": "ixwebsocket",
-            "features": [
-                "ssl"
-            ]
-        }
+        "nghttp2"
     ]
 }

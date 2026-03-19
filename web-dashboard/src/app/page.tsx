@@ -7,7 +7,7 @@ import {
   addModel, removeModel, startModel, stopModel, restartModel,
   startAll, stopAll, saveConfig, updateConfig, checkAuth, logout, isAuthenticated,
   createGroup, deleteGroup, startGroup, stopGroup, addGroupMember, removeGroupMember,
-  updateCredentials, previewWs,
+  updateCredentials,
   formatBytes, formatDuration, getStatusColor, getPreviewUrl, getStreamUrl,
   type BotState, type ServerStatus, type SiteInfo, type DiskUsage, type GroupInfo, type AppConfig,
 } from '@/lib/api'
@@ -61,57 +61,27 @@ function statusBadge(bot: BotState): { label: string; color: string } {
   }
 }
 
-// Preview Thumbnail — WebSocket live stream for recording models, JPEG snapshot for others
-// Recording: uses WebSocket for real-time frames (unlimited concurrent streams!)
+// Preview Thumbnail — HTTP/2 multiplexed previews (unlimited concurrent streams!)
+// Recording: uses /api/stream/:user/:site (MJPEG) — HTTP/2 handles multiplexing
 // Not recording: uses /api/preview/:user/:site (JPEG snapshot) or native CDN thumbnail
 //
-// 🚀 WebSocket bypasses browser's 6-connection HTTP/1.1 limit by multiplexing
-// all preview streams over a single connection. Truly unlimited live previews!
-function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl, wsPort }: {
-  username: string; siteSlug: string; large?: boolean; isRecording?: boolean; nativePreviewUrl?: string; wsPort?: number
+// 🚀 HTTP/2 multiplexes ALL streams over a single TCP connection.
+// No WebSocket needed. No 6-connection limit. Just native h2 magic.
+function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl }: {
+  username: string; siteSlug: string; large?: boolean; isRecording?: boolean; nativePreviewUrl?: string
 }) {
   const [errored, setErrored] = useState(false)
   const [retryKey, setRetryKey] = useState(0)
   const [useNativeFallback, setUseNativeFallback] = useState(false)
-  const [wsFrame, setWsFrame] = useState<string | null>(null)
   const imgRef = useRef<HTMLImageElement>(null)
 
-  // WebSocket subscription for recording models
-  useEffect(() => {
-    if (!isRecording || !wsPort) {
-      setWsFrame(null)
-      return
-    }
-
-    // Connect to WebSocket and subscribe to this stream
-    previewWs.connect(wsPort).catch(() => {})
-
-    const unsubscribe = previewWs.subscribe(username, siteSlug, (jpeg: Blob) => {
-      // Create object URL for the frame
-      const url = URL.createObjectURL(jpeg)
-      setWsFrame(prev => {
-        if (prev) URL.revokeObjectURL(prev)
-        return url
-      })
-      setErrored(false)
-    })
-
-    return () => {
-      unsubscribe()
-      setWsFrame(prev => {
-        if (prev) URL.revokeObjectURL(prev)
-        return null
-      })
-    }
-  }, [isRecording, wsPort, username, siteSlug])
-
-  // For non-recording models: fallback to HTTP preview
-  const httpSrc = useNativeFallback && nativePreviewUrl
-    ? nativePreviewUrl
-    : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
-
-  // Use WebSocket frame if available, otherwise HTTP
-  const src = wsFrame || httpSrc
+  // For recording models: use MJPEG stream (multiplexed over HTTP/2)
+  // For non-recording: use snapshot or native CDN thumbnail
+  const src = isRecording
+    ? `${getStreamUrl(username, siteSlug)}?t=${retryKey}`
+    : useNativeFallback && nativePreviewUrl
+      ? nativePreviewUrl
+      : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
 
   // Retry errored state after delay
   useEffect(() => {
@@ -120,23 +90,22 @@ function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl
     return () => clearTimeout(t)
   }, [errored])
 
-  // Reset fallback state when recording status changes
+  // Reset fallback & force new stream when recording status changes
   useEffect(() => {
-    if (isRecording) {
-      setUseNativeFallback(false)
-      setErrored(false)
-    }
+    setUseNativeFallback(false)
+    setErrored(false)
+    setRetryKey(k => k + 1)
   }, [isRecording])
 
   const handleError = () => {
-    if (!useNativeFallback && nativePreviewUrl) {
+    if (!isRecording && !useNativeFallback && nativePreviewUrl) {
       setUseNativeFallback(true)
     } else {
       setErrored(true)
     }
   }
 
-  if (errored && !wsFrame) {
+  if (errored) {
     return (
       <div className={large ? 'preview-large flex items-center justify-center text-zinc-700' : 'preview-card-img flex items-center justify-center text-zinc-700 text-xs'}>
         <svg className={large ? 'w-12 h-12 opacity-20' : 'w-10 h-10 opacity-20'} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -150,7 +119,7 @@ function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl
     // eslint-disable-next-line @next/next/no-img-element
     <img
       ref={imgRef}
-      key={wsFrame ? 'ws' : `${retryKey}-${useNativeFallback}`}
+      key={`${retryKey}-${isRecording}-${useNativeFallback}`}
       src={src}
       alt=""
       className={large ? 'preview-large' : 'preview-card-img'}
@@ -246,11 +215,10 @@ function LiveStreamViewer({ username, siteSlug, onClose }: {
 }
 
 // Model Detail Modal
-function ModelDetailModal({ bot, onClose, onAction, wsPort }: {
+function ModelDetailModal({ bot, onClose, onAction }: {
   bot: BotState
   onClose: () => void
   onAction: (action: () => Promise<unknown>) => void
-  wsPort?: number
 }) {
   const badge = statusBadge(bot)
   const [showStream, setShowStream] = useState(false)
@@ -268,7 +236,7 @@ function ModelDetailModal({ bot, onClose, onAction, wsPort }: {
           </button>
 
           <div className="p-4 pb-0">
-            <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large isRecording={bot.recording} nativePreviewUrl={bot.previewUrl} wsPort={wsPort} />
+            <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large isRecording={bot.recording} nativePreviewUrl={bot.previewUrl} />
           </div>
 
           <div className="p-5 space-y-4">
@@ -372,14 +340,13 @@ function ModelDetailModal({ bot, onClose, onAction, wsPort }: {
 }
 
 // Model Card — Stripchat-style grid card with preview thumbnail
-function ModelCard({ bot, groups, selected, onClick, onStart, onStop, wsPort }: {
+function ModelCard({ bot, groups, selected, onClick, onStart, onStop }: {
   bot: BotState
   groups: GroupInfo[]
   selected: boolean
   onClick: (e: React.MouseEvent) => void
   onStart: () => void
   onStop: () => void
-  wsPort?: number
 }) {
   const groupName = bot.groupName || groups.find(g =>
     g.members?.some(m => m.username === bot.username && (m.site === bot.site || m.site === bot.siteSlug))
@@ -395,9 +362,9 @@ function ModelCard({ bot, groups, selected, onClick, onStart, onStop, wsPort }: 
 
   return (
     <div className={cardCls} onClick={onClick}>
-      {/* Preview Image — WebSocket live stream for recording, snapshot otherwise */}
+      {/* Preview Image — HTTP/2 multiplexed MJPEG for recording, snapshot otherwise */}
       <div className="grid-card-preview">
-        <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} isRecording={bot.recording} nativePreviewUrl={bot.previewUrl} wsPort={wsPort} />
+        <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} isRecording={bot.recording} nativePreviewUrl={bot.previewUrl} />
 
         {/* Status overlay top-left */}
         {bot.recording && (
@@ -1090,7 +1057,6 @@ export default function Dashboard() {
                         }}
                         onStart={() => handleAction(() => startModel(bot.username, bot.siteSlug))}
                         onStop={() => handleAction(() => stopModel(bot.username, bot.siteSlug))}
-                        wsPort={status?.wsPort}
                       />
                     )
                   })}
@@ -1118,7 +1084,6 @@ export default function Dashboard() {
           bot={selectedBot}
           onClose={() => setSelectedBot(null)}
           onAction={handleAction}
-          wsPort={status?.wsPort}
         />
       )}
     </div>

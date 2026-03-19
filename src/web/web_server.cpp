@@ -1,11 +1,11 @@
 // ─────────────────────────────────────────────────────────────────
 // StreaMonitor C++ — Embedded Web Server Implementation
 // REST API + static file serving for the Next.js dashboard
+// HTTP/2 multiplexing — unlimited concurrent preview streams
 // ─────────────────────────────────────────────────────────────────
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "web/web_server.h"
-#include <httplib.h>
+#include "web/ssl_cert_gen.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <filesystem>
@@ -15,6 +15,7 @@
 #include <random>
 #include <iomanip>
 #include <thread>
+#include <chrono>
 
 // stb_image_write — JPEG encoding for preview frames
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -32,15 +33,29 @@
 #endif
 
 using json = nlohmann::json;
+using Clock = std::chrono::steady_clock;
 
 namespace sm
 {
 
     WebServer::WebServer(BotManager &manager, AppConfig &config,
                          ModelConfigStore &configStore)
-        : manager_(manager), config_(config), configStore_(configStore),
-          server_(std::make_unique<httplib::Server>())
+        : manager_(manager), config_(config), configStore_(configStore)
     {
+        // Generate self-signed SSL certificate if needed
+        auto cert = ensureSslCert(".");
+        certPath_ = cert.certPath;
+        keyPath_ = cert.keyPath;
+
+        if (!certPath_.empty() && !keyPath_.empty())
+        {
+            server_ = std::make_unique<H2Server>(certPath_, keyPath_);
+            spdlog::info("HTTP/2 server created (HTTPS + TLS)");
+        }
+        else
+        {
+            spdlog::error("Failed to generate SSL cert — server unavailable");
+        }
     }
 
     WebServer::~WebServer()
@@ -50,42 +65,26 @@ namespace sm
 
     bool WebServer::start()
     {
-        if (running_.load())
-            return true;
+        if (running_.load() || !server_)
+            return false;
 
         setupCORS();
         setupRoutes();
         setupStaticFiles();
 
-        // Start WebSocket server for preview streaming (port + 1)
-        int wsPort = config_.webPort + 1;
-        wsServer_ = std::make_unique<WsPreviewServer>(manager_, wsPort);
-        if (!wsServer_->start())
+        if (!server_->listen(config_.webHost, config_.webPort))
         {
-            spdlog::error("WebSocket preview server failed to start on port {}", wsPort);
-            // Continue anyway — HTTP preview still works
-        }
-        else
-        {
-            spdlog::info("WebSocket preview server started on port {}", wsPort);
+            spdlog::error("Web server failed to start on {}:{}", config_.webHost, config_.webPort);
+            return false;
         }
 
-        serverThread_ = std::make_unique<std::thread>([this]()
-                                                      {
-            running_.store(true);
-            spdlog::info("Web server starting on {}:{}", config_.webHost, config_.webPort);
-            spdlog::info("  Local:   {}", getLocalUrl());
-            spdlog::info("  Network: {}", getNetworkUrl());
-            spdlog::info("  WS Port: {}", getWsPort());
+        running_.store(true);
+        spdlog::info("Web server started on {}:{}", config_.webHost, config_.webPort);
+        spdlog::info("  Local:   {}", getLocalUrl());
+        spdlog::info("  Network: {}", getNetworkUrl());
+        spdlog::info("  Protocol: HTTP/2 + HTTPS (HTTP/1.1 fallback)");
 
-            if (!server_->listen(config_.webHost, config_.webPort)) {
-                spdlog::error("Web server failed to start on {}:{}", config_.webHost, config_.webPort);
-                running_.store(false);
-            } });
-
-        // Give server a moment to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        return running_.load();
+        return true;
     }
 
     void WebServer::stop()
@@ -93,16 +92,9 @@ namespace sm
         if (!running_.load())
             return;
 
-        // Stop WebSocket server first
-        if (wsServer_)
-        {
-            wsServer_->stop();
-            wsServer_.reset();
-        }
+        if (server_)
+            server_->stop();
 
-        server_->stop();
-        if (serverThread_ && serverThread_->joinable())
-            serverThread_->join();
         running_.store(false);
         spdlog::info("Web server stopped");
     }
@@ -112,19 +104,14 @@ namespace sm
         return running_.load();
     }
 
-    int WebServer::getWsPort() const
-    {
-        return wsServer_ ? wsServer_->getPort() : (config_.webPort + 1);
-    }
-
     std::string WebServer::getUrl() const
     {
-        return "http://" + config_.webHost + ":" + std::to_string(config_.webPort);
+        return "https://" + config_.webHost + ":" + std::to_string(config_.webPort);
     }
 
     std::string WebServer::getLocalUrl() const
     {
-        return "http://127.0.0.1:" + std::to_string(config_.webPort);
+        return "https://127.0.0.1:" + std::to_string(config_.webPort);
     }
 
     std::string WebServer::getNetworkUrl() const
@@ -132,7 +119,7 @@ namespace sm
         std::string ip = getLocalIP();
         if (ip.empty())
             ip = "127.0.0.1";
-        return "http://" + ip + ":" + std::to_string(config_.webPort);
+        return "https://" + ip + ":" + std::to_string(config_.webPort);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -140,12 +127,12 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void WebServer::setupCORS()
     {
-        server_->set_default_headers({{"Access-Control-Allow-Origin", "*"},
-                                      {"Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"},
-                                      {"Access-Control-Allow-Headers", "Content-Type, Authorization"}});
+        server_->set_default_headers({{"access-control-allow-origin", "*"},
+                                      {"access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS"},
+                                      {"access-control-allow-headers", "Content-Type, Authorization"}});
 
         // Handle preflight OPTIONS requests
-        server_->Options(".*", [](const httplib::Request &, httplib::Response &res)
+        server_->Options(".*", [](const H2Request &, H2Response &res)
                          { res.status = 204; });
     }
 
@@ -157,7 +144,6 @@ namespace sm
         std::filesystem::path staticDir = config_.webStaticDir;
         if (!staticDir.is_absolute())
         {
-            // Resolve relative to executable directory
             auto exePath = std::filesystem::current_path();
             staticDir = exePath / staticDir;
         }
@@ -168,7 +154,7 @@ namespace sm
             spdlog::info("Serving static files from: {}", staticDir.string());
 
             // SPA fallback: serve index.html for non-API, non-file routes
-            server_->set_error_handler([staticDir](const httplib::Request &req, httplib::Response &res)
+            server_->set_error_handler([staticDir](const H2Request &req, H2Response &res)
                                        {
                 if (res.status == 404 && req.path.substr(0, 4) != "/api") {
                     auto indexPath = staticDir / "index.html";
@@ -177,7 +163,7 @@ namespace sm
                         if (ifs.is_open()) {
                             std::string content((std::istreambuf_iterator<char>(ifs)),
                                                std::istreambuf_iterator<char>());
-                            res.set_content(content, "text/html");
+                            res.set_content(content, "text/html; charset=utf-8");
                             res.status = 200;
                         }
                     }
@@ -187,69 +173,22 @@ namespace sm
         {
             spdlog::warn("Static web directory not found: {}. Dashboard unavailable.", staticDir.string());
 
-            // Serve a simple fallback page
-            server_->Get("/", [](const httplib::Request &, httplib::Response &res)
+            server_->Get("^/$", [](const H2Request &, H2Response &res)
                          { res.set_content(R"html(<!DOCTYPE html>
 <html><head><title>StreaMonitor</title></head>
 <body style="background:#0a0a0a;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
 <div style="text-align:center">
 <h1>🎬 StreaMonitor v2.0</h1>
-<p>API is running. Dashboard static files not found.</p>
+<p>API is running (HTTP/2). Dashboard static files not found.</p>
 <p>Place the Next.js export in the <code>web/</code> directory.</p>
 <p><a href="/api/status" style="color:#60a5fa">API Status →</a></p>
 </div></body></html>)html",
-                                           "text/html"); });
+                                           "text/html; charset=utf-8"); });
         }
-    }
-
-    // ─────────────────────────────────────────────────────────────────
-    // Helper: RGBA → BMP conversion (24-bit, browser-compatible)
-    // ─────────────────────────────────────────────────────────────────
-    static std::string rgbaToBmp(const uint8_t *rgba, int w, int h)
-    {
-        int rowSize = ((w * 3 + 3) / 4) * 4; // rows padded to 4-byte boundary
-        int imageSize = rowSize * h;
-        int fileSize = 54 + imageSize;
-
-        std::string bmp(fileSize, '\0');
-        auto *p = reinterpret_cast<uint8_t *>(&bmp[0]);
-
-        // BMP file header (14 bytes)
-        p[0] = 'B';
-        p[1] = 'M';
-        std::memcpy(p + 2, &fileSize, 4);
-        int offset = 54;
-        std::memcpy(p + 10, &offset, 4);
-
-        // DIB header (BITMAPINFOHEADER, 40 bytes)
-        int dibSize = 40;
-        std::memcpy(p + 14, &dibSize, 4);
-        std::memcpy(p + 18, &w, 4);
-        std::memcpy(p + 22, &h, 4); // positive = bottom-up
-        uint16_t planes = 1, bpp = 24;
-        std::memcpy(p + 26, &planes, 2);
-        std::memcpy(p + 28, &bpp, 2);
-        std::memcpy(p + 34, &imageSize, 4);
-
-        // Pixel data: BGR, bottom-up scanlines
-        for (int y = 0; y < h; y++)
-        {
-            const uint8_t *src = rgba + (h - 1 - y) * w * 4; // flip vertically
-            uint8_t *dst = p + 54 + y * rowSize;
-            for (int x = 0; x < w; x++)
-            {
-                dst[x * 3 + 0] = src[x * 4 + 2]; // B
-                dst[x * 3 + 1] = src[x * 4 + 1]; // G
-                dst[x * 3 + 2] = src[x * 4 + 0]; // R
-            }
-        }
-
-        return bmp;
     }
 
     // ─────────────────────────────────────────────────────────────────
     // Helper: RGBA → JPEG conversion (via stb_image_write)
-    // ~30 KB per frame vs ~700 KB for BMP — much better for streaming
     // ─────────────────────────────────────────────────────────────────
     static void jpegWriteFunc_(void *context, void *data, int size)
     {
@@ -260,8 +199,7 @@ namespace sm
     static std::string rgbaToJpeg(const uint8_t *rgba, int w, int h, int quality = 80)
     {
         std::string result;
-        result.reserve(static_cast<size_t>(w) * h / 8); // rough estimate
-        // comp=4 (RGBA) — stbi_write_jpg ignores alpha channel automatically
+        result.reserve(static_cast<size_t>(w) * h / 8);
         stbi_write_jpg_to_func(jpegWriteFunc_, &result, w, h, 4, rgba, quality);
         return result;
     }
@@ -269,13 +207,13 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     // Helper: JSON response
     // ─────────────────────────────────────────────────────────────────
-    static void jsonResponse(httplib::Response &res, const json &j, int status = 200)
+    static void jsonResponse(H2Response &res, const json &j, int status = 200)
     {
         res.set_content(j.dump(), "application/json");
         res.status = status;
     }
 
-    static void jsonError(httplib::Response &res, const std::string &msg, int status = 400)
+    static void jsonError(H2Response &res, const std::string &msg, int status = 400)
     {
         json j = {{"error", msg}};
         res.set_content(j.dump(), "application/json");
@@ -306,14 +244,10 @@ namespace sm
         return validTokens_.find(token) != validTokens_.end();
     }
 
-    // Returns true if authenticated, false if response was sent with 401
-    bool WebServer::checkAuth(const void *reqPtr, void *resPtr)
+    bool WebServer::checkAuth(const H2Request &req, H2Response &res)
     {
-        const auto &req = *static_cast<const httplib::Request *>(reqPtr);
-        auto &res = *static_cast<httplib::Response *>(resPtr);
-
-        // Check for Authorization header: "Bearer <token>"
-        auto authHeader = req.get_header_value("Authorization");
+        // Check Authorization header: "Bearer <token>"
+        auto authHeader = req.get_header_value("authorization");
         if (authHeader.size() > 7 && authHeader.substr(0, 7) == "Bearer ")
         {
             std::string token = authHeader.substr(7);
@@ -321,11 +255,10 @@ namespace sm
                 return true;
         }
 
-        // Check for token in cookie
-        auto cookieHeader = req.get_header_value("Cookie");
+        // Check cookie
+        auto cookieHeader = req.get_header_value("cookie");
         if (!cookieHeader.empty())
         {
-            // Parse cookies: "token=abc123; other=..."
             size_t pos = cookieHeader.find("sm_token=");
             if (pos != std::string::npos)
             {
@@ -380,7 +313,7 @@ namespace sm
     void WebServer::setupRoutes()
     {
         // ── POST /api/auth/login — Authenticate and get token ─────
-        server_->Post("/api/auth/login", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Post("^/api/auth/login$", [this](const H2Request &req, H2Response &res)
                       {
             try {
                 auto body = json::parse(req.body);
@@ -393,8 +326,7 @@ namespace sm
                         std::lock_guard lock(tokenMutex_);
                         validTokens_.insert(token);
                     }
-                    // Set cookie with token (HttpOnly for security)
-                    res.set_header("Set-Cookie", "sm_token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400");
+                    res.set_header("set-cookie", "sm_token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=86400");
                     json j = {{"success", true}, {"token", token}};
                     jsonResponse(res, j);
                     spdlog::info("Web login successful for user: {}", username);
@@ -407,17 +339,15 @@ namespace sm
             } });
 
         // ── POST /api/auth/logout — Invalidate token ──────────────
-        server_->Post("/api/auth/logout", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Post("^/api/auth/logout$", [this](const H2Request &req, H2Response &res)
                       {
-            // Extract token and remove it
-            auto authHeader = req.get_header_value("Authorization");
+            auto authHeader = req.get_header_value("authorization");
             if (authHeader.size() > 7 && authHeader.substr(0, 7) == "Bearer ") {
                 std::string token = authHeader.substr(7);
                 std::lock_guard lock(tokenMutex_);
                 validTokens_.erase(token);
             }
-            // Also check cookie
-            auto cookieHeader = req.get_header_value("Cookie");
+            auto cookieHeader = req.get_header_value("cookie");
             if (!cookieHeader.empty()) {
                 size_t pos = cookieHeader.find("sm_token=");
                 if (pos != std::string::npos) {
@@ -428,30 +358,28 @@ namespace sm
                     validTokens_.erase(token);
                 }
             }
-            // Clear cookie
-            res.set_header("Set-Cookie", "sm_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+            res.set_header("set-cookie", "sm_token=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0");
             json j = {{"success", true}};
             jsonResponse(res, j); });
 
         // ── GET /api/auth/check — Validate current session ────────
-        server_->Get("/api/auth/check", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Get("^/api/auth/check$", [this](const H2Request &req, H2Response &res)
                      {
-            if (checkAuth(&req, &res)) {
+            if (checkAuth(req, res)) {
                 json j = {{"authenticated", true}, {"username", config_.webUsername}};
                 jsonResponse(res, j);
             } });
 
         // ── PUT /api/auth/credentials — Update login credentials ──
-        server_->Put("/api/auth/credentials", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Put("^/api/auth/credentials$", [this](const H2Request &req, H2Response &res)
                      {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             try {
                 auto body = json::parse(req.body);
                 std::string newUser = body.value("username", "");
                 std::string newPass = body.value("password", "");
                 std::string currentPass = body.value("currentPassword", "");
 
-                // Verify current password
                 if (currentPass != config_.webPassword) {
                     jsonError(res, "Current password incorrect", 403);
                     return;
@@ -460,7 +388,6 @@ namespace sm
                 if (!newUser.empty()) config_.webUsername = newUser;
                 if (!newPass.empty()) config_.webPassword = newPass;
 
-                // Invalidate all tokens (force re-login)
                 {
                     std::lock_guard lock(tokenMutex_);
                     validTokens_.clear();
@@ -474,9 +401,9 @@ namespace sm
             } });
 
         // ── GET /api/status — Server overview ─────────────────────
-        server_->Get("/api/status", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Get("^/api/status$", [this](const H2Request &req, H2Response &res)
                      {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             auto states = manager_.getAllStates();
             size_t online = 0, recording = 0;
             for (const auto &s : states) {
@@ -489,7 +416,7 @@ namespace sm
                 {"totalModels", states.size()},
                 {"onlineModels", online},
                 {"recordingModels", recording},
-                {"wsPort", getWsPort()},
+                {"protocol", "h2"},
                 {"disk", {
                     {"totalBytes", disk.totalBytes},
                     {"freeBytes", disk.freeBytes},
@@ -500,9 +427,9 @@ namespace sm
             jsonResponse(res, j); });
 
         // ── GET /api/models — All models with states ──────────────
-        server_->Get("/api/models", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Get("^/api/models$", [this](const H2Request &req, H2Response &res)
                      {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             auto states = manager_.getAllStates();
             json arr = json::array();
             for (const auto &st : states) {
@@ -510,110 +437,89 @@ namespace sm
             }
             jsonResponse(res, arr); });
 
-        // ── GET /api/preview/:username/:site — Serve preview BMP ──
-        // Returns the latest preview frame from the continuous stream.
-        // Uses waitForPreview to block briefly until a frame is available.
+        // ── GET /api/preview/:username/:site — JPEG snapshot ──────
+        // Non-blocking: returns latest frame or 404 if none available
         server_->Get(R"(/api/preview/([^/]+)/([^/]+))",
-                     [this](const httplib::Request &req, httplib::Response &res)
+                     [this](const H2Request &req, H2Response &res)
                      {
-                         std::string username = req.matches[1].str();
-                         std::string site = req.matches[2].str();
+                         std::string username = req.matches[1];
+                         std::string site = req.matches[2];
 
-                         // Wait up to 3 seconds for a preview frame
                          uint64_t version = 0;
                          PreviewFrame frame;
-                         if (!manager_.waitForPreview(username, site, frame, version, 3000))
+                         if (!manager_.consumePreview(username, site, frame, version))
                          {
                              res.status = 404;
                              res.set_content("No preview available", "text/plain");
                              return;
                          }
 
-                         // Convert RGBA to JPEG for efficient browser-compatible display
                          std::string jpg = rgbaToJpeg(frame.pixels.data(), frame.width, frame.height);
-                         res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
+                         res.set_header("cache-control", "no-cache, no-store, must-revalidate");
                          res.set_content(jpg, "image/jpeg");
                      });
 
         // ── GET /api/stream/:username/:site — MJPEG live stream ───
-        // Continuous multipart/x-mixed-replace stream of JPEG frames.
-        // Used only by the dedicated "Watch Stream" overlay in the dashboard.
-        // Frames are pushed by the recorder at ~15fps — we block until
-        // a new frame arrives instead of polling.
+        // HTTP/2 multiplexes these — no 6-connection limit!
         server_->Get(R"(/api/stream/([^/]+)/([^/]+))",
-                     [this](const httplib::Request &req, httplib::Response &res)
+                     [this](const H2Request &req, H2Response &res)
                      {
-                         std::string username = req.matches[1].str();
-                         std::string site = req.matches[2].str();
-
+                         std::string username = req.matches[1];
+                         std::string site = req.matches[2];
                          const std::string boundary = "frame";
 
-                         res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
-                         res.set_header("Connection", "keep-alive");
-                         res.set_header("Access-Control-Allow-Origin", "*");
+                         res.set_header("cache-control", "no-cache, no-store, must-revalidate");
+                         res.set_header("access-control-allow-origin", "*");
 
                          res.set_content_provider(
                              "multipart/x-mixed-replace; boundary=" + boundary,
                              [this, username, site, boundary,
                               lastVersion = uint64_t(0),
-                              notRecordingCount = 0](size_t /*offset*/, httplib::DataSink &sink) mutable -> bool
+                              lastRecordingCheck = Clock::now()](size_t, H2DataSink &sink) mutable -> bool
                              {
                                  if (!sink.is_writable())
                                      return false;
 
-                                 // Check if bot is still recording — allow some grace
-                                 // before terminating (recording state can flap briefly)
+                                 // Check recording status (non-blocking)
                                  auto state = manager_.getBotState(username, site);
                                  if (!state || !state->recording)
                                  {
-                                     notRecordingCount++;
-                                     if (notRecordingCount > 10) // ~5 seconds of not-recording
-                                         return false;
-                                     // Keep trying — might be a brief state flap
-                                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                                     return sink.is_writable();
+                                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                                        Clock::now() - lastRecordingCheck)
+                                                        .count();
+                                     if (elapsed > 5)
+                                         return false; // Stop stream after 5s of not-recording
+                                     return true;      // No data, but keep alive
                                  }
-                                 notRecordingCount = 0; // Reset grace counter
+                                 lastRecordingCheck = Clock::now();
 
-                                 // Block until a new preview frame is available (up to 500ms)
+                                 // Non-blocking frame check (HTTP/2 compatible)
                                  PreviewFrame frame;
-                                 if (!manager_.waitForPreview(username, site, frame, lastVersion, 500))
-                                 {
-                                     // Timeout — no new frame yet, keep connection alive
-                                     return sink.is_writable();
-                                 }
+                                 if (!manager_.consumePreview(username, site, frame, lastVersion))
+                                     return true; // No new frame yet, keep alive
 
-                                 // Convert RGBA to JPEG (~30KB vs ~700KB BMP)
                                  std::string jpg = rgbaToJpeg(frame.pixels.data(), frame.width, frame.height);
 
-                                 // Write multipart boundary + headers + JPEG data
                                  std::string header = "--" + boundary + "\r\n"
                                                                         "Content-Type: image/jpeg\r\n"
                                                                         "Content-Length: " +
-                                                      std::to_string(jpg.size()) + "\r\n"
-                                                                                   "\r\n";
+                                                      std::to_string(jpg.size()) + "\r\n\r\n";
 
                                  if (!sink.write(header.data(), header.size()))
                                      return false;
                                  if (!sink.write(jpg.data(), jpg.size()))
                                      return false;
-
                                  std::string crlf = "\r\n";
-                                 if (!sink.write(crlf.data(), crlf.size()))
-                                     return false;
-
-                                 return true; // keep streaming
+                                 sink.write(crlf.data(), crlf.size());
+                                 return true;
                              },
-                             [](bool /*success*/)
-                             {
-                                 // cleanup — nothing needed
-                             });
+                             [](bool) { /* cleanup */ });
                      });
 
         // ── POST /api/models — Add a model ────────────────────────
-        server_->Post("/api/models", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Post("^/api/models$", [this](const H2Request &req, H2Response &res)
                       {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             try {
                 auto body = json::parse(req.body);
                 std::string username = body.value("username", "");
@@ -625,7 +531,6 @@ namespace sm
                     return;
                 }
 
-                // SC* alias: add both SC (StripChat) and SCVR (StripChatVR)
                 std::string siteLower = site;
                 std::transform(siteLower.begin(), siteLower.end(), siteLower.begin(), ::tolower);
                 std::vector<std::string> sitesToAdd;
@@ -649,102 +554,77 @@ namespace sm
                 jsonError(res, std::string("Invalid JSON: ") + e.what());
             } });
 
-        // ── DELETE /api/models/:username/:site — Remove a model ───
+        // ── DELETE /api/models/:username/:site ─────────────────────
         server_->Delete(R"(/api/models/([^/]+)/([^/]+))",
-                        [this](const httplib::Request &req, httplib::Response &res)
+                        [this](const H2Request &req, H2Response &res)
                         {
-                            if (!checkAuth(&req, &res))
+                            if (!checkAuth(req, res))
                                 return;
-                            std::string username = req.matches[1].str();
-                            std::string site = req.matches[2].str();
+                            std::string username = req.matches[1];
+                            std::string site = req.matches[2];
 
                             if (manager_.removeBot(username, site))
-                            {
                                 jsonResponse(res, {{"success", true}, {"message", "Model removed"}});
-                            }
                             else
-                            {
                                 jsonError(res, "Model not found", 404);
-                            }
                         });
 
         // ── POST /api/models/:username/:site/start ────────────────
         server_->Post(R"(/api/models/([^/]+)/([^/]+)/start)",
-                      [this](const httplib::Request &req, httplib::Response &res)
+                      [this](const H2Request &req, H2Response &res)
                       {
-                          if (!checkAuth(&req, &res))
+                          if (!checkAuth(req, res))
                               return;
-                          std::string username = req.matches[1].str();
-                          std::string site = req.matches[2].str();
-
-                          if (manager_.startBot(username, site))
-                          {
+                          if (manager_.startBot(req.matches[1], req.matches[2]))
                               jsonResponse(res, {{"success", true}});
-                          }
                           else
-                          {
                               jsonError(res, "Model not found", 404);
-                          }
                       });
 
         // ── POST /api/models/:username/:site/stop ─────────────────
         server_->Post(R"(/api/models/([^/]+)/([^/]+)/stop)",
-                      [this](const httplib::Request &req, httplib::Response &res)
+                      [this](const H2Request &req, H2Response &res)
                       {
-                          if (!checkAuth(&req, &res))
+                          if (!checkAuth(req, res))
                               return;
-                          std::string username = req.matches[1].str();
-                          std::string site = req.matches[2].str();
-
-                          if (manager_.stopBot(username, site))
-                          {
+                          if (manager_.stopBot(req.matches[1], req.matches[2]))
                               jsonResponse(res, {{"success", true}});
-                          }
                           else
-                          {
                               jsonError(res, "Model not found", 404);
-                          }
                       });
 
         // ── POST /api/models/:username/:site/restart ──────────────
         server_->Post(R"(/api/models/([^/]+)/([^/]+)/restart)",
-                      [this](const httplib::Request &req, httplib::Response &res)
+                      [this](const H2Request &req, H2Response &res)
                       {
-                          if (!checkAuth(&req, &res))
+                          if (!checkAuth(req, res))
                               return;
-                          std::string username = req.matches[1].str();
-                          std::string site = req.matches[2].str();
-
-                          if (manager_.restartBot(username, site))
-                          {
+                          if (manager_.restartBot(req.matches[1], req.matches[2]))
                               jsonResponse(res, {{"success", true}});
-                          }
                           else
-                          {
                               jsonError(res, "Model not found", 404);
-                          }
                       });
 
         // ── POST /api/start-all ───────────────────────────────────
-        server_->Post("/api/start-all", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Post("^/api/start-all$", [this](const H2Request &req, H2Response &res)
                       {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             manager_.startAllBots();
             manager_.startAllGroups();
             jsonResponse(res, {{"success", true}, {"message", "All bots and groups started"}}); });
 
         // ── POST /api/stop-all ────────────────────────────────────
-        server_->Post("/api/stop-all", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Post("^/api/stop-all$", [this](const H2Request &req, H2Response &res)
                       {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             manager_.stopAllGroups();
             manager_.stopAll();
             jsonResponse(res, {{"success", true}, {"message", "All bots and groups stopped"}}); });
 
         // ── GET /api/sites — Available sites ──────────────────────
-        server_->Get("/api/sites", [this](const httplib::Request &req, httplib::Response &res)
+        server_->Get("^/api/sites$", [this](const H2Request &req, H2Response &res)
                      {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             auto sites = manager_.availableSites();
             auto &registry = SiteRegistry::instance();
             json arr = json::array();
@@ -756,10 +636,10 @@ namespace sm
             }
             jsonResponse(res, arr); });
 
-        // ── GET /api/groups — Cross-register groups with states ────
-        server_->Get("/api/groups", [this](const httplib::Request &req, httplib::Response &res)
+        // ── GET /api/groups ────────────────────────────────────────
+        server_->Get("^/api/groups$", [this](const H2Request &req, H2Response &res)
                      {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             auto groups = manager_.getCrossRegisterGroups();
             auto groupStates = manager_.getAllGroupStates();
             json arr = json::array();
@@ -768,7 +648,6 @@ namespace sm
                 for (const auto &[site, user] : g.members) {
                     members.push_back({{"site", site}, {"username", user}});
                 }
-                // Find matching group state
                 json stateJ = {{"running", false}, {"recording", false},
                                {"activeUsername", ""}, {"activeSite", ""},
                                {"activeStatus", "NotRunning"}};
@@ -806,8 +685,10 @@ namespace sm
             jsonResponse(res, arr); });
 
         // ── POST /api/groups — Create a group ─────────────────────
-        server_->Post("/api/groups", [this](const httplib::Request &req, httplib::Response &res)
-                      {            if (!checkAuth(&req, &res)) return;            try {
+        server_->Post("^/api/groups$", [this](const H2Request &req, H2Response &res)
+                      {
+            if (!checkAuth(req, res)) return;
+            try {
                 auto body = json::parse(req.body);
                 std::string name = body.value("name", "");
                 if (name.empty()) {
@@ -833,29 +714,23 @@ namespace sm
 
         // ── DELETE /api/groups/:name ───────────────────────────────
         server_->Delete(R"(/api/groups/([^/]+))",
-                        [this](const httplib::Request &req, httplib::Response &res)
+                        [this](const H2Request &req, H2Response &res)
                         {
-                            if (!checkAuth(&req, &res))
+                            if (!checkAuth(req, res))
                                 return;
-                            std::string name = req.matches[1].str();
-                            if (manager_.removeCrossRegisterGroup(name))
-                            {
+                            if (manager_.removeCrossRegisterGroup(req.matches[1]))
                                 jsonResponse(res, {{"success", true}});
-                            }
                             else
-                            {
                                 jsonError(res, "Group not found", 404);
-                            }
                         });
 
         // ── POST /api/groups/:name/start ──────────────────────────
         server_->Post(R"(/api/groups/([^/]+)/start)",
-                      [this](const httplib::Request &req, httplib::Response &res)
+                      [this](const H2Request &req, H2Response &res)
                       {
-                          if (!checkAuth(&req, &res))
+                          if (!checkAuth(req, res))
                               return;
-                          std::string name = req.matches[1].str();
-                          if (manager_.startGroup(name))
+                          if (manager_.startGroup(req.matches[1]))
                               jsonResponse(res, {{"success", true}});
                           else
                               jsonError(res, "Group not found or already running", 404);
@@ -863,24 +738,22 @@ namespace sm
 
         // ── POST /api/groups/:name/stop ───────────────────────────
         server_->Post(R"(/api/groups/([^/]+)/stop)",
-                      [this](const httplib::Request &req, httplib::Response &res)
+                      [this](const H2Request &req, H2Response &res)
                       {
-                          if (!checkAuth(&req, &res))
+                          if (!checkAuth(req, res))
                               return;
-                          std::string name = req.matches[1].str();
-                          if (manager_.stopGroup(name))
+                          if (manager_.stopGroup(req.matches[1]))
                               jsonResponse(res, {{"success", true}});
                           else
                               jsonError(res, "Group not found or not running", 404);
                       });
 
-        // ── POST /api/groups/:name/members — Add member ───────────
+        // ── POST /api/groups/:name/members ────────────────────────
         server_->Post(R"(/api/groups/([^/]+)/members)",
-                      [this](const httplib::Request &req, httplib::Response &res)
+                      [this](const H2Request &req, H2Response &res)
                       {
-                          if (!checkAuth(&req, &res))
+                          if (!checkAuth(req, res))
                               return;
-                          std::string name = req.matches[1].str();
                           try
                           {
                               auto body = json::parse(req.body);
@@ -891,7 +764,7 @@ namespace sm
                                   jsonError(res, "site and username required");
                                   return;
                               }
-                              if (manager_.addToCrossRegisterGroup(name, site, username))
+                              if (manager_.addToCrossRegisterGroup(req.matches[1], site, username))
                                   jsonResponse(res, {{"success", true}});
                               else
                                   jsonError(res, "Failed to add member");
@@ -902,13 +775,12 @@ namespace sm
                           }
                       });
 
-        // ── DELETE /api/groups/:name/members — Remove member ──────
+        // ── DELETE /api/groups/:name/members ──────────────────────
         server_->Delete(R"(/api/groups/([^/]+)/members)",
-                        [this](const httplib::Request &req, httplib::Response &res)
+                        [this](const H2Request &req, H2Response &res)
                         {
-                            if (!checkAuth(&req, &res))
+                            if (!checkAuth(req, res))
                                 return;
-                            std::string name = req.matches[1].str();
                             try
                             {
                                 auto body = json::parse(req.body);
@@ -919,7 +791,7 @@ namespace sm
                                     jsonError(res, "site and username required");
                                     return;
                                 }
-                                if (manager_.removeFromCrossRegisterGroup(name, site, username))
+                                if (manager_.removeFromCrossRegisterGroup(req.matches[1], site, username))
                                     jsonResponse(res, {{"success", true}});
                                 else
                                     jsonError(res, "Failed to remove member");
@@ -930,10 +802,10 @@ namespace sm
                             }
                         });
 
-        // ── GET /api/config — App config ──────────────────────────
-        server_->Get("/api/config", [this](const httplib::Request &req, httplib::Response &res)
+        // ── GET /api/config ───────────────────────────────────────
+        server_->Get("^/api/config$", [this](const H2Request &req, H2Response &res)
                      {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             json j = {
                 {"downloadsDir", config_.downloadsDir.string()},
                 {"container", config_.container == ContainerFormat::MKV ? "mkv" :
@@ -950,9 +822,11 @@ namespace sm
             };
             jsonResponse(res, j); });
 
-        // ── PUT /api/config — Update config ───────────────────────
-        server_->Put("/api/config", [this](const httplib::Request &req, httplib::Response &res)
-                     {            if (!checkAuth(&req, &res)) return;            try {
+        // ── PUT /api/config ───────────────────────────────────────
+        server_->Put("^/api/config$", [this](const H2Request &req, H2Response &res)
+                     {
+            if (!checkAuth(req, res)) return;
+            try {
                 auto body = json::parse(req.body);
 
                 if (body.contains("downloadsDir"))
@@ -973,10 +847,10 @@ namespace sm
                 jsonError(res, std::string("Invalid JSON: ") + e.what());
             } });
 
-        // ── GET /api/disk — Disk usage ────────────────────────────
-        server_->Get("/api/disk", [this](const httplib::Request &req, httplib::Response &res)
+        // ── GET /api/disk ─────────────────────────────────────────
+        server_->Get("^/api/disk$", [this](const H2Request &req, H2Response &res)
                      {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             auto info = manager_.getDiskUsage();
             json j = {
                 {"totalBytes", info.totalBytes},
@@ -988,22 +862,21 @@ namespace sm
             };
             jsonResponse(res, j); });
 
-        // ── POST /api/save — Save config to disk ──────────────────
-        server_->Post("/api/save", [this](const httplib::Request &req, httplib::Response &res)
+        // ── POST /api/save ────────────────────────────────────────
+        server_->Post("^/api/save$", [this](const H2Request &req, H2Response &res)
                       {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             manager_.saveConfig();
             jsonResponse(res, {{"success", true}, {"message", "Config saved"}}); });
 
-        // ── GET /api/logs — Recent log lines from ring buffer ─────
-        server_->Get("/api/logs", [this](const httplib::Request &req, httplib::Response &res)
+        // ── GET /api/logs ─────────────────────────────────────────
+        server_->Get("^/api/logs$", [this](const H2Request &req, H2Response &res)
                      {
-            if (!checkAuth(&req, &res)) return;
+            if (!checkAuth(req, res)) return;
             json arr = json::array();
             if (logRingBuffer_) {
                 auto lines = logRingBuffer_->last_formatted();
                 for (const auto &line : lines) {
-                    // Trim trailing newline
                     std::string s = line;
                     while (!s.empty() && (s.back() == '\n' || s.back() == '\r'))
                         s.pop_back();
@@ -1015,13 +888,11 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Get local network IP address (for WiFi intranet display)
-    // Prefers interfaces WITH a default gateway (routable IPs)
+    // Get local network IP address (prefer interfaces with gateway)
     // ─────────────────────────────────────────────────────────────────
     std::string WebServer::getLocalIP() const
     {
 #ifdef _WIN32
-        // Windows: Use GetAdaptersAddresses — prefer interfaces with gateway
         ULONG bufLen = 15000;
         std::vector<BYTE> buf(bufLen);
         auto pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
@@ -1040,8 +911,8 @@ namespace sm
 
         if (ret == NO_ERROR)
         {
-            std::string ipWithGateway;  // First IP with a real gateway
-            std::string fallbackIp;     // First valid IP without gateway
+            std::string ipWithGateway;
+            std::string fallbackIp;
 
             for (auto adapter = pAddresses; adapter; adapter = adapter->Next)
             {
@@ -1050,14 +921,12 @@ namespace sm
                 if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
                     continue;
 
-                // Check if this adapter has a non-zero default gateway
                 bool hasGateway = false;
                 for (auto gw = adapter->FirstGatewayAddress; gw; gw = gw->Next)
                 {
                     if (gw->Address.lpSockaddr->sa_family == AF_INET)
                     {
                         auto gwSa = reinterpret_cast<sockaddr_in *>(gw->Address.lpSockaddr);
-                        // Check for non-zero gateway (0.0.0.0 means no gateway)
                         if (gwSa->sin_addr.s_addr != 0)
                         {
                             hasGateway = true;
@@ -1076,35 +945,24 @@ namespace sm
                     inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
                     std::string ipStr(ip);
 
-                    // Skip loopback and link-local
                     if (ipStr == "127.0.0.1" || ipStr.substr(0, 4) == "169.")
                         continue;
 
-                    // Prefer interfaces with gateway (routable to internet/LAN)
                     if (hasGateway && ipWithGateway.empty())
                     {
                         ipWithGateway = ipStr;
-                        spdlog::debug("Found IP with gateway: {}", ipStr);
                     }
                     else if (fallbackIp.empty())
                     {
                         fallbackIp = ipStr;
-                        spdlog::debug("Found IP without gateway (fallback): {}", ipStr);
                     }
                 }
             }
 
-            // Prefer IP with gateway, fall back to any valid IP
             if (!ipWithGateway.empty())
-            {
-                spdlog::info("Using IP with gateway: {}", ipWithGateway);
                 return ipWithGateway;
-            }
             if (!fallbackIp.empty())
-            {
-                spdlog::info("Using fallback IP (no gateway): {}", fallbackIp);
                 return fallbackIp;
-            }
         }
 #else
         struct ifaddrs *ifaddr;

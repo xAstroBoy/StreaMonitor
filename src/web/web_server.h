@@ -3,13 +3,13 @@
 // ─────────────────────────────────────────────────────────────────
 // StreaMonitor C++ — Embedded Web Server
 // REST API + static file serving for Next.js dashboard
-// WebSocket server for real-time preview streaming (unlimited concurrent streams)
-// Listens on all interfaces for WiFi intranet access
+// HTTP/2 with TLS (single port, unlimited concurrent streams)
+// Falls back to HTTP/1.1 for non-h2 clients (curl, etc.)
 // ─────────────────────────────────────────────────────────────────
 
 #include "core/bot_manager.h"
 #include "config/config.h"
-#include "web/ws_preview_server.h"
+#include "web/h2_server.h"
 #include <spdlog/sinks/ringbuffer_sink.h>
 #include <string>
 #include <thread>
@@ -18,12 +18,6 @@
 #include <memory>
 #include <mutex>
 #include <set>
-
-// Forward declare httplib types
-namespace httplib
-{
-    class Server;
-}
 
 namespace sm
 {
@@ -49,9 +43,6 @@ namespace sm
         std::string getLocalUrl() const;
         std::string getNetworkUrl() const;
 
-        // WebSocket port for preview streaming
-        int getWsPort() const;
-
         // Attach a ring buffer sink for /api/logs
         void setLogRingBuffer(std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> sink) { logRingBuffer_ = std::move(sink); }
 
@@ -62,39 +53,20 @@ namespace sm
         std::string getLocalIP() const;
 
         // Authentication
-        bool checkAuth(const void *req, void *res);
+        bool checkAuth(const H2Request &req, H2Response &res);
         std::string generateToken() const;
         bool validateToken(const std::string &token) const;
         mutable std::mutex tokenMutex_;
         mutable std::set<std::string> validTokens_;
 
-        // API route handlers
-        void apiGetStatus(void *req, void *res);
-        void apiGetModels(void *req, void *res);
-        void apiAddModel(void *req, void *res);
-        void apiRemoveModel(void *req, void *res);
-        void apiStartModel(void *req, void *res);
-        void apiStopModel(void *req, void *res);
-        void apiRestartModel(void *req, void *res);
-        void apiGetSites(void *req, void *res);
-        void apiGetGroups(void *req, void *res);
-        void apiCreateGroup(void *req, void *res);
-        void apiDeleteGroup(void *req, void *res);
-        void apiGetConfig(void *req, void *res);
-        void apiUpdateConfig(void *req, void *res);
-        void apiGetDiskUsage(void *req, void *res);
-        void apiSaveConfig(void *req, void *res);
-        void apiStartAll(void *req, void *res);
-        void apiStopAll(void *req, void *res);
-
         BotManager &manager_;
         AppConfig &config_;
         ModelConfigStore &configStore_;
-        std::unique_ptr<httplib::Server> server_;
-        std::unique_ptr<std::thread> serverThread_;
-        std::unique_ptr<WsPreviewServer> wsServer_;
+        std::unique_ptr<H2Server> server_;
         std::atomic<bool> running_{false};
         std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> logRingBuffer_;
+        std::string certPath_;
+        std::string keyPath_;
     };
 
 } // namespace sm
