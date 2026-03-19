@@ -348,22 +348,50 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // On-demand preview — GUI requests, recorder delivers RGBA pixels
+    // Continuous preview — recorder pushes, GUI/MJPEG consumes
     // ─────────────────────────────────────────────────────────────────
-    void SitePlugin::requestPreview()
-    {
-        previewRequested_.store(true, std::memory_order_release);
-    }
-
-    bool SitePlugin::consumePreview(PreviewFrame &out)
+    bool SitePlugin::consumePreview(PreviewFrame &out, uint64_t &lastVersion)
     {
         std::lock_guard lock(previewMutex_);
-        if (!previewReady_)
+        if (previewVersion_ <= lastVersion || pendingPreview_.empty())
             return false;
-        out = std::move(pendingPreview_);
-        pendingPreview_.clear();
-        previewReady_ = false;
+        // Copy (not move) — multiple consumers may read independently
+        out.pixels = pendingPreview_.pixels;
+        out.width = pendingPreview_.width;
+        out.height = pendingPreview_.height;
+        lastVersion = previewVersion_;
         return true;
+    }
+
+    bool SitePlugin::waitForPreview(PreviewFrame &out, uint64_t &lastVersion, int timeoutMs)
+    {
+        std::unique_lock lock(previewMutex_);
+        if (previewCv_.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                                [&]
+                                { return previewVersion_ > lastVersion && !pendingPreview_.empty(); }))
+        {
+            out.pixels = pendingPreview_.pixels;
+            out.width = pendingPreview_.width;
+            out.height = pendingPreview_.height;
+            lastVersion = previewVersion_;
+            return true;
+        }
+        return false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Audio data callback — set/clear by GUI audio player
+    // ─────────────────────────────────────────────────────────────────
+    void SitePlugin::setAudioDataCallback(AudioDataCallback cb)
+    {
+        std::lock_guard lock(audioMutex_);
+        audioDataCb_ = std::move(cb);
+    }
+
+    void SitePlugin::clearAudioDataCallback()
+    {
+        std::lock_guard lock(audioMutex_);
+        audioDataCb_ = nullptr;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -1096,17 +1124,26 @@ namespace sm
         HLSRecorder recorder(config);
         recorder.setLogger(logger_);
 
-        // ── On-demand preview from the live stream ──────────────────
-        // Pass our atomic flag so the recorder knows when to capture,
-        // and a callback that stores RGBA pixels in our buffer.
-        recorder.setPreviewRequestFlag(&previewRequested_);
+        // ── Continuous preview from the live stream ─────────────────
+        // Recorder pushes RGBA frames at ~15fps. We store the latest
+        // frame and notify any waiters (MJPEG endpoint, GUI).
         recorder.setPreviewDataCallback([this](std::vector<uint8_t> rgba, int w, int h)
                                         {
             std::lock_guard lock(previewMutex_);
             pendingPreview_.pixels = std::move(rgba);
             pendingPreview_.width = w;
             pendingPreview_.height = h;
-            previewReady_ = true; });
+            previewVersion_++;
+            previewCv_.notify_all(); });
+
+        // ── Audio forwarding ────────────────────────────────────────
+        // Recorder pushes f32 stereo 48kHz PCM. Forward to whoever
+        // registered the audio callback (typically the GUI AudioPlayer).
+        recorder.setAudioDataCallback([this](const float *samples, size_t frameCount)
+                                      {
+            std::lock_guard lock(audioMutex_);
+            if (audioDataCb_)
+                audioDataCb_(samples, frameCount); });
 
         recorder.setProgressCallback([this](const RecordingProgress &prog)
                                      {

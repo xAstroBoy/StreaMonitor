@@ -915,6 +915,18 @@ namespace sm
 
     void GuiApp::cleanup()
     {
+        // Stop audio playback
+        if (!audioStreamKey_.empty())
+        {
+            auto sep = audioStreamKey_.find('|');
+            if (sep != std::string::npos)
+                manager_.clearAudioDataCallback(
+                    audioStreamKey_.substr(0, sep),
+                    audioStreamKey_.substr(sep + 1));
+            audioPlayer_.stop();
+            audioStreamKey_.clear();
+        }
+
         // Free preview texture
         if (detailPreviewTex_)
         {
@@ -1478,6 +1490,8 @@ namespace sm
             TimePoint earliestStart{};
             std::string primaryUrl;
             int primaryIdx = -1;
+            int maxResW = 0;
+            int maxResH = 0;
         };
 
         auto statusPrio = [](Status st) -> int
@@ -1571,6 +1585,11 @@ namespace sm
             {
                 grp.anyRecording = true;
                 grp.maxSpeed = std::max(grp.maxSpeed, bot.recordingStats.currentSpeed);
+                if (bot.recordingStats.recordingWidth > grp.maxResW)
+                {
+                    grp.maxResW = bot.recordingStats.recordingWidth;
+                    grp.maxResH = bot.recordingStats.recordingHeight;
+                }
             }
             if (bot.running)
                 grp.anyRunning = true;
@@ -1920,19 +1939,21 @@ namespace sm
         ImGuiTableFlags tableFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                      ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersInnerV |
                                      ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp |
-                                     ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate;
+                                     ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate |
+                                     ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable;
 
-        if (!ImGui::BeginTable("##Models", 10, tableFlags))
+        if (!ImGui::BeginTable("##Models", 11, tableFlags))
             return;
 
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("##Chk", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort, 30.0f * s);
-        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort, 95.0f * s);
+        ImGui::TableSetupColumn("##Chk", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_NoReorder, 30.0f * s);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_NoHide, 95.0f * s);
         ImGui::TableSetupColumn("Username", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_NoHide, 3.5f);
         ImGui::TableSetupColumn("Sites", 0, 2.0f);
         ImGui::TableSetupColumn("Group", 0, 2.0f);
         ImGui::TableSetupColumn("URL", 0, 4.0f);
         ImGui::TableSetupColumn("Recording", 0, 1.0f);
+        ImGui::TableSetupColumn("Resolution", 0, 1.5f);
         ImGui::TableSetupColumn("Size", 0, 1.2f);
         ImGui::TableSetupColumn("Speed", 0, 1.0f);
         ImGui::TableSetupColumn("Uptime", 0, 1.0f);
@@ -1942,6 +1963,13 @@ namespace sm
         // Checkbox header — select/deselect all
         ImGui::TableSetColumnIndex(0);
         {
+            // Center checkbox in header column
+            float colW = ImGui::GetColumnWidth();
+            float cbW = ImGui::GetFrameHeight();
+            float pad = (colW - cbW) * 0.5f;
+            if (pad > 0.0f)
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
+
             bool allSelected = !visibleRows.empty();
             bool anySelected = false;
             for (auto *rp : visibleRows)
@@ -1972,7 +2000,7 @@ namespace sm
             }
         }
         // Rest of headers
-        for (int col = 1; col < 10; col++)
+        for (int col = 1; col < 11; col++)
         {
             ImGui::TableSetColumnIndex(col);
             ImGui::TableHeader(ImGui::TableGetColumnName(col));
@@ -2016,15 +2044,23 @@ namespace sm
                               case 6: // Recording
                                   cmp = (int)a->anyRecording - (int)b->anyRecording;
                                   break;
-                              case 7: // Size
+                              case 7: // Resolution
+                              {
+                                  int aRes = a->maxResW * a->maxResH;
+                                  int bRes = b->maxResW * b->maxResH;
+                                  cmp = (aRes < bRes) ? -1 : (aRes > bRes) ? 1
+                                                                           : 0;
+                                  break;
+                              }
+                              case 8: // Size
                                   cmp = (a->combinedSize < b->combinedSize) ? -1 : (a->combinedSize > b->combinedSize) ? 1
                                                                                                                        : 0;
                                   break;
-                              case 8: // Speed
+                              case 9: // Speed
                                   cmp = (a->maxSpeed < b->maxSpeed) ? -1 : (a->maxSpeed > b->maxSpeed) ? 1
                                                                                                        : 0;
                                   break;
-                              case 9: // Uptime
+                              case 10: // Uptime
                                   cmp = (a->earliestStart < b->earliestStart) ? -1 : (a->earliestStart > b->earliestStart) ? 1
                                                                                                                            : 0;
                                   break;
@@ -2058,6 +2094,12 @@ namespace sm
             // ── Checkbox ────────────────────────────────────────────
             ImGui::TableNextColumn();
             {
+                // Center checkbox in the fixed-width column
+                float colW = ImGui::GetColumnWidth();
+                float cbW = ImGui::GetFrameHeight(); // checkbox is square
+                float pad = (colW - cbW) * 0.5f;
+                if (pad > 0.0f)
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
                 bool checked = selectedRows_.count(grp.key) > 0;
                 if (ImGui::Checkbox("##sel", &checked))
                 {
@@ -2570,6 +2612,13 @@ namespace sm
                 ImGui::TextColored(COL_TEXT_DIM, "--");
             }
 
+            // ── Resolution ──────────────────────────────────────────
+            ImGui::TableNextColumn();
+            if (grp.maxResW > 0 && grp.maxResH > 0)
+                ImGui::Text("%dx%d", grp.maxResW, grp.maxResH);
+            else
+                ImGui::TextColored(COL_TEXT_DIM, "--");
+
             // ── Size ────────────────────────────────────────────────
             ImGui::TableNextColumn();
             if (grp.combinedSize > 0)
@@ -2603,6 +2652,12 @@ namespace sm
                     // Checkbox for sub-row
                     ImGui::TableNextColumn();
                     {
+                        // Center checkbox in the fixed-width column
+                        float colW = ImGui::GetColumnWidth();
+                        float cbW = ImGui::GetFrameHeight();
+                        float pad = (colW - cbW) * 0.5f;
+                        if (pad > 0.0f)
+                            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
                         std::string subKey = b.username + "\t" + b.siteName;
                         std::transform(subKey.begin(), subKey.end(), subKey.begin(), ::tolower);
                         bool subChecked = selectedRows_.count(subKey) > 0;
@@ -2760,6 +2815,13 @@ namespace sm
                         ImVec4 recCol = {1.0f, 0.2f + pulse * 0.2f, 0.2f, 1.0f};
                         ImGui::TextColored(recCol, "REC");
                     }
+                    else
+                        ImGui::TextColored(COL_TEXT_DIM, "--");
+
+                    // Resolution
+                    ImGui::TableNextColumn();
+                    if (b.recordingStats.recordingWidth > 0 && b.recordingStats.recordingHeight > 0)
+                        ImGui::Text("%dx%d", b.recordingStats.recordingWidth, b.recordingStats.recordingHeight);
                     else
                         ImGui::TextColored(COL_TEXT_DIM, "--");
 
@@ -4603,6 +4665,17 @@ namespace sm
         ImGui::SetNextWindowSizeConstraints({400 * dpiScale_, 280 * dpiScale_}, {1200 * dpiScale_, 900 * dpiScale_});
         if (!ImGui::Begin("Stream View", &showStreamView_))
         {
+            // Window collapsed or hidden — stop audio if playing
+            if (!audioStreamKey_.empty())
+            {
+                auto sep = audioStreamKey_.find('|');
+                if (sep != std::string::npos)
+                    manager_.clearAudioDataCallback(
+                        audioStreamKey_.substr(0, sep),
+                        audioStreamKey_.substr(sep + 1));
+                audioPlayer_.stop();
+                audioStreamKey_.clear();
+            }
             ImGui::End();
             return;
         }
@@ -4629,6 +4702,18 @@ namespace sm
 
         if (viewIdx < 0)
         {
+            // No recording — stop audio
+            if (!audioStreamKey_.empty())
+            {
+                auto sep = audioStreamKey_.find('|');
+                if (sep != std::string::npos)
+                    manager_.clearAudioDataCallback(
+                        audioStreamKey_.substr(0, sep),
+                        audioStreamKey_.substr(sep + 1));
+                audioPlayer_.stop();
+                audioStreamKey_.clear();
+            }
+
             float w = ImGui::GetContentRegionAvail().x;
             float h = ImGui::GetContentRegionAvail().y;
             ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -4670,10 +4755,36 @@ namespace sm
             ImGui::EndCombo();
         }
 
+        // ── Audio controls ──────────────────────────────────────────
+        {
+            // Mute toggle
+            if (audioMuted_)
+            {
+                if (ImGui::Button("\xf0\x9f\x94\x87##Mute")) // 🔇
+                    audioMuted_ = false;
+            }
+            else
+            {
+                if (ImGui::Button("\xf0\x9f\x94\x8a##Mute")) // 🔊
+                    audioMuted_ = true;
+            }
+            ImGui::SameLine();
+
+            // Volume slider
+            ImGui::SetNextItemWidth(120 * dpiScale_);
+            if (ImGui::SliderFloat("##Volume", &audioVolume_, 0.0f, 1.0f, "Vol %.0f%%",
+                                   ImGuiSliderFlags_AlwaysClamp))
+            {
+                audioPlayer_.setVolume(audioMuted_ ? 0.0f : audioVolume_);
+            }
+            // Also apply mute state every frame
+            audioPlayer_.setVolume(audioMuted_ ? 0.0f : audioVolume_);
+        }
+
         // Determine the key for preview
         std::string previewKey = bot.username + "|" + bot.siteName;
 
-        // If we switched to a different bot, discard the old texture
+        // If we switched to a different bot, discard the old texture & rewire audio
         if (previewKey != detailPreviewKey_)
         {
             if (detailPreviewTex_)
@@ -4683,25 +4794,35 @@ namespace sm
             }
             detailPreviewW_ = detailPreviewH_ = 0;
             detailPreviewKey_ = previewKey;
-            lastPreviewRequest_ = {};
-        }
+            previewVersion_ = 0; // reset version to get first frame immediately
 
-        // Request preview every 250ms for a stream-like experience
-        {
-            auto now = Clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               now - lastPreviewRequest_)
-                               .count();
-            if (elapsed >= 250 || lastPreviewRequest_ == TimePoint{})
+            // Unwire old audio
+            if (!audioStreamKey_.empty())
             {
-                manager_.requestPreview(bot.username, bot.siteName);
-                lastPreviewRequest_ = now;
+                auto sep = audioStreamKey_.find('|');
+                if (sep != std::string::npos)
+                    manager_.clearAudioDataCallback(
+                        audioStreamKey_.substr(0, sep),
+                        audioStreamKey_.substr(sep + 1));
+                audioPlayer_.stop();
             }
+
+            // Wire new audio
+            audioStreamKey_ = previewKey;
+            audioPlayer_.init(48000, 2);
+            audioPlayer_.flush(); // clear stale samples from previous stream
+            audioPlayer_.setVolume(audioMuted_ ? 0.0f : audioVolume_);
+            audioPlayer_.start();
+            manager_.setAudioDataCallback(bot.username, bot.siteName,
+                                          [this](const float *samples, size_t frameCount)
+                                          {
+                                              audioPlayer_.pushSamples(samples, frameCount);
+                                          });
         }
 
-        // Consume new frame
+        // Consume latest frame from continuous preview stream
         PreviewFrame frame;
-        if (manager_.consumePreview(bot.username, bot.siteName, frame))
+        if (manager_.consumePreview(bot.username, bot.siteName, frame, previewVersion_))
         {
             if (detailPreviewTex_ == 0)
                 glGenTextures(1, &detailPreviewTex_);
@@ -4777,7 +4898,8 @@ namespace sm
         ImGui::SameLine();
         ImGui::TextColored(statusColor(bot.status), "(%s)", statusToString(bot.status));
 
-        // Preview thumbnail — on-demand, in-memory, direct GL texture
+        // Preview thumbnail — collapsible, in-memory, direct GL texture
+        if (ImGui::CollapsingHeader("Live Preview", ImGuiTreeNodeFlags_DefaultOpen))
         {
             ImGui::Spacing();
             float avail = ImGui::GetContentRegionAvail().x;
@@ -4796,24 +4918,12 @@ namespace sm
                 }
                 detailPreviewW_ = detailPreviewH_ = 0;
                 detailPreviewKey_ = previewKey;
-                lastPreviewRequest_ = {}; // force immediate request
+                previewVersion_ = 0; // reset version to get first frame immediately
             }
 
-            // Request preview every 2 seconds while panel is open and bot is recording
-            if (bot.recording)
-            {
-                auto now = Clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastPreviewRequest_).count();
-                if (elapsed >= 2 || lastPreviewRequest_ == TimePoint{})
-                {
-                    manager_.requestPreview(bot.username, bot.siteName);
-                    lastPreviewRequest_ = now;
-                }
-            }
-
-            // Check for new RGBA pixels from the recorder
+            // Consume latest frame from continuous preview stream
             PreviewFrame frame;
-            if (manager_.consumePreview(bot.username, bot.siteName, frame))
+            if (manager_.consumePreview(bot.username, bot.siteName, frame, previewVersion_))
             {
                 // Upload RGBA pixels directly to a GL texture
                 if (detailPreviewTex_ == 0)

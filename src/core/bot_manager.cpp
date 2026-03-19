@@ -1099,24 +1099,50 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // On-demand preview forwarding
+    // Continuous preview forwarding
     // ─────────────────────────────────────────────────────────────────
-    void BotManager::requestPreview(const std::string &username, const std::string &site)
-    {
-        std::lock_guard lock(mutex_);
-        auto *bot = findBot(username, site);
-        if (bot)
-            bot->requestPreview();
-    }
-
     bool BotManager::consumePreview(const std::string &username, const std::string &site,
-                                    PreviewFrame &out)
+                                    PreviewFrame &out, uint64_t &lastVersion)
     {
         std::lock_guard lock(mutex_);
         auto *bot = findBot(username, site);
         if (!bot)
             return false;
-        return bot->consumePreview(out);
+        return bot->consumePreview(out, lastVersion);
+    }
+
+    bool BotManager::waitForPreview(const std::string &username, const std::string &site,
+                                    PreviewFrame &out, uint64_t &lastVersion, int timeoutMs)
+    {
+        // Find the bot under lock, then release lock before waiting
+        SitePlugin *bot = nullptr;
+        {
+            std::lock_guard lock(mutex_);
+            bot = findBot(username, site);
+        }
+        if (!bot)
+            return false;
+        return bot->waitForPreview(out, lastVersion, timeoutMs);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Audio callback forwarding
+    // ─────────────────────────────────────────────────────────────────
+    void BotManager::setAudioDataCallback(const std::string &username, const std::string &site,
+                                          AudioDataCallback cb)
+    {
+        std::lock_guard lock(mutex_);
+        auto *bot = findBot(username, site);
+        if (bot)
+            bot->setAudioDataCallback(std::move(cb));
+    }
+
+    void BotManager::clearAudioDataCallback(const std::string &username, const std::string &site)
+    {
+        std::lock_guard lock(mutex_);
+        auto *bot = findBot(username, site);
+        if (bot)
+            bot->clearAudioDataCallback();
     }
 
     // ─────────────────────────────────────────────────────────────────

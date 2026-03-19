@@ -9,6 +9,7 @@
 #include "config/config.h"
 #include "gui/image_cache.h"
 #include "gui/imgui_log_sink.h"
+#include "gui/audio_player.h"
 #ifdef _WIN32
 #include "gui/system_tray.h"
 #endif
@@ -201,7 +202,13 @@ namespace sm
         int detailPreviewW_ = 0;
         int detailPreviewH_ = 0;
         std::string detailPreviewKey_; // "username|siteName" of current texture
-        TimePoint lastPreviewRequest_; // rate-limit requests
+        uint64_t previewVersion_ = 0;  // version counter for change detection
+
+        // Audio player for stream view (f32 stereo 48kHz via miniaudio)
+        AudioPlayer audioPlayer_;
+        std::string audioStreamKey_; // "username|siteName" currently wired
+        float audioVolume_ = 0.5f;   // 0..1 volume slider
+        bool audioMuted_ = false;    // mute toggle
 
         // DPI scale factor (detected from monitor)
         float dpiScale_ = 1.0f;

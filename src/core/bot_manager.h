@@ -87,10 +87,17 @@ namespace sm
         size_t recordingCount() const;
         size_t onlineCount() const;
 
-        // ── On-demand preview (forwarded to SitePlugin) ─────────────
-        void requestPreview(const std::string &username, const std::string &site);
+        // ── Continuous preview (forwarded to SitePlugin) ─────────────
         bool consumePreview(const std::string &username, const std::string &site,
-                            PreviewFrame &out);
+                            PreviewFrame &out, uint64_t &lastVersion);
+        bool waitForPreview(const std::string &username, const std::string &site,
+                            PreviewFrame &out, uint64_t &lastVersion, int timeoutMs);
+
+        // ── Audio forwarding (forwarded to SitePlugin) ───────────────
+        using AudioDataCallback = std::function<void(const float *samples, size_t frameCount)>;
+        void setAudioDataCallback(const std::string &username, const std::string &site,
+                                  AudioDataCallback cb);
+        void clearAudioDataCallback(const std::string &username, const std::string &site);
 
         // ── Events ──────────────────────────────────────────────────
         void setEventCallback(ManagerEventCallback cb);

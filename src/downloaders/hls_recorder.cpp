@@ -25,6 +25,8 @@ extern "C"
 #include <libavutil/hwcontext.h>
 #include <libavutil/mem.h>
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
+#include <libavutil/channel_layout.h>
 }
 
 #include "downloaders/hls_recorder.h"
@@ -1487,6 +1489,18 @@ namespace sm
         if (state.hwDeviceCtx)
             av_buffer_unref(&state.hwDeviceCtx);
 
+        // Clean up shadow decoder for stream-copy preview
+        if (state.shadowFrame)
+            av_frame_free(&state.shadowFrame);
+        if (state.shadowDecCtx)
+            avcodec_free_context(&state.shadowDecCtx);
+
+        // Clean up shadow audio decoder for audio playback
+        if (state.shadowAudioFrame)
+            av_frame_free(&state.shadowAudioFrame);
+        if (state.shadowAudioDecCtx)
+            avcodec_free_context(&state.shadowAudioDecCtx);
+
         if (state.inputCtx)
         {
             // Free interrupt data
@@ -1891,8 +1905,8 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Decode a video frame to RGBA pixels (on-demand, in-memory).
-    // Scales down to max 640px wide. No file I/O at all.
+    // Decode a video frame to RGBA pixels (continuous, in-memory).
+    // Scales down to max 640px wide. Caches SwsContext for reuse.
     // ─────────────────────────────────────────────────────────────────
     bool HLSRecorder::decodeFrameToRGBA(AVFrame *frame, std::vector<uint8_t> &outRGBA, int &outW, int &outH)
     {
@@ -1913,112 +1927,244 @@ namespace sm
         if (w <= 0 || h <= 0)
             return false;
 
-        SwsContext *sws = sws_getContext(
-            frame->width, frame->height, (AVPixelFormat)frame->format,
-            w, h, AV_PIX_FMT_RGBA,
-            SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (!sws)
-            return false;
+        // Reuse SwsContext if input format/dimensions haven't changed
+        int srcFmt = static_cast<int>(frame->format);
+        if (previewSwsCtx_ == nullptr ||
+            previewSwsSrcW_ != frame->width || previewSwsSrcH_ != frame->height ||
+            previewSwsSrcFmt_ != srcFmt || previewDstW_ != w || previewDstH_ != h)
+        {
+            if (previewSwsCtx_)
+                sws_freeContext(previewSwsCtx_);
+
+            previewSwsCtx_ = sws_getContext(
+                frame->width, frame->height, (AVPixelFormat)frame->format,
+                w, h, AV_PIX_FMT_RGBA,
+                SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+            if (!previewSwsCtx_)
+                return false;
+
+            previewSwsSrcW_ = frame->width;
+            previewSwsSrcH_ = frame->height;
+            previewSwsSrcFmt_ = srcFmt;
+            previewDstW_ = w;
+            previewDstH_ = h;
+        }
 
         // Allocate output buffer: 4 bytes per pixel (RGBA)
         outRGBA.resize(static_cast<size_t>(w) * h * 4);
         uint8_t *dstData[1] = {outRGBA.data()};
         int dstLinesize[1] = {w * 4};
 
-        sws_scale(sws, frame->data, frame->linesize, 0, frame->height,
+        sws_scale(previewSwsCtx_, frame->data, frame->linesize, 0, frame->height,
                   dstData, dstLinesize);
-        sws_freeContext(sws);
 
         outW = w;
         outH = h;
-        log_->debug("Preview decoded to RGBA: {}x{} from {}x{}", w, h, frame->width, frame->height);
         return true;
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Deliver preview from a raw keyframe packet (stream-copy mode).
-    // Only runs when previewRequestFlag_ is set. Opens a temporary
-    // decoder, decodes the keyframe, converts to RGBA, calls callback.
+    // Deliver preview from a raw video packet (stream-copy mode).
+    // Uses a persistent shadow decoder stored in FFmpegState.
+    // Feeds ALL video packets for smooth decode — throttled to 15fps.
     // ─────────────────────────────────────────────────────────────────
     bool HLSRecorder::deliverPreviewFromPacket(FFmpegState &state, AVPacket *pkt)
     {
-        if (!previewRequestFlag_ || !previewRequestFlag_->load(std::memory_order_acquire))
+        if (!pkt || !previewDataCb_)
             return false;
-        if (!pkt || !(pkt->flags & AV_PKT_FLAG_KEY))
-            return false;
-        if (!previewDataCb_)
-            return false;
-
-        // Find the video codec from the input stream
         if (state.videoIdx < 0 || !state.inputCtx)
             return false;
 
-        AVStream *videoStream = state.inputCtx->streams[state.videoIdx];
-        const AVCodec *decoder = avcodec_find_decoder(videoStream->codecpar->codec_id);
-        if (!decoder)
-            return false;
-
-        AVCodecContext *decCtx = avcodec_alloc_context3(decoder);
-        if (!decCtx)
-            return false;
-
-        avcodec_parameters_to_context(decCtx, videoStream->codecpar);
-        decCtx->thread_count = 1;
-
-        if (avcodec_open2(decCtx, decoder, nullptr) < 0)
+        // ── Initialize persistent shadow decoder on first call ──────
+        if (!state.shadowDecCtx)
         {
-            avcodec_free_context(&decCtx);
-            return false;
-        }
+            AVStream *videoStream = state.inputCtx->streams[state.videoIdx];
+            const AVCodec *decoder = avcodec_find_decoder(videoStream->codecpar->codec_id);
+            if (!decoder)
+                return false;
 
-        int ret = avcodec_send_packet(decCtx, pkt);
-        if (ret < 0)
-        {
-            avcodec_free_context(&decCtx);
-            return false;
-        }
+            state.shadowDecCtx = avcodec_alloc_context3(decoder);
+            if (!state.shadowDecCtx)
+                return false;
 
-        AVFrame *frame = av_frame_alloc();
-        ret = avcodec_receive_frame(decCtx, frame);
+            avcodec_parameters_to_context(state.shadowDecCtx, videoStream->codecpar);
+            state.shadowDecCtx->thread_count = 1;
 
-        bool ok = false;
-        if (ret == 0 && frame->width > 0 && frame->height > 0)
-        {
-            std::vector<uint8_t> rgba;
-            int w = 0, h = 0;
-            if (decodeFrameToRGBA(frame, rgba, w, h))
+            if (avcodec_open2(state.shadowDecCtx, decoder, nullptr) < 0)
             {
-                previewRequestFlag_->store(false, std::memory_order_release);
-                previewDataCb_(std::move(rgba), w, h);
-                ok = true;
+                avcodec_free_context(&state.shadowDecCtx);
+                return false;
+            }
+
+            state.shadowFrame = av_frame_alloc();
+            if (!state.shadowFrame)
+            {
+                avcodec_free_context(&state.shadowDecCtx);
+                return false;
             }
         }
 
-        av_frame_free(&frame);
-        avcodec_free_context(&decCtx);
-        return ok;
+        // ── Feed packet to shadow decoder ───────────────────────────
+        int ret = avcodec_send_packet(state.shadowDecCtx, pkt);
+        if (ret < 0 && ret != AVERROR(EAGAIN))
+            return false;
+
+        // ── Receive all decoded frames, throttle RGBA delivery ──────
+        bool delivered = false;
+        while (true)
+        {
+            ret = avcodec_receive_frame(state.shadowDecCtx, state.shadowFrame);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                break;
+            if (ret < 0)
+                break;
+
+            // Throttle: skip RGBA conversion if too soon
+            auto now = std::chrono::steady_clock::now();
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 now - lastPreviewTime_)
+                                 .count();
+            if (elapsedMs < (1000 / PREVIEW_TARGET_FPS))
+            {
+                av_frame_unref(state.shadowFrame);
+                continue;
+            }
+
+            // Convert to RGBA and deliver
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0;
+            if (decodeFrameToRGBA(state.shadowFrame, rgba, w, h))
+            {
+                lastPreviewTime_ = now;
+                previewDataCb_(std::move(rgba), w, h);
+                delivered = true;
+            }
+            av_frame_unref(state.shadowFrame);
+        }
+        return delivered;
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Deliver preview from an already-decoded frame (transcode mode).
-    // Only runs when previewRequestFlag_ is set by the GUI.
+    // Deliver preview continuously from decoded frames (transcode mode).
+    // Throttled to PREVIEW_TARGET_FPS (~15fps) for efficiency.
     // ─────────────────────────────────────────────────────────────────
     void HLSRecorder::maybeDeliverPreviewFrame(AVFrame *frame)
     {
-        if (!previewRequestFlag_ || !previewRequestFlag_->load(std::memory_order_acquire))
-            return;
         if (!frame || frame->width <= 0 || frame->height <= 0)
             return;
         if (!previewDataCb_)
+            return;
+
+        // Throttle: skip if too soon since last delivery
+        auto now = std::chrono::steady_clock::now();
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             now - lastPreviewTime_)
+                             .count();
+        if (elapsedMs < (1000 / PREVIEW_TARGET_FPS))
             return;
 
         std::vector<uint8_t> rgba;
         int w = 0, h = 0;
         if (decodeFrameToRGBA(frame, rgba, w, h))
         {
-            previewRequestFlag_->store(false, std::memory_order_release);
+            lastPreviewTime_ = now;
             previewDataCb_(std::move(rgba), w, h);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Clean up cached preview conversion state
+    // ─────────────────────────────────────────────────────────────────
+    void HLSRecorder::cleanupPreviewState()
+    {
+        if (previewSwsCtx_)
+        {
+            sws_freeContext(previewSwsCtx_);
+            previewSwsCtx_ = nullptr;
+        }
+        previewSwsSrcW_ = previewSwsSrcH_ = 0;
+        previewSwsSrcFmt_ = -1;
+        previewDstW_ = previewDstH_ = 0;
+        lastPreviewTime_ = {};
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Deliver audio frame as f32 stereo 48kHz (for live playback)
+    // ─────────────────────────────────────────────────────────────────
+    void HLSRecorder::maybeDeliverAudioFrame(AVFrame *frame, AVCodecContext *decCtx)
+    {
+        if (!audioDataCb_ || !frame || frame->nb_samples <= 0)
+            return;
+
+        // Target format: f32 interleaved stereo 48kHz
+        static constexpr int TARGET_RATE = 48000;
+        static constexpr int TARGET_CHANNELS = 2;
+        AVSampleFormat targetFmt = AV_SAMPLE_FMT_FLT;
+
+        // Check if we need to create/recreate the resampler
+        AVChannelLayout srcChLayout = frame->ch_layout;
+        int srcRate = frame->sample_rate;
+        int srcFmt = frame->format;
+
+        if (!audioSwrCtx_ ||
+            audioSwrSrcRate_ != srcRate ||
+            audioSwrSrcFmt_ != srcFmt)
+        {
+            if (audioSwrCtx_)
+                swr_free(&audioSwrCtx_);
+
+            AVChannelLayout dstLayout = AV_CHANNEL_LAYOUT_STEREO;
+
+            int ret = swr_alloc_set_opts2(&audioSwrCtx_,
+                                          &dstLayout, targetFmt, TARGET_RATE,
+                                          &srcChLayout, (AVSampleFormat)srcFmt, srcRate,
+                                          0, nullptr);
+            if (ret < 0 || !audioSwrCtx_)
+                return;
+
+            if (swr_init(audioSwrCtx_) < 0)
+            {
+                swr_free(&audioSwrCtx_);
+                return;
+            }
+
+            audioSwrSrcRate_ = srcRate;
+            audioSwrSrcFmt_ = srcFmt;
+        }
+
+        // Calculate output sample count
+        int64_t outSamples = av_rescale_rnd(
+            swr_get_delay(audioSwrCtx_, srcRate) + frame->nb_samples,
+            TARGET_RATE, srcRate, AV_ROUND_UP);
+
+        if (outSamples <= 0)
+            return;
+
+        // Allocate output buffer (f32 interleaved stereo)
+        std::vector<float> outBuf(static_cast<size_t>(outSamples) * TARGET_CHANNELS);
+        uint8_t *outPtr = reinterpret_cast<uint8_t *>(outBuf.data());
+
+        int converted = swr_convert(audioSwrCtx_,
+                                    &outPtr, static_cast<int>(outSamples),
+                                    (const uint8_t **)frame->extended_data, frame->nb_samples);
+
+        if (converted > 0)
+            audioDataCb_(outBuf.data(), static_cast<size_t>(converted));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Clean up audio resampling state
+    // ─────────────────────────────────────────────────────────────────
+    void HLSRecorder::cleanupAudioState()
+    {
+        if (audioSwrCtx_)
+        {
+            swr_free(&audioSwrCtx_);
+            audioSwrCtx_ = nullptr;
+        }
+        audioSwrSrcRate_ = 0;
+        audioSwrSrcFmt_ = -1;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -2442,13 +2588,11 @@ namespace sm
                         bool packetOk = false;
 
                         // ── Preview capture (stream-copy mode) ──────────────
-                        // In stream-copy mode we don't decode, so grab keyframes
-                        // before processPacket consumes the packet data.
-                        // Only when the GUI has requested a preview.
-                        if (!state.transcoding && previewRequestFlag_ &&
-                            previewRequestFlag_->load(std::memory_order_acquire) &&
-                            pkt->stream_index == state.videoIdx &&
-                            (pkt->flags & AV_PKT_FLAG_KEY))
+                        // In stream-copy mode we don't decode, so feed all
+                        // video packets to a persistent shadow decoder for
+                        // smooth live preview. Throttled inside deliverPreviewFromPacket.
+                        if (!state.transcoding && previewDataCb_ &&
+                            pkt->stream_index == state.videoIdx)
                         {
                             // Make a ref copy — processPacket will unref the original
                             AVPacket *previewPkt = av_packet_clone(pkt);
@@ -2456,6 +2600,55 @@ namespace sm
                             {
                                 deliverPreviewFromPacket(state, previewPkt);
                                 av_packet_free(&previewPkt);
+                            }
+                        }
+
+                        // ── Audio capture (all modes) ───────────────────────
+                        // Feed audio packets to a shadow decoder for live playback.
+                        // Both transcode and stream-copy modes stream-copy audio,
+                        // so we always need a shadow decoder for audio playback.
+                        if (audioDataCb_ && pkt->stream_index == state.audioIdx)
+                        {
+                            // Initialize shadow audio decoder on first audio packet
+                            if (!state.shadowAudioDecCtx && state.inputCtx)
+                            {
+                                AVStream *audioStream = state.inputCtx->streams[state.audioIdx];
+                                const AVCodec *adec = avcodec_find_decoder(audioStream->codecpar->codec_id);
+                                if (adec)
+                                {
+                                    state.shadowAudioDecCtx = avcodec_alloc_context3(adec);
+                                    if (state.shadowAudioDecCtx)
+                                    {
+                                        avcodec_parameters_to_context(state.shadowAudioDecCtx, audioStream->codecpar);
+                                        state.shadowAudioDecCtx->thread_count = 1;
+                                        if (avcodec_open2(state.shadowAudioDecCtx, adec, nullptr) < 0)
+                                        {
+                                            avcodec_free_context(&state.shadowAudioDecCtx);
+                                        }
+                                        else
+                                        {
+                                            state.shadowAudioFrame = av_frame_alloc();
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (state.shadowAudioDecCtx && state.shadowAudioFrame)
+                            {
+                                AVPacket *audioPkt = av_packet_clone(pkt);
+                                if (audioPkt)
+                                {
+                                    int ret2 = avcodec_send_packet(state.shadowAudioDecCtx, audioPkt);
+                                    if (ret2 >= 0 || ret2 == AVERROR(EAGAIN))
+                                    {
+                                        while (avcodec_receive_frame(state.shadowAudioDecCtx, state.shadowAudioFrame) == 0)
+                                        {
+                                            maybeDeliverAudioFrame(state.shadowAudioFrame, state.shadowAudioDecCtx);
+                                            av_frame_unref(state.shadowAudioFrame);
+                                        }
+                                    }
+                                    av_packet_free(&audioPkt);
+                                }
                             }
                         }
 
@@ -2731,6 +2924,11 @@ namespace sm
         log_->info("Recording finished: {} bytes, {} packets, {:.1f}s, {} restarts",
                    result.bytesWritten, result.packetsWritten,
                    result.durationSec, result.restartsPerformed);
+
+        // Clean up cached preview conversion state
+        cleanupPreviewState();
+        // Clean up cached audio resampling state
+        cleanupAudioState();
 
         return result;
     }

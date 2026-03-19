@@ -31,6 +31,7 @@ struct AVStream;
 struct AVDictionary;
 struct AVBufferRef;
 struct SwsContext;
+struct SwrContext;
 struct AVIOContext;
 
 namespace sm
@@ -112,14 +113,17 @@ namespace sm
         // ── Progress ────────────────────────────────────────────────
         void setProgressCallback(ProgressCallback cb);
 
-        // ── Preview capture (on-demand, in-memory) ─────────────────
-        // The GUI sets a request flag via the SitePlugin; when the
-        // recorder encounters the next keyframe it decodes to RGBA
-        // and delivers pixels through the callback. No file I/O.
-        void setPreviewRequestFlag(std::atomic<bool> *flag) { previewRequestFlag_ = flag; }
-
+        // ── Continuous preview capture (in-memory) ──────────────────
+        // The recorder continuously pushes RGBA frames through the
+        // callback, throttled to ~15 fps. No request/flag needed.
         using PreviewDataCallback = std::function<void(std::vector<uint8_t> rgba, int w, int h)>;
         void setPreviewDataCallback(PreviewDataCallback cb) { previewDataCb_ = std::move(cb); }
+
+        // ── Continuous audio delivery (for live playback) ───────────
+        // Pushes PCM float samples (interleaved stereo, 48kHz) through
+        // the callback. Used by the Stream View for audio playback.
+        using AudioDataCallback = std::function<void(const float *samples, size_t frameCount)>;
+        void setAudioDataCallback(AudioDataCallback cb) { audioDataCb_ = std::move(cb); }
 
         // ── Pause/resume (keep file open when stream drops) ─────────
         // Called when stream ends naturally (model went private/offline).
@@ -147,20 +151,36 @@ namespace sm
         std::shared_ptr<spdlog::logger> log_ = spdlog::default_logger();
         ProgressCallback progressCb_;
         PreviewDataCallback previewDataCb_;
+        AudioDataCallback audioDataCb_;
         PauseResumeCallback pauseResumeCb_;
         ResolutionChangeCallback resChangeCb_;
         mutable std::mutex statsMutex_;
         RecordingStats stats_;
 
-        // Preview capture state (on-demand, in-memory)
-        std::atomic<bool> *previewRequestFlag_ = nullptr; // set by SitePlugin
+        // Preview capture state (continuous push, throttled to ~15fps)
+        static constexpr int PREVIEW_TARGET_FPS = 15;
+        std::chrono::steady_clock::time_point lastPreviewTime_{};
+        SwsContext *previewSwsCtx_ = nullptr;
+        int previewSwsSrcW_ = 0, previewSwsSrcH_ = 0;
+        int previewSwsSrcFmt_ = -1; // AVPixelFormat as int
+        int previewDstW_ = 0, previewDstH_ = 0;
+        void cleanupPreviewState();
+
+        // Audio resampling state (decode audio → f32 stereo 48kHz for playback)
+        SwrContext *audioSwrCtx_ = nullptr;
+        int audioSwrSrcRate_ = 0;
+        int audioSwrSrcChLayout_ = 0;
+        int audioSwrSrcFmt_ = -1;
+        void maybeDeliverAudioFrame(AVFrame *frame, AVCodecContext *decCtx);
+        void cleanupAudioState();
 
         // Decode a video frame to RGBA pixels (max 640px wide).
-        // Returns true if successful. Pixels are stored in outRGBA.
+        // Uses cached SwsContext for efficiency. Returns true if successful.
         bool decodeFrameToRGBA(AVFrame *frame, std::vector<uint8_t> &outRGBA, int &outW, int &outH);
 
-        // Deliver preview if requested: decode keyframe → RGBA → callback.
+        // Deliver preview continuously: decode frame → RGBA → callback.
         // Called from the transcode path with an already-decoded frame.
+        // Throttled to PREVIEW_TARGET_FPS to avoid overwhelming consumers.
         void maybeDeliverPreviewFrame(AVFrame *frame);
 
         // ── FFmpeg context management ───────────────────────────────
@@ -185,6 +205,15 @@ namespace sm
             AVFrame *encFrame = nullptr;           // Encoder input frame (after sws)
             AVBufferRef *hwDeviceCtx = nullptr;    // CUDA hardware device context
             bool transcoding = false;              // true = decode+encode, false = stream copy
+
+            // Persistent shadow decoder for stream-copy preview
+            // (stays alive across packets, decodes all video frames)
+            AVCodecContext *shadowDecCtx = nullptr;
+            AVFrame *shadowFrame = nullptr;
+
+            // Persistent shadow audio decoder for stream-copy mode
+            AVCodecContext *shadowAudioDecCtx = nullptr;
+            AVFrame *shadowAudioFrame = nullptr;
 
             // Timestamp rebuilding (live streams: rebuild from 0)
             // Single offset per stream: first DTS is subtracted from BOTH
@@ -215,8 +244,9 @@ namespace sm
             int64_t audioRestartOffset = 0;
         };
 
-        // Deliver preview from a raw keyframe packet (stream-copy mode).
-        // Opens a temporary decoder to decode the single keyframe.
+        // Deliver preview from a raw video packet (stream-copy mode).
+        // Uses persistent shadow decoder stored in FFmpegState.
+        // Feeds ALL video packets (not just keyframes) for smooth preview.
         bool deliverPreviewFromPacket(FFmpegState &state, AVPacket *pkt);
 
         // Setup / teardown

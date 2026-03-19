@@ -457,29 +457,19 @@ namespace sm
             }
             jsonResponse(res, arr); });
 
-        // ── GET /api/preview/:username/:site — Serve preview PNG ──
-        // Requests an on-demand preview frame from the live recorder.
-        // The recorder decodes the next keyframe to RGBA; we wait
-        // briefly and return the raw RGBA as a PNG (via stb_image_write
-        // in memory). If no frame arrives in time → 404.
+        // ── GET /api/preview/:username/:site — Serve preview BMP ──
+        // Returns the latest preview frame from the continuous stream.
+        // Uses waitForPreview to block briefly until a frame is available.
         server_->Get(R"(/api/preview/([^/]+)/([^/]+))",
                      [this](const httplib::Request &req, httplib::Response &res)
                      {
                          std::string username = req.matches[1].str();
                          std::string site = req.matches[2].str();
 
-                         // Request a preview and poll for up to 3 seconds
-                         manager_.requestPreview(username, site);
-
+                         // Wait up to 3 seconds for a preview frame
+                         uint64_t version = 0;
                          PreviewFrame frame;
-                         for (int i = 0; i < 30; ++i)
-                         {
-                             if (manager_.consumePreview(username, site, frame))
-                                 break;
-                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                         }
-
-                         if (frame.empty())
+                         if (!manager_.waitForPreview(username, site, frame, version, 3000))
                          {
                              res.status = 404;
                              res.set_content("No preview available", "text/plain");
@@ -495,6 +485,8 @@ namespace sm
         // ── GET /api/stream/:username/:site — MJPEG live stream ───
         // Continuous multipart/x-mixed-replace stream of BMP frames.
         // The browser <img> tag natively renders this as live video.
+        // Frames are pushed by the recorder at ~15fps — we block until
+        // a new frame arrives instead of polling.
         server_->Get(R"(/api/stream/([^/]+)/([^/]+))",
                      [this](const httplib::Request &req, httplib::Response &res)
                      {
@@ -509,7 +501,7 @@ namespace sm
 
                          res.set_content_provider(
                              "multipart/x-mixed-replace; boundary=" + boundary,
-                             [this, username, site, boundary](size_t /*offset*/, httplib::DataSink &sink) -> bool
+                             [this, username, site, boundary, lastVersion = uint64_t(0)](size_t /*offset*/, httplib::DataSink &sink) mutable -> bool
                              {
                                  if (!sink.is_writable())
                                      return false;
@@ -517,29 +509,13 @@ namespace sm
                                  // Check if bot is still recording — stop stream if not
                                  auto state = manager_.getBotState(username, site);
                                  if (!state || !state->recording)
-                                 {
-                                     // Bot stopped recording — end the stream
                                      return false;
-                                 }
 
-                                 // Request a new preview frame
-                                 manager_.requestPreview(username, site);
-
-                                 // Poll for the frame (up to 2s)
+                                 // Block until a new preview frame is available (up to 500ms)
                                  PreviewFrame frame;
-                                 for (int i = 0; i < 20; ++i)
+                                 if (!manager_.waitForPreview(username, site, frame, lastVersion, 500))
                                  {
-                                     if (manager_.consumePreview(username, site, frame))
-                                         break;
-                                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                                     if (!sink.is_writable())
-                                         return false;
-                                 }
-
-                                 if (frame.empty())
-                                 {
-                                     // No frame — sleep briefly and try again
-                                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                                     // Timeout — no new frame yet, keep connection alive
                                      return sink.is_writable();
                                  }
 
@@ -562,8 +538,6 @@ namespace sm
                                  if (!sink.write(crlf.data(), crlf.size()))
                                      return false;
 
-                                 // Small delay to avoid hammering CPU
-                                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                                  return true; // keep streaming
                              },
                              [](bool /*success*/)

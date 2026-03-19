@@ -147,13 +147,18 @@ namespace sm
         // ── Force resync (immediate status check) ───────────────────
         void forceResync();
 
-        // ── On-demand preview (in-memory, no file I/O) ──────────────
-        // GUI calls requestPreview() when the detail panel is open.
-        // The active recorder will decode the next keyframe to RGBA
-        // and store it in the plugin. GUI calls consumePreview() to
-        // fetch the pixels for GL texture upload.
-        void requestPreview();
-        bool consumePreview(PreviewFrame &out);
+        // ── Continuous preview (in-memory, pushed by recorder) ────────
+        // The recorder pushes RGBA frames at ~15fps automatically.
+        // GUI calls consumePreview() to get the latest frame if new.
+        // MJPEG endpoint calls waitForPreview() to block until next frame.
+        bool consumePreview(PreviewFrame &out, uint64_t &lastVersion);
+        bool waitForPreview(PreviewFrame &out, uint64_t &lastVersion, int timeoutMs);
+
+        // ── Live audio (pushed by recorder, consumed by GUI audio player) ──
+        // Callback receives interleaved f32 stereo PCM at 48 kHz.
+        using AudioDataCallback = std::function<void(const float *samples, size_t frameCount)>;
+        void setAudioDataCallback(AudioDataCallback cb);
+        void clearAudioDataCallback();
 
         // ── Override these in site plugins ──────────────────────────
         virtual Status checkStatus() = 0;
@@ -234,11 +239,15 @@ namespace sm
 
         HttpClient http_;
 
-        // On-demand preview state (shared between plugin thread and GUI)
-        std::atomic<bool> previewRequested_{false}; // GUI → recorder
+        // Continuous preview state (pushed by recorder, consumed by GUI/web)
         std::mutex previewMutex_;
+        std::condition_variable previewCv_;
         PreviewFrame pendingPreview_;
-        bool previewReady_ = false;
+        uint64_t previewVersion_ = 0;
+
+        // Audio forwarding callback (set by GUI, called by recorder thread)
+        std::mutex audioMutex_;
+        AudioDataCallback audioDataCb_;
 
         // Proxy pool for round-robin proxy selection
         ProxyPool proxyPool_;

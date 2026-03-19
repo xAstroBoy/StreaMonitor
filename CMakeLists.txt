@@ -275,6 +275,11 @@ else()
     )
 endif()
 
+# Include paths for GUI-only dependencies (miniaudio)
+target_include_directories(StreaMonitor PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/miniaudio
+)
+
 # Platform-specific libraries
 if(WIN32)
     target_link_libraries(StreaMonitor PRIVATE winhttp dwmapi)
