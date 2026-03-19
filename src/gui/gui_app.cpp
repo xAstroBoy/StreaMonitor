@@ -1983,8 +1983,8 @@ namespace sm
             return;
 
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("##Chk", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_NoReorder, 30.0f * s);
-        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_NoHide, 95.0f * s);
+        ImGui::TableSetupColumn("##Chk", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_NoReorder, 28.0f * s);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_NoHide, 110.0f * s);
         ImGui::TableSetupColumn("Username", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_NoHide, 3.5f);
         ImGui::TableSetupColumn("Sites", 0, 2.0f);
         ImGui::TableSetupColumn("Group", 0, 2.0f);
@@ -2000,12 +2000,11 @@ namespace sm
         // Checkbox header — select/deselect all
         ImGui::TableSetColumnIndex(0);
         {
-            // Center checkbox in header column
+            // Center checkbox using absolute position in column
             float colW = ImGui::GetColumnWidth();
             float cbW = ImGui::GetFrameHeight();
             float pad = (colW - cbW) * 0.5f;
-            if (pad > 0.0f)
-                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
+            ImGui::SetCursorPosX(pad > 0.0f ? pad : 0.0f);
 
             bool allSelected = !visibleRows.empty();
             bool anySelected = false;
@@ -2131,12 +2130,11 @@ namespace sm
             // ── Checkbox ────────────────────────────────────────────
             ImGui::TableNextColumn();
             {
-                // Center checkbox in the fixed-width column
+                // Center checkbox using absolute position in column
                 float colW = ImGui::GetColumnWidth();
                 float cbW = ImGui::GetFrameHeight(); // checkbox is square
                 float pad = (colW - cbW) * 0.5f;
-                if (pad > 0.0f)
-                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
+                ImGui::SetCursorPosX(pad > 0.0f ? pad : 0.0f);
                 bool checked = selectedRows_.count(grp.key) > 0;
                 if (ImGui::Checkbox("##sel", &checked))
                 {
@@ -2689,12 +2687,12 @@ namespace sm
                     // Checkbox for sub-row
                     ImGui::TableNextColumn();
                     {
-                        // Center checkbox in the fixed-width column
+                        // Center checkbox using absolute position (ignore tree indent)
                         float colW = ImGui::GetColumnWidth();
                         float cbW = ImGui::GetFrameHeight();
+                        float colStart = ImGui::GetCursorScreenPos().x - ImGui::GetCursorPosX();
                         float pad = (colW - cbW) * 0.5f;
-                        if (pad > 0.0f)
-                            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
+                        ImGui::SetCursorPosX(pad > 0.0f ? pad : 0.0f);
                         std::string subKey = b.username + "\t" + b.siteName;
                         std::transform(subKey.begin(), subKey.end(), subKey.begin(), ::tolower);
                         bool subChecked = selectedRows_.count(subKey) > 0;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(StreaMonitor VERSION 2.1.1 LANGUAGES CXX C)
+project(StreaMonitor VERSION 2.1.7 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -133,6 +133,9 @@ FetchContent_Declare(httplib
 set(HTTPLIB_COMPILE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(httplib)
 
+# IXWebSocket (WebSocket server for real-time preview streaming)
+find_package(ixwebsocket CONFIG REQUIRED)
+
 # ImGui + GLFW + OpenGL backend
 include(FetchContent)
 
@@ -197,6 +200,7 @@ target_link_libraries(sm_engine PUBLIC
     nlohmann_json::nlohmann_json
     spdlog::spdlog
     httplib::httplib
+    ixwebsocket::ixwebsocket
     Threads::Threads
 )
 

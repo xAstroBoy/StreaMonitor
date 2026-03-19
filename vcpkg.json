@@ -34,6 +34,12 @@
                 "x265",
                 "gpl"
             ]
+        },
+        {
+            "name": "ixwebsocket",
+            "features": [
+                "ssl"
+            ]
         }
     ]
 }

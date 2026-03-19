@@ -3,11 +3,13 @@
 // ─────────────────────────────────────────────────────────────────
 // StreaMonitor C++ — Embedded Web Server
 // REST API + static file serving for Next.js dashboard
+// WebSocket server for real-time preview streaming (unlimited concurrent streams)
 // Listens on all interfaces for WiFi intranet access
 // ─────────────────────────────────────────────────────────────────
 
 #include "core/bot_manager.h"
 #include "config/config.h"
+#include "web/ws_preview_server.h"
 #include <spdlog/sinks/ringbuffer_sink.h>
 #include <string>
 #include <thread>
@@ -46,6 +48,9 @@ namespace sm
         std::string getUrl() const;
         std::string getLocalUrl() const;
         std::string getNetworkUrl() const;
+
+        // WebSocket port for preview streaming
+        int getWsPort() const;
 
         // Attach a ring buffer sink for /api/logs
         void setLogRingBuffer(std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> sink) { logRingBuffer_ = std::move(sink); }
@@ -87,6 +92,7 @@ namespace sm
         ModelConfigStore &configStore_;
         std::unique_ptr<httplib::Server> server_;
         std::unique_ptr<std::thread> serverThread_;
+        std::unique_ptr<WsPreviewServer> wsServer_;
         std::atomic<bool> running_{false};
         std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> logRingBuffer_;
     };

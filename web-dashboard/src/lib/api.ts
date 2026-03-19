@@ -48,6 +48,7 @@ export interface ServerStatus {
   totalModels: number
   onlineModels: number
   recordingModels: number
+  wsPort: number
   disk: {
     totalBytes: number
     freeBytes: number
@@ -127,13 +128,19 @@ export function setAuthToken(token: string | null) {
 }
 
 export function getAuthToken(): string | null {
-  if (!authToken && typeof window !== 'undefined') {
-    authToken = localStorage.getItem('sm_token')
+  // Always try localStorage first on client (in case page was refreshed)
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('sm_token')
+    if (stored) {
+      authToken = stored  // Sync in-memory with localStorage
+    }
   }
   return authToken
 }
 
 export function isAuthenticated(): boolean {
+  // On server-side rendering, assume not authenticated
+  if (typeof window === 'undefined') return false
   return !!getAuthToken()
 }
 
@@ -285,6 +292,165 @@ export function getPreviewUrl(username: string, siteSlug: string): string {
 export function getStreamUrl(username: string, siteSlug: string): string {
   return `${API_BASE.replace('/api', '')}/api/stream/${encodeURIComponent(username)}/${encodeURIComponent(siteSlug)}`
 }
+
+// ── WebSocket Preview Manager ─────────────────────────────────────
+// Multiplexes all preview streams over a single WebSocket connection
+// to bypass browser's 6-connection HTTP/1.1 limit. Unlimited live previews!
+
+type FrameCallback = (jpeg: Blob) => void
+
+class PreviewWebSocket {
+  private ws: WebSocket | null = null
+  private wsPort: number | null = null
+  private subscriptions = new Map<string, Set<FrameCallback>>()
+  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null
+  private connecting = false
+
+  private makeKey(username: string, site: string): string {
+    return `${username}:${site}`
+  }
+
+  async connect(wsPort: number): Promise<void> {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.wsPort === wsPort) {
+      return // Already connected
+    }
+
+    if (this.connecting) return
+    this.connecting = true
+    this.wsPort = wsPort
+
+    return new Promise((resolve, reject) => {
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsUrl = `${wsProtocol}//${window.location.hostname}:${wsPort}`
+
+      this.ws = new WebSocket(wsUrl)
+      this.ws.binaryType = 'arraybuffer'
+
+      this.ws.onopen = () => {
+        this.connecting = false
+        console.log('[WS] Connected to preview server')
+
+        // Re-subscribe to all existing subscriptions
+        for (const key of this.subscriptions.keys()) {
+          const [username, site] = key.split(':')
+          this.sendSubscribe(username, site)
+        }
+        resolve()
+      }
+
+      this.ws.onclose = () => {
+        this.connecting = false
+        console.log('[WS] Disconnected, will reconnect...')
+        this.scheduleReconnect()
+      }
+
+      this.ws.onerror = (err) => {
+        this.connecting = false
+        console.error('[WS] Error:', err)
+        reject(err)
+      }
+
+      this.ws.onmessage = (event) => {
+        this.handleMessage(event.data)
+      }
+    })
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimeout) return
+    this.reconnectTimeout = setTimeout(() => {
+      this.reconnectTimeout = null
+      if (this.wsPort && this.subscriptions.size > 0) {
+        this.connect(this.wsPort).catch(() => {})
+      }
+    }, 2000)
+  }
+
+  private handleMessage(data: ArrayBuffer | string): void {
+    if (typeof data === 'string') {
+      // JSON message (ack, etc.)
+      return
+    }
+
+    // Binary frame: 1 byte type + 2 bytes username len + username + 2 bytes site len + site + jpeg
+    const view = new DataView(data)
+    const type = view.getUint8(0)
+    if (type !== 0x01) return // Not a frame
+
+    let offset = 1
+    const usernameLen = view.getUint16(offset)
+    offset += 2
+    const username = new TextDecoder().decode(new Uint8Array(data, offset, usernameLen))
+    offset += usernameLen
+
+    const siteLen = view.getUint16(offset)
+    offset += 2
+    const site = new TextDecoder().decode(new Uint8Array(data, offset, siteLen))
+    offset += siteLen
+
+    const jpeg = new Blob([new Uint8Array(data, offset)], { type: 'image/jpeg' })
+
+    // Dispatch to subscribers
+    const key = this.makeKey(username, site)
+    const callbacks = this.subscriptions.get(key)
+    if (callbacks) {
+      for (const cb of callbacks) {
+        cb(jpeg)
+      }
+    }
+  }
+
+  private sendSubscribe(username: string, site: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ cmd: 'subscribe', username, site }))
+    }
+  }
+
+  private sendUnsubscribe(username: string, site: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ cmd: 'unsubscribe', username, site }))
+    }
+  }
+
+  subscribe(username: string, site: string, callback: FrameCallback): () => void {
+    const key = this.makeKey(username, site)
+
+    let callbacks = this.subscriptions.get(key)
+    if (!callbacks) {
+      callbacks = new Set()
+      this.subscriptions.set(key, callbacks)
+      this.sendSubscribe(username, site)
+    }
+    callbacks.add(callback)
+
+    // Return unsubscribe function
+    return () => {
+      const cbs = this.subscriptions.get(key)
+      if (cbs) {
+        cbs.delete(callback)
+        if (cbs.size === 0) {
+          this.subscriptions.delete(key)
+          this.sendUnsubscribe(username, site)
+        }
+      }
+    }
+  }
+
+  disconnect(): void {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout)
+      this.reconnectTimeout = null
+    }
+    if (this.ws) {
+      this.ws.close()
+      this.ws = null
+    }
+    this.subscriptions.clear()
+  }
+}
+
+// Singleton instance
+export const previewWs = new PreviewWebSocket()
 
 // ── Helpers ───────────────────────────────────────────────────────
 export function formatBytes(bytes: number): string {

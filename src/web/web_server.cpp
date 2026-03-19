@@ -57,12 +57,26 @@ namespace sm
         setupRoutes();
         setupStaticFiles();
 
+        // Start WebSocket server for preview streaming (port + 1)
+        int wsPort = config_.webPort + 1;
+        wsServer_ = std::make_unique<WsPreviewServer>(manager_, wsPort);
+        if (!wsServer_->start())
+        {
+            spdlog::error("WebSocket preview server failed to start on port {}", wsPort);
+            // Continue anyway — HTTP preview still works
+        }
+        else
+        {
+            spdlog::info("WebSocket preview server started on port {}", wsPort);
+        }
+
         serverThread_ = std::make_unique<std::thread>([this]()
                                                       {
             running_.store(true);
             spdlog::info("Web server starting on {}:{}", config_.webHost, config_.webPort);
             spdlog::info("  Local:   {}", getLocalUrl());
             spdlog::info("  Network: {}", getNetworkUrl());
+            spdlog::info("  WS Port: {}", getWsPort());
 
             if (!server_->listen(config_.webHost, config_.webPort)) {
                 spdlog::error("Web server failed to start on {}:{}", config_.webHost, config_.webPort);
@@ -78,6 +92,14 @@ namespace sm
     {
         if (!running_.load())
             return;
+
+        // Stop WebSocket server first
+        if (wsServer_)
+        {
+            wsServer_->stop();
+            wsServer_.reset();
+        }
+
         server_->stop();
         if (serverThread_ && serverThread_->joinable())
             serverThread_->join();
@@ -88,6 +110,11 @@ namespace sm
     bool WebServer::isRunning() const
     {
         return running_.load();
+    }
+
+    int WebServer::getWsPort() const
+    {
+        return wsServer_ ? wsServer_->getPort() : (config_.webPort + 1);
     }
 
     std::string WebServer::getUrl() const
@@ -462,6 +489,7 @@ namespace sm
                 {"totalModels", states.size()},
                 {"onlineModels", online},
                 {"recordingModels", recording},
+                {"wsPort", getWsPort()},
                 {"disk", {
                     {"totalBytes", disk.totalBytes},
                     {"freeBytes", disk.freeBytes},
@@ -988,27 +1016,32 @@ namespace sm
 
     // ─────────────────────────────────────────────────────────────────
     // Get local network IP address (for WiFi intranet display)
+    // Prefers interfaces WITH a default gateway (routable IPs)
     // ─────────────────────────────────────────────────────────────────
     std::string WebServer::getLocalIP() const
     {
 #ifdef _WIN32
-        // Windows: Use GetAdaptersAddresses
+        // Windows: Use GetAdaptersAddresses — prefer interfaces with gateway
         ULONG bufLen = 15000;
         std::vector<BYTE> buf(bufLen);
         auto pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
 
-        DWORD ret = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+        DWORD ret = GetAdaptersAddresses(AF_INET,
+                                         GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_INCLUDE_GATEWAYS,
                                          nullptr, pAddresses, &bufLen);
         if (ret == ERROR_BUFFER_OVERFLOW)
         {
             buf.resize(bufLen);
             pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
-            ret = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+            ret = GetAdaptersAddresses(AF_INET,
+                                       GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_INCLUDE_GATEWAYS,
                                        nullptr, pAddresses, &bufLen);
         }
 
         if (ret == NO_ERROR)
         {
+            std::string fallbackIp; // IP without gateway as fallback
+
             for (auto adapter = pAddresses; adapter; adapter = adapter->Next)
             {
                 if (adapter->OperStatus != IfOperStatusUp)
@@ -1016,19 +1049,42 @@ namespace sm
                 if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
                     continue;
 
+                // Check if this adapter has a default gateway
+                bool hasGateway = false;
+                for (auto gw = adapter->FirstGatewayAddress; gw; gw = gw->Next)
+                {
+                    auto gwSa = reinterpret_cast<sockaddr_in *>(gw->Address.lpSockaddr);
+                    if (gwSa->sin_addr.s_addr != 0) // Non-zero gateway = has route
+                    {
+                        hasGateway = true;
+                        break;
+                    }
+                }
+
                 for (auto unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next)
                 {
                     auto sa = reinterpret_cast<sockaddr_in *>(unicast->Address.lpSockaddr);
                     char ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
                     std::string ipStr(ip);
+
                     // Skip loopback and link-local
-                    if (ipStr != "127.0.0.1" && ipStr.substr(0, 4) != "169.")
-                    {
+                    if (ipStr == "127.0.0.1" || ipStr.substr(0, 4) == "169.")
+                        continue;
+
+                    // Prefer interfaces with gateway (routable to internet/LAN)
+                    if (hasGateway)
                         return ipStr;
-                    }
+
+                    // Store first valid IP as fallback
+                    if (fallbackIp.empty())
+                        fallbackIp = ipStr;
                 }
             }
+
+            // No interface with gateway found — use fallback
+            if (!fallbackIp.empty())
+                return fallbackIp;
         }
 #else
         struct ifaddrs *ifaddr;

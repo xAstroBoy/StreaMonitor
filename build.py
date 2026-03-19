@@ -177,10 +177,21 @@ def configure(args, vcpkg: Path | None):
         # Use static-md for static deps with dynamic CRT (more compatible)
         cmake_args.append("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     
-    # macOS-specific: use Ninja if available for faster builds
-    if IS_MACOS or IS_LINUX:
-        if shutil.which("ninja"):
-            cmake_args.extend(["-G", "Ninja"])
+    # Use Ninja if available for faster builds (much faster than MSBuild/Make)
+    # On Windows, only use Ninja if running from Developer Command Prompt (has cl.exe)
+    use_ninja = False
+    if shutil.which("ninja"):
+        if IS_WINDOWS:
+            # Check if cl.exe is in PATH (Developer Command Prompt)
+            if shutil.which("cl"):
+                use_ninja = True
+                print(f"[+] Using Ninja generator for faster builds")
+        else:
+            use_ninja = True
+            print(f"[+] Using Ninja generator for faster builds")
+    
+    if use_ninja:
+        cmake_args.extend(["-G", "Ninja"])
 
     run(cmake_args)
 
@@ -188,6 +199,8 @@ def configure(args, vcpkg: Path | None):
 def build(args):
     config = "Debug" if args.debug else "Release"
     cpus = os.cpu_count() or 4
+
+    print(f"\n[+] Building with {cpus} parallel jobs...")
 
     run([
         "cmake", "--build", str(BUILD_DIR),

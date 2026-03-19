@@ -150,6 +150,7 @@ namespace sm
         std::vector<uint8_t> pixels; // RGBA, 4 bytes per pixel
         int width = 0;
         int height = 0;
+        uint64_t version = 0; // Incremented on each frame update
 
         bool empty() const { return pixels.empty() || width <= 0 || height <= 0; }
         void clear()
