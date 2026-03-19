@@ -8,7 +8,7 @@ import {
   startAll, stopAll, saveConfig, updateConfig, checkAuth, logout, isAuthenticated,
   createGroup, deleteGroup, startGroup, stopGroup, addGroupMember, removeGroupMember,
   updateCredentials,
-  formatBytes, formatDuration, getStatusColor, getPreviewUrl,
+  formatBytes, formatDuration, getStatusColor, getPreviewUrl, getStreamUrl,
   type BotState, type ServerStatus, type SiteInfo, type DiskUsage, type GroupInfo, type AppConfig,
 } from '@/lib/api'
 
@@ -61,21 +61,30 @@ function statusBadge(bot: BotState): { label: string; color: string } {
   }
 }
 
-// Preview Thumbnail
-function PreviewThumb({ username, siteSlug, large }: { username: string; siteSlug: string; large?: boolean }) {
-  const [ts, setTs] = useState(Date.now())
+// Preview Thumbnail — MJPEG stream for recording models, single BMP for others
+function PreviewThumb({ username, siteSlug, large, isRecording }: {
+  username: string; siteSlug: string; large?: boolean; isRecording?: boolean
+}) {
   const [errored, setErrored] = useState(false)
-  const interval = large ? 5000 : 30000
+  const [retryKey, setRetryKey] = useState(0)
 
+  // If recording, use MJPEG stream URL (true live video, no intervals).
+  // Otherwise use a single preview snapshot.
+  const src = isRecording
+    ? getStreamUrl(username, siteSlug)
+    : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
+
+  // Retry on error after a delay
   useEffect(() => {
-    const iv = setInterval(() => { setTs(Date.now()); setErrored(false) }, interval)
-    return () => clearInterval(iv)
-  }, [interval])
+    if (!errored) return
+    const t = setTimeout(() => { setErrored(false); setRetryKey(k => k + 1) }, 5000)
+    return () => clearTimeout(t)
+  }, [errored])
 
   if (errored) {
     return (
-      <div className={large ? 'preview-large flex items-center justify-center text-zinc-700' : 'preview-thumb flex items-center justify-center text-zinc-700 text-xs'}>
-        <svg className={large ? 'w-12 h-12 opacity-20' : 'w-5 h-5 opacity-20'} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <div className={large ? 'preview-large flex items-center justify-center text-zinc-700' : 'preview-card-img flex items-center justify-center text-zinc-700 text-xs'}>
+        <svg className={large ? 'w-12 h-12 opacity-20' : 'w-10 h-10 opacity-20'} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.41a2.25 2.25 0 013.182 0l2.909 2.91m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
         </svg>
       </div>
@@ -85,26 +94,21 @@ function PreviewThumb({ username, siteSlug, large }: { username: string; siteSlu
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={`${getPreviewUrl(username, siteSlug)}?t=${ts}`}
+      key={retryKey}
+      src={src}
       alt=""
-      className={large ? 'preview-large' : 'preview-thumb'}
+      className={large ? 'preview-large' : 'preview-card-img'}
       onError={() => setErrored(true)}
       loading="lazy"
     />
   )
 }
 
-// Live Stream Viewer — auto-refreshing FFmpeg preview frames
+// Live Stream Viewer — MJPEG video player (no intervals, true live video)
 function LiveStreamViewer({ username, siteSlug, onClose }: {
   username: string; siteSlug: string; onClose: () => void
 }) {
-  const [ts, setTs] = useState(Date.now())
-  const [errCount, setErrCount] = useState(0)
-
-  useEffect(() => {
-    const iv = setInterval(() => { setTs(Date.now()); setErrCount(0) }, 2000)
-    return () => clearInterval(iv)
-  }, [])
+  const [errored, setErrored] = useState(false)
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center animate-fade-in" onClick={onClose}>
@@ -115,13 +119,13 @@ function LiveStreamViewer({ username, siteSlug, onClose }: {
           <Ico d={ic.x} cls="w-6 h-6" />
         </button>
         <div className="relative bg-black rounded-xl overflow-hidden shadow-2xl border border-[var(--border)]">
-          {errCount < 5 ? (
+          {!errored ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={`${getPreviewUrl(username, siteSlug)}?t=${ts}`}
+              src={getStreamUrl(username, siteSlug)}
               alt="Live stream"
               className="w-full aspect-video object-contain bg-black"
-              onError={() => setErrCount(c => c + 1)}
+              onError={() => setErrored(true)}
             />
           ) : (
             <div className="w-full aspect-video flex items-center justify-center text-zinc-600">
@@ -168,7 +172,7 @@ function ModelDetailModal({ bot, onClose, onAction }: {
           </button>
 
           <div className="p-4 pb-0">
-            <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large />
+            <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large isRecording={bot.recording} />
           </div>
 
           <div className="p-5 space-y-4">
@@ -271,11 +275,12 @@ function ModelDetailModal({ bot, onClose, onAction }: {
   )
 }
 
-// Model Row
-function ModelRow({ bot, groups, onClick, onStart, onStop }: {
+// Model Card — Stripchat-style grid card with preview thumbnail
+function ModelCard({ bot, groups, selected, onClick, onStart, onStop }: {
   bot: BotState
   groups: GroupInfo[]
-  onClick: () => void
+  selected: boolean
+  onClick: (e: React.MouseEvent) => void
   onStart: () => void
   onStop: () => void
 }) {
@@ -284,47 +289,71 @@ function ModelRow({ bot, groups, onClick, onStart, onStop }: {
   )?.name || ''
 
   const badge = statusBadge(bot)
-  const cardCls = bot.recording ? 'recording' : (bot.status === 'Public' || bot.status === 'Online') ? 'online' : ''
+  const isLive = bot.status === 'Public' || bot.status === 'Online'
+  const cardCls = [
+    'grid-card',
+    bot.recording ? 'recording' : isLive ? 'online' : '',
+    selected ? 'selected' : '',
+  ].filter(Boolean).join(' ')
 
   return (
-    <div className={`model-card ${cardCls} rounded-xl flex items-center gap-3 px-4 py-3 mb-2`}
-         onClick={onClick}>
-      <div className={`status-dot ${statusDotClass(bot)}`} />
+    <div className={cardCls} onClick={onClick}>
+      {/* Preview Image — MJPEG stream for recording, single frame otherwise */}
+      <div className="grid-card-preview">
+        <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} isRecording={bot.recording} />
 
-      <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} />
+        {/* Status overlay top-left */}
+        {bot.recording && (
+          <div className="absolute top-2 left-2 flex items-center gap-1 bg-red-600/90 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">
+            <span className="w-1.5 h-1.5 bg-white rounded-full animate-recording" /> REC
+          </div>
+        )}
+        {!bot.recording && isLive && (
+          <div className="absolute top-2 left-2 flex items-center gap-1 bg-emerald-600/90 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">
+            <span className="w-1.5 h-1.5 bg-white rounded-full" /> LIVE
+          </div>
+        )}
 
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="font-semibold text-sm truncate">{bot.username}</span>
-          {bot.mobile && <span className="badge bg-blue-500/15 text-blue-400">\ud83d\udcf1</span>}
-          {groupName && <span className="badge bg-yellow-500/10 text-yellow-500">{groupName}</span>}
+        {/* Quick action overlay top-right */}
+        <div className="grid-card-actions" onClick={e => e.stopPropagation()}>
+          {bot.running ? (
+            <button onClick={onStop} title="Stop" className="grid-card-action-btn">
+              <Ico d={ic.stop} />
+            </button>
+          ) : (
+            <button onClick={onStart} title="Start" className="grid-card-action-btn text-emerald-400">
+              <Ico d={ic.play} />
+            </button>
+          )}
         </div>
-        <div className="text-xs text-[var(--text-secondary)] mt-0.5">{bot.site} [{bot.siteSlug}]</div>
-      </div>
 
-      <span className={`badge-status ${badge.color} hidden sm:inline-flex text-xs`}>{badge.label}</span>
+        {/* Recording stats overlay bottom-right */}
+        {bot.recording && bot.recording_stats && (
+          <div className="absolute bottom-8 right-2 text-[10px] text-white/80 bg-black/60 px-1.5 py-0.5 rounded font-mono">
+            {formatBytes(bot.recording_stats.bytesWritten)}
+          </div>
+        )}
 
-      <div className="hidden md:flex items-center gap-3 text-xs text-[var(--text-secondary)] w-36 justify-end">
-        {bot.recording && bot.recording_stats ? (
-          <span className="text-red-400 font-semibold">{formatBytes(bot.recording_stats.bytesWritten)}</span>
-        ) : bot.totalBytes > 0 ? (
-          <span>{formatBytes(bot.totalBytes)}</span>
-        ) : null}
-        {bot.running && bot.uptimeSeconds > 0 && (
-          <span className="text-[var(--text-dim)]">{formatDuration(bot.uptimeSeconds)}</span>
+        {/* Selection indicator */}
+        {selected && (
+          <div className="absolute top-2 right-2 w-5 h-5 bg-[var(--accent)] rounded-full flex items-center justify-center z-10">
+            <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
         )}
       </div>
 
-      <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-        {bot.running ? (
-          <button onClick={onStop} title="Stop" className="btn btn-icon btn-sm btn-warning">
-            <Ico d={ic.stop} />
-          </button>
-        ) : (
-          <button onClick={onStart} title="Start" className="btn btn-icon btn-sm btn-success">
-            <Ico d={ic.play} />
-          </button>
-        )}
+      {/* Info bar at bottom — status text + username + site */}
+      <div className="grid-card-info">
+        <div className="flex items-center gap-1.5 min-w-0 flex-1">
+          <span className={`badge-status ${badge.color} text-[10px] py-0 px-1.5`}>{badge.label}</span>
+          <span className="font-semibold text-sm truncate">{bot.username}</span>
+        </div>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {groupName && <span className="text-[10px] bg-yellow-500/10 text-yellow-500 px-1.5 py-0.5 rounded truncate max-w-[60px]">{groupName}</span>}
+          <span className="text-[10px] text-[var(--text-dim)]">{bot.siteSlug}</span>
+        </div>
       </div>
     </div>
   )
@@ -724,6 +753,7 @@ export default function Dashboard() {
   const [search, setSearch] = useState('')
   const [showAdd, setShowAdd] = useState(false)
   const [selectedBot, setSelectedBot] = useState<BotState | null>(null)
+  const [selectedCards, setSelectedCards] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const [connected, setConnected] = useState(true)
   const [authChecked, setAuthChecked] = useState(false)
@@ -893,6 +923,36 @@ export default function Dashboard() {
               </button>
             </div>
 
+            {/* Bulk action bar when multiple cards selected */}
+            {selectedCards.size > 1 && (
+              <div className="flex items-center gap-2 px-4 sm:px-5 py-2 border-b border-[var(--accent)]/30 bg-[var(--accent-soft)] flex-shrink-0 animate-fade-in">
+                <span className="text-sm font-medium text-[var(--accent)]">{selectedCards.size} selected</span>
+                <button onClick={() => {
+                  selectedCards.forEach(key => {
+                    const [u, s] = key.split('_')
+                    handleAction(() => startModel(u, s))
+                  })
+                }} className="btn btn-sm btn-success">Start Selected</button>
+                <button onClick={() => {
+                  selectedCards.forEach(key => {
+                    const [u, s] = key.split('_')
+                    handleAction(() => stopModel(u, s))
+                  })
+                }} className="btn btn-sm btn-warning">Stop Selected</button>
+                <button onClick={() => {
+                  if (!confirm(`Remove ${selectedCards.size} models?`)) return
+                  selectedCards.forEach(key => {
+                    const [u, s] = key.split('_')
+                    handleAction(() => removeModel(u, s))
+                  })
+                  setSelectedCards(new Set())
+                }} className="btn btn-sm btn-danger">Remove Selected</button>
+                <button onClick={() => setSelectedCards(new Set())} className="btn btn-sm btn-ghost ml-auto">
+                  Clear Selection
+                </button>
+              </div>
+            )}
+
             <div className="flex-1 overflow-y-auto p-3 sm:p-4">
               {filteredModels.length === 0 ? (
                 <div className="text-center py-20 text-[var(--text-dim)]">
@@ -906,16 +966,38 @@ export default function Dashboard() {
                     <div className="text-sm">No models match the current filter</div>
                   )}
                 </div>
-              ) : filteredModels.map(bot => (
-                <ModelRow
-                  key={`${bot.username}_${bot.siteSlug}`}
-                  bot={bot}
-                  groups={groups}
-                  onClick={() => setSelectedBot(bot)}
-                  onStart={() => handleAction(() => startModel(bot.username, bot.siteSlug))}
-                  onStop={() => handleAction(() => stopModel(bot.username, bot.siteSlug))}
-                />
-              ))}
+              ) : (
+                <div className="model-grid">
+                  {filteredModels.map(bot => {
+                    const cardKey = `${bot.username}_${bot.siteSlug}`
+                    return (
+                      <ModelCard
+                        key={cardKey}
+                        bot={bot}
+                        groups={groups}
+                        selected={selectedCards.has(cardKey)}
+                        onClick={(e: React.MouseEvent) => {
+                          if (e.ctrlKey || e.metaKey) {
+                            // Ctrl+click: toggle this card in selection
+                            setSelectedCards(prev => {
+                              const next = new Set(prev)
+                              if (next.has(cardKey)) next.delete(cardKey)
+                              else next.add(cardKey)
+                              return next
+                            })
+                          } else {
+                            // Plain click: select only this one, open detail
+                            setSelectedCards(new Set([cardKey]))
+                            setSelectedBot(bot)
+                          }
+                        }}
+                        onStart={() => handleAction(() => startModel(bot.username, bot.siteSlug))}
+                        onStop={() => handleAction(() => stopModel(bot.username, bot.siteSlug))}
+                      />
+                    )
+                  })}
+                </div>
+              )}
             </div>
           </>
         )}

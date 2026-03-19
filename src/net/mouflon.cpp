@@ -78,6 +78,27 @@ namespace sm
         initialized_ = true;
     }
 
+    void MouflonKeys::reinitialize(HttpClient &http)
+    {
+        std::lock_guard lock(mutex_);
+        initialized_ = false;
+
+        spdlog::info("[Mouflon] Re-initializing key extraction...");
+
+        if (fetchDoppioJs(http))
+        {
+            parseKeys();
+            saveToCache();
+            spdlog::info("[Mouflon] Keys re-extracted successfully ({} keys)", keys_.size());
+        }
+        else
+        {
+            spdlog::warn("[Mouflon] Re-fetch failed — keeping existing keys ({} keys)", keys_.size());
+        }
+
+        initialized_ = true;
+    }
+
     bool MouflonKeys::hasKeys() const
     {
         std::lock_guard lock(mutex_);
@@ -88,6 +109,26 @@ namespace sm
     {
         std::lock_guard lock(mutex_);
         return keys_;
+    }
+
+    void MouflonKeys::addKey(const std::string &pkey, const std::string &pdkey)
+    {
+        std::lock_guard lock(mutex_);
+        keys_[pkey] = pdkey;
+        saveToCache();
+        spdlog::info("[Mouflon] Added key: {} → {} ({} keys total)", pkey, pdkey, keys_.size());
+    }
+
+    void MouflonKeys::removeKey(const std::string &pkey)
+    {
+        std::lock_guard lock(mutex_);
+        auto it = keys_.find(pkey);
+        if (it != keys_.end())
+        {
+            keys_.erase(it);
+            saveToCache();
+            spdlog::info("[Mouflon] Removed key: {} ({} keys remaining)", pkey, keys_.size());
+        }
     }
 
     std::optional<std::string> MouflonKeys::getDecKey(const std::string &pkey) const

@@ -280,6 +280,10 @@ export function getPreviewUrl(username: string, siteSlug: string): string {
   return `${API_BASE.replace('/api', '')}/api/preview/${encodeURIComponent(username)}/${encodeURIComponent(siteSlug)}`
 }
 
+export function getStreamUrl(username: string, siteSlug: string): string {
+  return `${API_BASE.replace('/api', '')}/api/stream/${encodeURIComponent(username)}/${encodeURIComponent(siteSlug)}`
+}
+
 // ── Helpers ───────────────────────────────────────────────────────
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B'

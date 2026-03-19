@@ -130,6 +130,15 @@ namespace sm
         // Settings tab
         int settingsTab_ = 0;
 
+        // Settings tab visibility (hideable tabs)
+        bool showTabGeneral_ = true;
+        bool showTabRecording_ = true;
+        bool showTabFFmpeg_ = true;
+        bool showTabNetwork_ = true;
+        bool showTabWebServer_ = true;
+        bool showTabSites_ = true;
+        bool showTabAdvanced_ = true;
+
         // Add model dialog state
         char addUsername_[256] = {};
         char addUrlInput_[512] = {}; // URL paste input
@@ -206,6 +215,13 @@ namespace sm
         std::deque<LogEntry> logEntries_;
         static constexpr size_t kMaxLogEntries = 10000;
 
+        // Log panel filters (toggle per level, source search)
+        bool logShowDebug_ = false; // verbose off by default
+        bool logShowInfo_ = true;
+        bool logShowWarn_ = true;
+        bool logShowError_ = true;
+        char logSourceFilter_[128] = {}; // filter by source/bot name
+
         // Settings edit state (mirrors AppConfig for editing)
         char editDownloadDir_[512] = {};
         int editResolution_ = 99999;
@@ -272,8 +288,8 @@ namespace sm
         char editWebNewPassword_[128] = {};
 
         // ── Adaptive frame rate (CPU idle optimization) ─────────────
-        double lastInputTime_ = 0.0;       // glfwGetTime() of last user input
-        std::atomic<bool> guiDirty_{true}; // set by bot threads to wake GUI
+        double lastInputTime_ = 0.0;            // glfwGetTime() of last user input
+        std::atomic<bool> guiDirty_{true};      // set by bot threads to wake GUI
         std::atomic<bool> shuttingDown_{false}; // set when close requested, prevents glfwPostEmptyEvent after teardown
         static void glfwCursorPosCallback(GLFWwindow *w, double, double);
         static void glfwMouseButtonCallback(GLFWwindow *w, int, int, int);

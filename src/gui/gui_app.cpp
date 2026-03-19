@@ -6,6 +6,7 @@
 
 #include "gui/gui_app.h"
 #include "net/proxy_pool.h"
+#include "net/mouflon.h"
 #include "web/web_server.h"
 
 #include <imgui.h>
@@ -744,8 +745,7 @@ namespace sm
                                        auto *self = static_cast<GuiApp *>(glfwGetWindowUserPointer(w));
                                        if (self)
                                            self->shuttingDown_.store(true);
-                                       glfwSetWindowShouldClose(w, GLFW_TRUE);
-                                   });
+                                       glfwSetWindowShouldClose(w, GLFW_TRUE); });
 
         // ── GLFW iconify callback (minimize interception) ───────────
         glfwSetWindowIconifyCallback(window_, [](GLFWwindow *w, int iconified)
@@ -1922,17 +1922,16 @@ namespace sm
                                      ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp |
                                      ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate;
 
-        if (!ImGui::BeginTable("##Models", 11, tableFlags))
+        if (!ImGui::BeginTable("##Models", 10, tableFlags))
             return;
 
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("##Chk", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort, 28.0f * s);
-        ImGui::TableSetupColumn("##Icon", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort, 55.0f * s);
+        ImGui::TableSetupColumn("##Chk", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort, 30.0f * s);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize | ImGuiTableColumnFlags_NoSort, 95.0f * s);
         ImGui::TableSetupColumn("Username", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_NoHide, 3.5f);
         ImGui::TableSetupColumn("Sites", 0, 2.0f);
         ImGui::TableSetupColumn("Group", 0, 2.0f);
         ImGui::TableSetupColumn("URL", 0, 4.0f);
-        ImGui::TableSetupColumn("Status", 0, 1.5f);
         ImGui::TableSetupColumn("Recording", 0, 1.0f);
         ImGui::TableSetupColumn("Size", 0, 1.2f);
         ImGui::TableSetupColumn("Speed", 0, 1.0f);
@@ -1973,7 +1972,7 @@ namespace sm
             }
         }
         // Rest of headers
-        for (int col = 1; col < 11; col++)
+        for (int col = 1; col < 10; col++)
         {
             ImGui::TableSetColumnIndex(col);
             ImGui::TableHeader(ImGui::TableGetColumnName(col));
@@ -2014,21 +2013,18 @@ namespace sm
                               case 5: // URL
                                   cmp = a->primaryUrl.compare(b->primaryUrl);
                                   break;
-                              case 6: // Status
-                                  cmp = statusPrio(a->bestStatus) - statusPrio(b->bestStatus);
-                                  break;
-                              case 7: // Recording
+                              case 6: // Recording
                                   cmp = (int)a->anyRecording - (int)b->anyRecording;
                                   break;
-                              case 8: // Size
+                              case 7: // Size
                                   cmp = (a->combinedSize < b->combinedSize) ? -1 : (a->combinedSize > b->combinedSize) ? 1
                                                                                                                        : 0;
                                   break;
-                              case 9: // Speed
+                              case 8: // Speed
                                   cmp = (a->maxSpeed < b->maxSpeed) ? -1 : (a->maxSpeed > b->maxSpeed) ? 1
                                                                                                        : 0;
                                   break;
-                              case 10: // Uptime
+                              case 9: // Uptime
                                   cmp = (a->earliestStart < b->earliestStart) ? -1 : (a->earliestStart > b->earliestStart) ? 1
                                                                                                                            : 0;
                                   break;
@@ -2072,7 +2068,7 @@ namespace sm
                 }
             }
 
-            // ── Icon ────────────────────────────────────────────────
+            // ── Status (readable text) ──────────────────────────────
             ImGui::TableNextColumn();
             {
                 ImVec4 col = statusColor(grp.bestStatus);
@@ -2081,20 +2077,19 @@ namespace sm
                     float pulse = (std::sin(animTime_ * 4.0f) + 1.0f) * 0.5f;
                     col = {1.0f, 0.1f + pulse * 0.3f, 0.1f + pulse * 0.1f, 1.0f};
                 }
-                ImGui::TextColored(col, "%s", statusIcon(grp.bestStatus));
+                ImGui::TextColored(col, "%s", statusToString(grp.bestStatus));
+                if (grp.anyMobile)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextColored(COL_ORANGE, "(M)");
+                }
             }
 
             // ── Username (TreeNode for multi-site, Selectable for single) ──
             ImGui::TableNextColumn();
             bool treeOpen = false;
             {
-                bool selected = false;
-                for (int idx : grp.indices)
-                    if (selectedBot_ == idx)
-                    {
-                        selected = true;
-                        break;
-                    }
+                bool selected = selectedRows_.count(grp.key) > 0;
 
                 if (isMultiSite)
                 {
@@ -2109,16 +2104,47 @@ namespace sm
                         selectedBot_ = grp.primaryIdx;
                         if (ImGui::IsMouseDoubleClicked(0))
                             showBotDetail_ = true;
+
+                        // Ctrl+click: toggle this row in selection
+                        // Plain click: select only this row
+                        if (ImGui::GetIO().KeyCtrl)
+                        {
+                            if (selectedRows_.count(grp.key))
+                                selectedRows_.erase(grp.key);
+                            else
+                                selectedRows_.insert(grp.key);
+                        }
+                        else
+                        {
+                            selectedRows_.clear();
+                            selectedRows_.insert(grp.key);
+                        }
                     }
                 }
                 else
                 {
                     if (ImGui::Selectable(grp.username.c_str(), selected,
-                                          ImGuiSelectableFlags_AllowDoubleClick))
+                                          ImGuiSelectableFlags_AllowDoubleClick |
+                                              ImGuiSelectableFlags_SpanAllColumns))
                     {
                         selectedBot_ = grp.primaryIdx;
                         if (ImGui::IsMouseDoubleClicked(0))
                             showBotDetail_ = true;
+
+                        // Ctrl+click: toggle this row in selection
+                        // Plain click: select only this row
+                        if (ImGui::GetIO().KeyCtrl)
+                        {
+                            if (selectedRows_.count(grp.key))
+                                selectedRows_.erase(grp.key);
+                            else
+                                selectedRows_.insert(grp.key);
+                        }
+                        else
+                        {
+                            selectedRows_.clear();
+                            selectedRows_.insert(grp.key);
+                        }
                     }
                 }
             }
@@ -2531,18 +2557,6 @@ namespace sm
             else
                 ImGui::TextColored(COL_TEXT_DIM, "--");
 
-            // ── Status ──────────────────────────────────────────────
-            ImGui::TableNextColumn();
-            {
-                ImVec4 col = statusColor(grp.bestStatus);
-                ImGui::TextColored(col, "%s", statusToString(grp.bestStatus));
-                if (grp.anyMobile)
-                {
-                    ImGui::SameLine();
-                    ImGui::TextColored(COL_ORANGE, "(M)");
-                }
-            }
-
             // ── Recording ───────────────────────────────────────────
             ImGui::TableNextColumn();
             if (grp.anyRecording)
@@ -2601,7 +2615,7 @@ namespace sm
                         }
                     }
 
-                    // Icon
+                    // Status (readable text)
                     ImGui::TableNextColumn();
                     {
                         ImVec4 col = statusColor(b.status);
@@ -2610,20 +2624,43 @@ namespace sm
                             float pulse = (std::sin(animTime_ * 4.0f) + 1.0f) * 0.5f;
                             col = {1.0f, 0.1f + pulse * 0.3f, 0.1f + pulse * 0.1f, 1.0f};
                         }
-                        ImGui::TextColored(col, "%s", statusIcon(b.status));
+                        ImGui::TextColored(col, "%s", statusToString(b.status));
+                        if (b.mobile)
+                        {
+                            ImGui::SameLine();
+                            ImGui::TextColored(COL_ORANGE, "(M)");
+                        }
                     }
 
                     // Username (indented, shows site tag)
                     ImGui::TableNextColumn();
                     {
                         ImGui::TreePush("sub");
-                        bool subSel = (selectedBot_ == idx);
+                        std::string subKey2 = b.username + "\t" + b.siteName;
+                        std::transform(subKey2.begin(), subKey2.end(), subKey2.begin(), ::tolower);
+                        bool subSel = selectedRows_.count(subKey2) > 0;
                         std::string label = b.username + "  [" + b.siteSlug + "]";
-                        if (ImGui::Selectable(label.c_str(), subSel, ImGuiSelectableFlags_AllowDoubleClick))
+                        if (ImGui::Selectable(label.c_str(), subSel,
+                                              ImGuiSelectableFlags_AllowDoubleClick |
+                                                  ImGuiSelectableFlags_SpanAllColumns))
                         {
                             selectedBot_ = idx;
                             if (ImGui::IsMouseDoubleClicked(0))
                                 showBotDetail_ = true;
+
+                            // Ctrl+click: toggle in selection. Plain click: select only this.
+                            if (ImGui::GetIO().KeyCtrl)
+                            {
+                                if (selectedRows_.count(subKey2))
+                                    selectedRows_.erase(subKey2);
+                                else
+                                    selectedRows_.insert(subKey2);
+                            }
+                            else
+                            {
+                                selectedRows_.clear();
+                                selectedRows_.insert(subKey2);
+                            }
                         }
                         ImGui::TreePop();
                     }
@@ -2715,18 +2752,6 @@ namespace sm
                     else
                         ImGui::TextColored(COL_TEXT_DIM, "--");
 
-                    // Status
-                    ImGui::TableNextColumn();
-                    {
-                        ImVec4 col = statusColor(b.status);
-                        ImGui::TextColored(col, "%s", statusToString(b.status));
-                        if (b.mobile)
-                        {
-                            ImGui::SameLine();
-                            ImGui::TextColored(COL_ORANGE, "(M)");
-                        }
-                    }
-
                     // Recording
                     ImGui::TableNextColumn();
                     if (b.recording)
@@ -2797,10 +2822,40 @@ namespace sm
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {12 * dpiScale_, 6 * dpiScale_});
 
-        // Header with controls - use proper right-alignment
+        // Header: label + level filter toggles + right-aligned controls
         ImGui::Text("Log");
+        ImGui::SameLine();
+        ImGui::Spacing();
+        ImGui::SameLine();
 
-        // Calculate positions for right-aligned controls
+        // Level filter toggle buttons (colored)
+        auto levelToggle = [&](const char *label, bool &flag, ImVec4 onCol)
+        {
+            ImGui::SameLine();
+            if (flag)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, onCol);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {onCol.x * 1.2f, onCol.y * 1.2f, onCol.z * 1.2f, 1.0f});
+            }
+            else
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.20f, 0.20f, 0.22f, 1.0f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.30f, 0.30f, 0.33f, 1.0f});
+            }
+            if (ImGui::SmallButton(label))
+                flag = !flag;
+            ImGui::PopStyleColor(2);
+        };
+        levelToggle("Debug", logShowDebug_, {0.40f, 0.40f, 0.45f, 1.0f});
+        levelToggle("Info", logShowInfo_, {0.15f, 0.55f, 0.25f, 1.0f});
+        levelToggle("Warn", logShowWarn_, {0.65f, 0.55f, 0.10f, 1.0f});
+        levelToggle("Error", logShowError_, {0.65f, 0.15f, 0.15f, 1.0f});
+
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120 * dpiScale_);
+        ImGui::InputTextWithHint("##LogSource", "Source filter", logSourceFilter_, sizeof(logSourceFilter_));
+
+        // Right-aligned: auto-scroll, copy, clear
         float clearBtnWidth = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 4;
         float copyBtnWidth = ImGui::CalcTextSize("Copy Logs").x + ImGui::GetStyle().FramePadding.x * 4;
         float checkboxWidth = ImGui::CalcTextSize("Auto-scroll").x + ImGui::GetStyle().FramePadding.x * 2 + ImGui::GetFrameHeight();
@@ -2840,7 +2895,7 @@ namespace sm
 
         ImGui::Separator();
 
-        // Log content
+        // Log content (filtered)
         if (ImGui::BeginChild("##LogContent", {0, 0}, ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar))
         {
             std::lock_guard lock(logMutex_);
@@ -2850,14 +2905,48 @@ namespace sm
             float scrollMax = ImGui::GetScrollMaxY();
             bool wasAtBottom = (scrollMax <= 0.0f) || (scrollY >= scrollMax - 4.0f);
 
+            // Build filtered index list
+            std::string srcFilter(logSourceFilter_);
+            std::transform(srcFilter.begin(), srcFilter.end(), srcFilter.begin(), ::tolower);
+
+            std::vector<int> filtered;
+            filtered.reserve(logEntries_.size());
+            for (int i = 0; i < (int)logEntries_.size(); i++)
+            {
+                const auto &entry = logEntries_[i];
+                // Level filter
+                if (entry.level == "debug" && !logShowDebug_)
+                    continue;
+                if (entry.level == "info" && !logShowInfo_)
+                    continue;
+                if (entry.level == "warn" && !logShowWarn_)
+                    continue;
+                if (entry.level == "error" && !logShowError_)
+                    continue;
+                // Source filter
+                if (!srcFilter.empty())
+                {
+                    std::string src = entry.source;
+                    std::transform(src.begin(), src.end(), src.begin(), ::tolower);
+                    if (src.find(srcFilter) == std::string::npos)
+                    {
+                        std::string msg = entry.message;
+                        std::transform(msg.begin(), msg.end(), msg.begin(), ::tolower);
+                        if (msg.find(srcFilter) == std::string::npos)
+                            continue;
+                    }
+                }
+                filtered.push_back(i);
+            }
+
             ImGuiListClipper clipper;
-            clipper.Begin((int)logEntries_.size());
+            clipper.Begin((int)filtered.size());
 
             while (clipper.Step())
             {
-                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                for (int fi = clipper.DisplayStart; fi < clipper.DisplayEnd; fi++)
                 {
-                    const auto &entry = logEntries_[i];
+                    const auto &entry = logEntries_[filtered[fi]];
 
                     // Level color
                     ImVec4 col = COL_TEXT;
@@ -2878,7 +2967,7 @@ namespace sm
                     int mins = (int)(elapsed / 60) % 60;
                     int secs = (int)elapsed % 60;
 
-                    ImGui::PushID(i);
+                    ImGui::PushID(filtered[fi]);
                     ImGui::TextColored(COL_TEXT_DIM, "[%02d:%02d:%02d]", hours, mins, secs);
                     ImGui::SameLine();
                     ImGui::TextColored(COL_ACCENT_DIM, "[%s]", entry.source.c_str());
@@ -2991,47 +3080,65 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::renderSettingsWindow()
     {
-        ImGui::SetNextWindowSize({600 * dpiScale_, 500 * dpiScale_}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({600 * dpiScale_, 500 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({400 * dpiScale_, 300 * dpiScale_}, {900 * dpiScale_, 800 * dpiScale_});
         if (!ImGui::Begin("Settings", &showSettings_))
         {
             ImGui::End();
             return;
         }
 
-        // Tab bar for settings categories
+        // Tab bar for settings categories (with right-click to hide/show)
         if (ImGui::BeginTabBar("##SettingsTabs"))
         {
-            if (ImGui::BeginTabItem("General"))
+            // Right-click on tab bar background for visibility menu
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                ImGui::OpenPopup("##TabVisibility");
+            if (ImGui::BeginPopup("##TabVisibility"))
+            {
+                ImGui::TextColored(COL_ACCENT, "Show/Hide Tabs");
+                ImGui::Separator();
+                ImGui::MenuItem("General", nullptr, &showTabGeneral_);
+                ImGui::MenuItem("Recording", nullptr, &showTabRecording_);
+                ImGui::MenuItem("FFmpeg", nullptr, &showTabFFmpeg_);
+                ImGui::MenuItem("Network", nullptr, &showTabNetwork_);
+                ImGui::MenuItem("Web Server", nullptr, &showTabWebServer_);
+                ImGui::MenuItem("Sites", nullptr, &showTabSites_);
+                ImGui::MenuItem("Advanced", nullptr, &showTabAdvanced_);
+                ImGui::EndPopup();
+            }
+
+            if (showTabGeneral_ && ImGui::BeginTabItem("General"))
             {
                 renderSettingsGeneral();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Recording"))
+            if (showTabRecording_ && ImGui::BeginTabItem("Recording"))
             {
                 renderSettingsRecording();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("FFmpeg"))
+            if (showTabFFmpeg_ && ImGui::BeginTabItem("FFmpeg"))
             {
                 renderSettingsFFmpeg();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Network"))
+            if (showTabNetwork_ && ImGui::BeginTabItem("Network"))
             {
                 renderSettingsNetwork();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Web Server"))
+            if (showTabWebServer_ && ImGui::BeginTabItem("Web Server"))
             {
                 renderSettingsWeb();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Sites"))
+            if (showTabSites_ && ImGui::BeginTabItem("Sites"))
             {
                 renderSettingsSites();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Advanced"))
+            if (showTabAdvanced_ && ImGui::BeginTabItem("Advanced"))
             {
                 renderSettingsAdvanced();
                 ImGui::EndTabItem();
@@ -3730,6 +3837,118 @@ namespace sm
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
+
+        // ── Stripchat Mouflon Keys ──────────────────────────────────
+        ImGui::TextColored(COL_ACCENT, "Stripchat — Mouflon Decryption Keys");
+        ImGui::TextColored(COL_TEXT_DIM,
+                           "Keys used for decrypting Stripchat HLS playlists (pkey → pdkey)");
+        ImGui::Spacing();
+
+        auto &mouflon = MouflonKeys::instance();
+        auto keys = mouflon.getKeys();
+
+        if (keys.empty())
+        {
+            ImGui::TextColored(COL_YELLOW, "No mouflon keys loaded. Keys are auto-extracted from Doppio JS at startup.");
+        }
+        else
+        {
+            // Show keys in a table
+            if (ImGui::BeginTable("##MouflonKeys", 3,
+                                  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+            {
+                ImGui::TableSetupColumn("Public Key (pkey)", 0, 2.0f);
+                ImGui::TableSetupColumn("Decryption Key (pdkey)", 0, 2.0f);
+                ImGui::TableSetupColumn("##Actions", ImGuiTableColumnFlags_WidthFixed, 60.0f * dpiScale_);
+                ImGui::TableHeadersRow();
+
+                std::string keyToRemove;
+                int row = 0;
+                for (const auto &[pkey, pdkey] : keys)
+                {
+                    ImGui::PushID(row++);
+                    ImGui::TableNextRow();
+
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(pkey.c_str());
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                        copyToClipboard(pkey);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Right-click to copy");
+
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(pdkey.c_str());
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                        copyToClipboard(pdkey);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Right-click to copy");
+
+                    ImGui::TableNextColumn();
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.50f, 0.12f, 0.12f, 1.0f});
+                    if (ImGui::SmallButton("Remove"))
+                        keyToRemove = pkey;
+                    ImGui::PopStyleColor();
+
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+
+                // Deferred removal (can't modify while iterating)
+                if (!keyToRemove.empty())
+                {
+                    mouflon.removeKey(keyToRemove);
+                    addLog("info", "system", "Removed mouflon key: " + keyToRemove);
+                }
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::TextColored(COL_TEXT_DIM, "Add a new key pair:");
+
+        static char newPkey[128] = {};
+        static char newPdkey[128] = {};
+        ImGui::SetNextItemWidth(200 * dpiScale_);
+        ImGui::InputTextWithHint("##NewPkey", "pkey", newPkey, sizeof(newPkey));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(200 * dpiScale_);
+        ImGui::InputTextWithHint("##NewPdkey", "pdkey", newPdkey, sizeof(newPdkey));
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.15f, 0.45f, 0.15f, 1.0f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{0.20f, 0.55f, 0.20f, 1.0f});
+        if (ImGui::Button("Add Key") && std::strlen(newPkey) > 0 && std::strlen(newPdkey) > 0)
+        {
+            mouflon.addKey(newPkey, newPdkey);
+            addLog("info", "system",
+                   "Added mouflon key: " + std::string(newPkey) + " → " + std::string(newPdkey));
+            std::memset(newPkey, 0, sizeof(newPkey));
+            std::memset(newPdkey, 0, sizeof(newPdkey));
+        }
+        ImGui::PopStyleColor(2);
+
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.10f, 0.45f, 0.55f, 1.0f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{0.15f, 0.55f, 0.65f, 1.0f});
+        if (ImGui::Button("Re-extract from Doppio JS"))
+        {
+            addLog("info", "system", "Re-extracting mouflon keys...");
+            std::thread([this]()
+                        {
+                auto &mk = MouflonKeys::instance();
+                HttpClient http;
+                http.setDefaultUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+                mk.reinitialize(http);
+                addLog("info", "system",
+                       "Mouflon key re-extraction complete (" +
+                           std::to_string(mk.getKeys().size()) + " keys)"); })
+                .detach();
+        }
+        ImGui::PopStyleColor(2);
+        ImGui::SameLine();
+        ImGui::TextColored(COL_TEXT_DIM, "Fetch latest keys from Stripchat's Doppio JS");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
         ImGui::TextColored(COL_TEXT_DIM, "Note: Disabling a site will stop all bots on that site");
     }
 
@@ -3738,7 +3957,8 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::renderAddModelDialog()
     {
-        ImGui::SetNextWindowSize({500 * dpiScale_, 340 * dpiScale_}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({500 * dpiScale_, 340 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({350 * dpiScale_, 250 * dpiScale_}, {700 * dpiScale_, 500 * dpiScale_});
         if (!ImGui::Begin("Add Model", &showAddModel_))
         {
             ImGui::End();
@@ -3898,7 +4118,8 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::renderAboutWindow()
     {
-        ImGui::SetNextWindowSize({400, 300}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({400 * dpiScale_, 300 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({300 * dpiScale_, 200 * dpiScale_}, {800 * dpiScale_, 600 * dpiScale_});
         if (!ImGui::Begin("About StreaMonitor", &showAbout_))
         {
             ImGui::End();
@@ -3934,7 +4155,8 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::renderFFmpegMonitor()
     {
-        ImGui::SetNextWindowSize({500, 400}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({500 * dpiScale_, 400 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({350 * dpiScale_, 250 * dpiScale_}, {900 * dpiScale_, 700 * dpiScale_});
         if (!ImGui::Begin("FFmpeg Monitor", &showFFmpegMon_))
         {
             ImGui::End();
@@ -4005,7 +4227,8 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::renderDiskUsagePanel()
     {
-        ImGui::SetNextWindowSize({400, 250}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({400 * dpiScale_, 250 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({300 * dpiScale_, 180 * dpiScale_}, {700 * dpiScale_, 500 * dpiScale_});
         if (!ImGui::Begin("Disk Usage", &showDiskUsage_))
         {
             ImGui::End();
@@ -4052,7 +4275,8 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::renderCrossRegisterWindow()
     {
-        ImGui::SetNextWindowSize({600 * dpiScale_, 450 * dpiScale_}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({600 * dpiScale_, 450 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({400 * dpiScale_, 300 * dpiScale_}, {900 * dpiScale_, 700 * dpiScale_});
         if (!ImGui::Begin("Cross-Register Groups", &showCrossRegister_))
         {
             ImGui::End();
@@ -4294,6 +4518,7 @@ namespace sm
             return;
 
         ImGui::SetNextWindowSize({400 * dpiScale_, 340 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({300 * dpiScale_, 240 * dpiScale_}, {600 * dpiScale_, 500 * dpiScale_});
         if (ImGui::Begin("Add to Group", &showAddToGroupPopup_,
                          ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse))
         {
@@ -4374,7 +4599,8 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::renderStreamViewWindow()
     {
-        ImGui::SetNextWindowSize({640 * dpiScale_, 400 * dpiScale_}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({640 * dpiScale_, 400 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({400 * dpiScale_, 280 * dpiScale_}, {1200 * dpiScale_, 900 * dpiScale_});
         if (!ImGui::Begin("Stream View", &showStreamView_))
         {
             ImGui::End();
@@ -4460,13 +4686,13 @@ namespace sm
             lastPreviewRequest_ = {};
         }
 
-        // Request preview every 500ms for a more stream-like experience
+        // Request preview every 250ms for a stream-like experience
         {
             auto now = Clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                now - lastPreviewRequest_)
                                .count();
-            if (elapsed >= 500 || lastPreviewRequest_ == TimePoint{})
+            if (elapsed >= 250 || lastPreviewRequest_ == TimePoint{})
             {
                 manager_.requestPreview(bot.username, bot.siteName);
                 lastPreviewRequest_ = now;
@@ -4538,7 +4764,8 @@ namespace sm
         const auto &bot = cachedStates_[selectedBot_];
         std::string title = bot.username + " [" + bot.siteName + "]###BotDetail";
 
-        ImGui::SetNextWindowSize({540 * dpiScale_, 500 * dpiScale_}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({540 * dpiScale_, 500 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({400 * dpiScale_, 350 * dpiScale_}, {800 * dpiScale_, 700 * dpiScale_});
         if (!ImGui::Begin(title.c_str(), &showBotDetail_))
         {
             ImGui::End();
@@ -4857,6 +5084,7 @@ namespace sm
             return;
 
         ImGui::SetNextWindowSize({420 * dpiScale_, 200 * dpiScale_}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({300 * dpiScale_, 150 * dpiScale_}, {600 * dpiScale_, 400 * dpiScale_});
         if (ImGui::Begin("Edit Model##EditModel", &showEditModel_,
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking))
         {

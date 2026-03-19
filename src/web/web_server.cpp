@@ -492,6 +492,86 @@ namespace sm
                          res.set_content(bmp, "image/bmp");
                      });
 
+        // ── GET /api/stream/:username/:site — MJPEG live stream ───
+        // Continuous multipart/x-mixed-replace stream of BMP frames.
+        // The browser <img> tag natively renders this as live video.
+        server_->Get(R"(/api/stream/([^/]+)/([^/]+))",
+                     [this](const httplib::Request &req, httplib::Response &res)
+                     {
+                         std::string username = req.matches[1].str();
+                         std::string site = req.matches[2].str();
+
+                         const std::string boundary = "frame";
+
+                         res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
+                         res.set_header("Connection", "keep-alive");
+                         res.set_header("Access-Control-Allow-Origin", "*");
+
+                         res.set_content_provider(
+                             "multipart/x-mixed-replace; boundary=" + boundary,
+                             [this, username, site, boundary](size_t /*offset*/, httplib::DataSink &sink) -> bool
+                             {
+                                 if (!sink.is_writable())
+                                     return false;
+
+                                 // Check if bot is still recording — stop stream if not
+                                 auto state = manager_.getBotState(username, site);
+                                 if (!state || !state->recording)
+                                 {
+                                     // Bot stopped recording — end the stream
+                                     return false;
+                                 }
+
+                                 // Request a new preview frame
+                                 manager_.requestPreview(username, site);
+
+                                 // Poll for the frame (up to 2s)
+                                 PreviewFrame frame;
+                                 for (int i = 0; i < 20; ++i)
+                                 {
+                                     if (manager_.consumePreview(username, site, frame))
+                                         break;
+                                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                                     if (!sink.is_writable())
+                                         return false;
+                                 }
+
+                                 if (frame.empty())
+                                 {
+                                     // No frame — sleep briefly and try again
+                                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                                     return sink.is_writable();
+                                 }
+
+                                 // Convert RGBA to BMP
+                                 std::string bmp = rgbaToBmp(frame.pixels.data(), frame.width, frame.height);
+
+                                 // Write multipart boundary + headers + BMP data
+                                 std::string header = "--" + boundary + "\r\n"
+                                                                        "Content-Type: image/bmp\r\n"
+                                                                        "Content-Length: " +
+                                                      std::to_string(bmp.size()) + "\r\n"
+                                                                                   "\r\n";
+
+                                 if (!sink.write(header.data(), header.size()))
+                                     return false;
+                                 if (!sink.write(bmp.data(), bmp.size()))
+                                     return false;
+
+                                 std::string crlf = "\r\n";
+                                 if (!sink.write(crlf.data(), crlf.size()))
+                                     return false;
+
+                                 // Small delay to avoid hammering CPU
+                                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                                 return true; // keep streaming
+                             },
+                             [](bool /*success*/)
+                             {
+                                 // cleanup — nothing needed
+                             });
+                     });
+
         // ── POST /api/models — Add a model ────────────────────────
         server_->Post("/api/models", [this](const httplib::Request &req, httplib::Response &res)
                       {

@@ -32,6 +32,9 @@ namespace sm
         // Call once at startup (thread-safe, will skip if already initialized)
         void initialize(HttpClient &http);
 
+        // Re-initialize: force re-fetch keys even if already initialized
+        void reinitialize(HttpClient &http);
+
         // Extract psch, pkey, pdkey from a playlist's #EXT-X-MOUFLON lines
         struct MouflonInfo
         {
@@ -65,6 +68,12 @@ namespace sm
 
         // Get all known keys (for debug logging)
         std::map<std::string, std::string> getKeys() const;
+
+        // Add a new pkey→pdkey pair and persist to cache
+        void addKey(const std::string &pkey, const std::string &pdkey);
+
+        // Remove a key by pkey and persist to cache
+        void removeKey(const std::string &pkey);
 
         // Check if keys are available
         bool hasKeys() const;
