@@ -6,6 +6,7 @@
 
 #include "gui/gui_app.h"
 #include "net/proxy_pool.h"
+#include "web/web_server.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -501,8 +502,9 @@ namespace sm
     // Constructor / Destructor
     // ─────────────────────────────────────────────────────────────────
     GuiApp::GuiApp(AppConfig &config, ModelConfigStore &configStore, BotManager &manager,
-                   std::shared_ptr<ImGuiLogSink> logSink)
-        : config_(config), configStore_(configStore), manager_(manager), logSink_(std::move(logSink))
+                   std::shared_ptr<ImGuiLogSink> logSink, WebServer *webServer)
+        : config_(config), configStore_(configStore), manager_(manager),
+          logSink_(std::move(logSink)), webServer_(webServer)
     {
         // Detect LAN URL once at startup
         cachedLanUrl_ = "http://" + detectLanIP() + ":" + std::to_string(config.webPort);
@@ -644,6 +646,14 @@ namespace sm
 #ifdef _WIN32
         editAutoStart_ = SystemTray::isAutoStartEnabled();
 #endif
+
+        // Web server edit state from config
+        editWebEnabled_ = config.webEnabled;
+        std::strncpy(editWebHost_, config.webHost.c_str(), sizeof(editWebHost_) - 1);
+        editWebPort_ = config.webPort;
+        std::strncpy(editWebUsername_, config.webUsername.c_str(), sizeof(editWebUsername_) - 1);
+        std::strncpy(editWebPassword_, config.webPassword.c_str(), sizeof(editWebPassword_) - 1);
+        std::memset(editWebNewPassword_, 0, sizeof(editWebNewPassword_));
     }
 
     GuiApp::~GuiApp()
@@ -731,6 +741,7 @@ namespace sm
         ImGuiIO &io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable; // Allow windows outside main viewport
         io.IniFilename = "imgui_layout.ini";
 
         // ── DPI-aware font scaling ──
@@ -756,8 +767,54 @@ namespace sm
         fontCfg.SizePixels = fontSize;
         fontCfg.OversampleH = 2;
         fontCfg.OversampleV = 1;
-        io.Fonts->AddFontDefault(&fontCfg);
+
+        // Try to load a system font that supports Unicode symbols (★ ✔ etc.)
+        // Fall back to ProggyClean default if unavailable.
+        bool fontLoaded = false;
+#ifdef _WIN32
+        {
+            static const ImWchar glyphRanges[] = {
+                0x0020,
+                0x00FF, // Basic Latin + Latin Supplement
+                0x2600,
+                0x26FF, // Miscellaneous Symbols (★ etc.)
+                0x2700,
+                0x27BF, // Dingbats (✔ etc.)
+                0x25A0,
+                0x25FF, // Geometric Shapes (▶ etc.)
+                0,      // terminator
+            };
+            const char *systemFonts[] = {
+                "C:\\Windows\\Fonts\\segoeui.ttf",
+                "C:\\Windows\\Fonts\\arial.ttf",
+                "C:\\Windows\\Fonts\\consola.ttf",
+            };
+            for (const char *fontPath : systemFonts)
+            {
+                if (std::filesystem::exists(fontPath))
+                {
+                    fontCfg.GlyphRanges = glyphRanges;
+                    ImFont *f = io.Fonts->AddFontFromFileTTF(fontPath, fontSize, &fontCfg);
+                    if (f)
+                    {
+                        fontLoaded = true;
+                        break;
+                    }
+                }
+            }
+        }
+#endif
+        if (!fontLoaded)
+            io.Fonts->AddFontDefault(&fontCfg);
         io.FontGlobalScale = 1.0f; // already scaled via SizePixels
+
+        // When viewports are enabled, tweak window rounding/bg for platform windows
+        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+        {
+            ImGuiStyle &style = ImGui::GetStyle();
+            style.WindowRounding = 0.0f;
+            style.Colors[ImGuiCol_WindowBg].w = 1.0f; // Ensure opaque bg for detached windows
+        }
 
         ImGui_ImplGlfw_InitForOpenGL(window_, true);
         ImGui_ImplOpenGL3_Init("#version 330");
@@ -1027,6 +1084,18 @@ namespace sm
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
             glfwSwapBuffers(window_);
+
+            // ── Multi-viewport: update & render platform windows ────
+            // This allows ImGui windows (settings, popups, etc.) to be
+            // dragged outside the main application window as real OS windows.
+            ImGuiIO &io = ImGui::GetIO();
+            if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+            {
+                GLFWwindow *backup = glfwGetCurrentContext();
+                ImGui::UpdatePlatformWindows();
+                ImGui::RenderPlatformWindowsDefault();
+                glfwMakeContextCurrent(backup);
+            }
             // No secondary sleep — glfwWaitEventsTimeout at top of loop
             // is the sole rate limiter.
         }
@@ -1115,6 +1184,9 @@ namespace sm
             renderBotDetailPanel();
         if (showEditModel_)
             renderEditModelDialog();
+        if (showStreamView_)
+            renderStreamViewWindow();
+        renderAddToGroupPopup();
 
         // ── Async move / resync operations ─────────────────────────
         if (pendingMoveBot_.has_value())
@@ -1184,6 +1256,7 @@ namespace sm
         if (ImGui::BeginMenu("View"))
         {
             ImGui::MenuItem("Log Panel", "Ctrl+L", &showLogPanel_);
+            ImGui::MenuItem("Stream View", nullptr, &showStreamView_);
             ImGui::MenuItem("Disk Usage", "Ctrl+D", &showDiskUsage_);
             ImGui::MenuItem("FFmpeg Monitor", nullptr, &showFFmpegMon_);
             ImGui::MenuItem("Cross-Register", nullptr, &showCrossRegister_);
@@ -2179,6 +2252,16 @@ namespace sm
                         focusCrossRegisterGroup_ = grp.groupName;
                         showCrossRegister_ = true;
                     }
+                    if (ImGui::MenuItem("Break from Group"))
+                    {
+                        // Stop the group cycling first, then disband the entire group
+                        std::string gname = grp.groupName;
+                        std::thread([this, gname]()
+                                    {
+                            manager_.stopGroup(gname);
+                            manager_.removeCrossRegisterGroup(gname); })
+                            .detach();
+                    }
                 }
                 else if (grp.indices.size() > 1)
                 {
@@ -2216,14 +2299,66 @@ namespace sm
 
                     if (ImGui::MenuItem("Add to Group..."))
                     {
-                        showCrossRegister_ = true;
+                        // Open add-to-group popup with bot context
+                        addToGroupBotUser_ = grp.username;
+                        addToGroupBotSite_ = cachedStates_[grp.primaryIdx].siteName;
+                        // Pre-select existing group that matches this username
+                        addToGroupSelectedIdx_ = -1;
+                        std::memset(addToGroupNewName_, 0, sizeof(addToGroupNewName_));
+                        auto existingGroups = manager_.getCrossRegisterGroups();
+                        for (int gi2 = 0; gi2 < (int)existingGroups.size(); gi2++)
+                        {
+                            // Match by group name == username (case-insensitive)
+                            std::string gnLower = existingGroups[gi2].groupName;
+                            std::string unLower = grp.username;
+                            std::transform(gnLower.begin(), gnLower.end(), gnLower.begin(), ::tolower);
+                            std::transform(unLower.begin(), unLower.end(), unLower.begin(), ::tolower);
+                            if (gnLower == unLower)
+                            {
+                                addToGroupSelectedIdx_ = gi2;
+                                break;
+                            }
+                        }
+                        showAddToGroupPopup_ = true;
                     }
                 }
                 else
                 {
                     if (ImGui::MenuItem("Add to Group..."))
                     {
-                        showCrossRegister_ = true;
+                        // Open add-to-group popup with bot context
+                        addToGroupBotUser_ = cachedStates_[grp.primaryIdx].username;
+                        addToGroupBotSite_ = cachedStates_[grp.primaryIdx].siteName;
+                        addToGroupSelectedIdx_ = -1;
+                        std::memset(addToGroupNewName_, 0, sizeof(addToGroupNewName_));
+                        // Try to pre-select an existing group that matches this username
+                        auto existingGroups = manager_.getCrossRegisterGroups();
+                        for (int gi2 = 0; gi2 < (int)existingGroups.size(); gi2++)
+                        {
+                            std::string gnLower = existingGroups[gi2].groupName;
+                            std::string unLower = grp.username;
+                            std::transform(gnLower.begin(), gnLower.end(), gnLower.begin(), ::tolower);
+                            std::transform(unLower.begin(), unLower.end(), unLower.begin(), ::tolower);
+                            if (gnLower == unLower)
+                            {
+                                addToGroupSelectedIdx_ = gi2;
+                                break;
+                            }
+                            // Also check if username appears in any group member
+                            for (const auto &[msite, muser] : existingGroups[gi2].members)
+                            {
+                                std::string muLower = muser;
+                                std::transform(muLower.begin(), muLower.end(), muLower.begin(), ::tolower);
+                                if (muLower == unLower)
+                                {
+                                    addToGroupSelectedIdx_ = gi2;
+                                    break;
+                                }
+                            }
+                            if (addToGroupSelectedIdx_ >= 0)
+                                break;
+                        }
+                        showAddToGroupPopup_ = true;
                     }
                 }
 
@@ -2687,11 +2822,24 @@ namespace sm
                     int mins = (int)(elapsed / 60) % 60;
                     int secs = (int)elapsed % 60;
 
+                    ImGui::PushID(i);
                     ImGui::TextColored(COL_TEXT_DIM, "[%02d:%02d:%02d]", hours, mins, secs);
                     ImGui::SameLine();
                     ImGui::TextColored(COL_ACCENT_DIM, "[%s]", entry.source.c_str());
                     ImGui::SameLine();
                     ImGui::TextColored(col, "%s", entry.message.c_str());
+
+                    // Right-click to copy individual log entry (especially useful for errors)
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                    {
+                        char timeBuf[16];
+                        snprintf(timeBuf, sizeof(timeBuf), "[%02d:%02d:%02d]", hours, mins, secs);
+                        std::string full = std::string(timeBuf) + " [" + entry.source + "] " + entry.message;
+                        copyToClipboard(full);
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Right-click to copy this line");
+                    ImGui::PopID();
                 }
             }
 
@@ -2727,6 +2875,31 @@ namespace sm
                            formatBytesHuman(cachedDiskUsage_.freeBytes).c_str(),
                            formatBytesHuman(cachedDiskUsage_.downloadDirBytes).c_str(),
                            cachedDiskUsage_.fileCount);
+
+        // Log toggle button — shows error count when hidden
+        ImGui::SameLine();
+        {
+            int errorCount = 0;
+            {
+                std::lock_guard lock(logMutex_);
+                for (const auto &e : logEntries_)
+                    if (e.level == "error")
+                        errorCount++;
+            }
+            if (!showLogPanel_ && errorCount > 0)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.5f, 0.15f, 0.15f, 1.0f});
+                std::string lbl = "Logs (" + std::to_string(errorCount) + " errors)";
+                if (ImGui::SmallButton(lbl.c_str()))
+                    showLogPanel_ = true;
+                ImGui::PopStyleColor();
+            }
+            else
+            {
+                if (ImGui::SmallButton(showLogPanel_ ? "Hide Logs" : "Show Logs"))
+                    showLogPanel_ = !showLogPanel_;
+            }
+        }
 
         // Center: local web dashboard URL (clickable to copy)
         {
@@ -2790,6 +2963,11 @@ namespace sm
             if (ImGui::BeginTabItem("Network"))
             {
                 renderSettingsNetwork();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Web Server"))
+            {
+                renderSettingsWeb();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Sites"))
@@ -2909,6 +3087,53 @@ namespace sm
 #ifdef _WIN32
             SystemTray::setAutoStart(editAutoStart_);
 #endif
+
+            // Web server settings — detect if restart is needed
+            {
+                bool needRestart = false;
+                bool wasEnabled = config_.webEnabled;
+                std::string oldHost = config_.webHost;
+                int oldPort = config_.webPort;
+
+                config_.webEnabled = editWebEnabled_;
+                config_.webHost = editWebHost_;
+                config_.webPort = editWebPort_;
+                config_.webUsername = editWebUsername_;
+
+                // Update password only if new password field is non-empty
+                if (std::strlen(editWebNewPassword_) > 0)
+                {
+                    config_.webPassword = editWebNewPassword_;
+                    std::strncpy(editWebPassword_, editWebNewPassword_, sizeof(editWebPassword_) - 1);
+                    std::memset(editWebNewPassword_, 0, sizeof(editWebNewPassword_));
+                    addLog("info", "system", "Web credentials updated");
+                }
+
+                if (oldHost != config_.webHost || oldPort != config_.webPort)
+                    needRestart = true;
+
+                if (webServer_)
+                {
+                    if (!editWebEnabled_ && webServer_->isRunning())
+                    {
+                        webServer_->stop();
+                        addLog("info", "system", "Web server stopped");
+                    }
+                    else if (editWebEnabled_ && !webServer_->isRunning())
+                    {
+                        webServer_->start();
+                        addLog("info", "system", "Web server started on " + config_.webHost + ":" + std::to_string(config_.webPort));
+                    }
+                    else if (editWebEnabled_ && needRestart && webServer_->isRunning())
+                    {
+                        webServer_->stop();
+                        webServer_->start();
+                        addLog("info", "system", "Web server restarted on " + config_.webHost + ":" + std::to_string(config_.webPort));
+                    }
+                }
+                // Update cached LAN URL
+                cachedLanUrl_ = "http://" + detectLanIP() + ":" + std::to_string(config_.webPort);
+            }
 
             // Auto-save to disk
             config_.saveToFile("app_config.json");
@@ -3232,6 +3457,160 @@ namespace sm
             ImGui::TextColored(COL_TEXT_DIM, "Format: host:port  or  user:pass@host:port");
             ImGui::TextColored(COL_TEXT_DIM, "Environment: STRMNTR_PROXY (e.g. socks5://127.0.0.1:9050)");
         }
+    }
+
+    void GuiApp::renderSettingsWeb()
+    {
+        ImGui::Spacing();
+        ImGui::TextColored(COL_ACCENT, "Web Dashboard Server");
+        ImGui::Spacing();
+
+        // Enable/disable toggle
+        if (ImGui::Checkbox("Enable Web Server", &editWebEnabled_))
+            editDirtyFlag_ = true;
+
+        bool serverRunning = webServer_ && webServer_->isRunning();
+        ImGui::SameLine();
+        if (serverRunning)
+            ImGui::TextColored(COL_GREEN, "(Running)");
+        else
+            ImGui::TextColored(COL_RED, "(Stopped)");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Bind address & port
+        ImGui::TextColored(COL_ACCENT, "Binding");
+        ImGui::Spacing();
+
+        ImGui::Text("Host / Bind Address");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputTextWithHint("##WebHost", "0.0.0.0 (all interfaces)", editWebHost_, sizeof(editWebHost_)))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "0.0.0.0 = listen on all interfaces (required for LAN access)");
+        ImGui::TextColored(COL_TEXT_DIM, "127.0.0.1 = localhost only");
+
+        ImGui::Spacing();
+        ImGui::Text("Port");
+        if (ImGui::InputInt("##WebPort", &editWebPort_))
+        {
+            if (editWebPort_ < 1)
+                editWebPort_ = 1;
+            if (editWebPort_ > 65535)
+                editWebPort_ = 65535;
+            editDirtyFlag_ = true;
+        }
+
+        // Show current URLs
+        if (serverRunning)
+        {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextColored(COL_ACCENT, "Access URLs");
+            ImGui::Spacing();
+
+            std::string localUrl = webServer_->getLocalUrl();
+            std::string netUrl = webServer_->getNetworkUrl();
+
+            ImGui::Text("Local:   ");
+            ImGui::SameLine();
+            ImGui::TextColored(COL_CYAN, "%s", localUrl.c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Open##local"))
+                openUrlInBrowser(localUrl);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy##local"))
+                copyToClipboard(localUrl);
+
+            ImGui::Text("Network: ");
+            ImGui::SameLine();
+            ImGui::TextColored(COL_CYAN, "%s", netUrl.c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Open##net"))
+                openUrlInBrowser(netUrl);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy##net"))
+                copyToClipboard(netUrl);
+
+            ImGui::TextColored(COL_TEXT_DIM, "Use the Network URL from other devices on your WiFi/LAN");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Credentials
+        ImGui::TextColored(COL_ACCENT, "Login Credentials");
+        ImGui::Spacing();
+
+        ImGui::Text("Username");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##WebUser", editWebUsername_, sizeof(editWebUsername_)))
+            editDirtyFlag_ = true;
+
+        ImGui::Spacing();
+        ImGui::Text("Current Password");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputText("##WebPassCurrent", editWebPassword_, sizeof(editWebPassword_),
+                         ImGuiInputTextFlags_ReadOnly);
+        ImGui::TextColored(COL_TEXT_DIM, "(Read-only — enter new password below to change)");
+
+        ImGui::Spacing();
+        ImGui::Text("New Password (leave empty to keep current)");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##WebPassNew", editWebNewPassword_, sizeof(editWebNewPassword_),
+                             ImGuiInputTextFlags_Password))
+            editDirtyFlag_ = true;
+
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        // Quick start/stop buttons
+        if (webServer_)
+        {
+            if (serverRunning)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+                if (ImGui::Button("Stop Web Server Now", {-1, 0}))
+                {
+                    webServer_->stop();
+                    addLog("info", "system", "Web server stopped");
+                }
+                ImGui::PopStyleColor();
+            }
+            else
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.25f, 1.0f));
+                if (ImGui::Button("Start Web Server Now", {-1, 0}))
+                {
+                    config_.webHost = editWebHost_;
+                    config_.webPort = editWebPort_;
+                    if (webServer_->start())
+                    {
+                        addLog("info", "system", "Web server started on " + config_.webHost + ":" + std::to_string(config_.webPort));
+                        cachedLanUrl_ = "http://" + detectLanIP() + ":" + std::to_string(config_.webPort);
+                    }
+                    else
+                    {
+                        addLog("error", "system", "Failed to start web server on " + config_.webHost + ":" + std::to_string(config_.webPort));
+                    }
+                }
+                ImGui::PopStyleColor();
+            }
+        }
+        else
+        {
+            ImGui::TextColored(COL_TEXT_DIM, "Web server not available (not initialized)");
+        }
+
+#ifdef _WIN32
+        ImGui::Spacing();
+        ImGui::TextColored(COL_TEXT_DIM, "Note: If LAN access doesn't work, check Windows Firewall.");
+        ImGui::TextColored(COL_TEXT_DIM, "Allow this app through: Windows Security > Firewall > Allow an app");
+#endif
     }
 
     void GuiApp::renderSettingsAdvanced()
@@ -3751,7 +4130,7 @@ namespace sm
                     if (mi == 0)
                     {
                         // Primary indicator (first pairing = primary)
-                        ImGui::TextColored(COL_YELLOW, "★");
+                        ImGui::TextColored(COL_YELLOW, "[Primary]");
                         ImGui::SameLine();
                     }
                     else
@@ -3759,7 +4138,7 @@ namespace sm
                         // Button to set as primary (move to front)
                         ImGui::PushStyleColor(ImGuiCol_Button, {0.25f, 0.25f, 0.12f, 1.0f});
                         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.40f, 0.40f, 0.15f, 1.0f});
-                        if (ImGui::SmallButton("★"))
+                        if (ImGui::SmallButton("Set as primary"))
                             manager_.setPrimaryPairing(group.groupName, mi);
                         ImGui::PopStyleColor(2);
                         if (ImGui::IsItemHovered())
@@ -3771,12 +4150,14 @@ namespace sm
                     ImGui::PopID();
                 }
 
-                // Add member — expanded inputs
+                // Add member — expanded inputs (two rows to avoid overlap)
                 auto sites = manager_.availableSites();
                 float addAvail = ImGui::GetContentRegionAvail().x;
-                float addBtnW = ImGui::CalcTextSize(" Add ").x + ImGui::GetStyle().FramePadding.x * 2;
-                float inputW = (addAvail - addBtnW - ImGui::GetStyle().ItemSpacing.x * 2) * 0.55f;
-                float comboW = (addAvail - addBtnW - ImGui::GetStyle().ItemSpacing.x * 2) * 0.45f;
+                float spacing = ImGui::GetStyle().ItemSpacing.x;
+
+                // Row 1: Username + Site combo
+                float inputW = addAvail * 0.50f - spacing;
+                float comboW = addAvail * 0.50f - spacing;
 
                 ImGui::SetNextItemWidth(inputW);
                 ImGui::InputTextWithHint("##AddUser", "Username", crossUsername_, sizeof(crossUsername_));
@@ -3812,18 +4193,31 @@ namespace sm
                     }
                     ImGui::EndCombo();
                 }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Add") &&
-                    std::strlen(crossUsername_) > 0 && crossSiteIdx_ < (int)sites.size())
+                // Row 2: Add + Delete buttons on their own line
                 {
-                    manager_.addToCrossRegisterGroup(
-                        group.groupName, sites[crossSiteIdx_], crossUsername_);
-                    std::memset(crossUsername_, 0, sizeof(crossUsername_));
+                    ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.40f, 0.15f, 1.0f});
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.20f, 0.55f, 0.20f, 1.0f});
+                    bool canAdd = std::strlen(crossUsername_) > 0 && crossSiteIdx_ < (int)sites.size();
+                    if (!canAdd)
+                        ImGui::BeginDisabled();
+                    if (ImGui::SmallButton("Add Member"))
+                    {
+                        manager_.addToCrossRegisterGroup(
+                            group.groupName, sites[crossSiteIdx_], crossUsername_);
+                        std::memset(crossUsername_, 0, sizeof(crossUsername_));
+                    }
+                    if (!canAdd)
+                        ImGui::EndDisabled();
+                    ImGui::PopStyleColor(2);
                 }
 
-                ImGui::Spacing();
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.50f, 0.15f, 0.15f, 1.0f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.65f, 0.20f, 0.20f, 1.0f});
                 if (ImGui::SmallButton("Delete Group"))
                     manager_.removeCrossRegisterGroup(group.groupName);
+                ImGui::PopStyleColor(2);
+                ImGui::Spacing();
             }
 
             ImGui::PopID();
@@ -3831,6 +4225,251 @@ namespace sm
 
         if (groups.empty())
             ImGui::TextColored(COL_TEXT_DIM, "No cross-register groups defined.");
+
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Add to Group popup (proper ImGui modal popup)
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderAddToGroupPopup()
+    {
+        if (!showAddToGroupPopup_)
+            return;
+
+        ImGui::SetNextWindowSize({400 * dpiScale_, 340 * dpiScale_}, ImGuiCond_Appearing);
+        if (ImGui::Begin("Add to Group", &showAddToGroupPopup_,
+                         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse))
+        {
+            ImGui::Text("Add  %s [%s]  to a cross-register group:",
+                        addToGroupBotUser_.c_str(), addToGroupBotSite_.c_str());
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            auto groups = manager_.getCrossRegisterGroups();
+
+            // List existing groups as radio buttons
+            ImGui::TextColored(COL_ACCENT, "Existing Groups:");
+            for (int gi = 0; gi < (int)groups.size(); gi++)
+            {
+                std::string label = groups[gi].groupName + " (" +
+                                    std::to_string(groups[gi].members.size()) + " members)";
+                if (ImGui::RadioButton(label.c_str(), addToGroupSelectedIdx_ == gi))
+                    addToGroupSelectedIdx_ = gi;
+            }
+
+            if (groups.empty())
+                ImGui::TextColored(COL_TEXT_DIM, "  No groups yet");
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Option to create a new group
+            if (ImGui::RadioButton("Create new group:", addToGroupSelectedIdx_ == -1))
+                addToGroupSelectedIdx_ = -1;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            ImGui::InputTextWithHint("##NewGroupName", "Group name...",
+                                     addToGroupNewName_, sizeof(addToGroupNewName_));
+
+            ImGui::Spacing();
+            ImGui::Spacing();
+
+            // Buttons — properly sized side by side
+            float btnW = 120 * dpiScale_;
+            float spacing = ImGui::GetStyle().ItemSpacing.x;
+            float totalW = btnW * 2 + spacing;
+            ImGui::SetCursorPosX((ImGui::GetWindowWidth() - totalW) * 0.5f);
+
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.55f, 0.25f, 1.0f});
+            if (ImGui::Button("Add", {btnW, 0}))
+            {
+                if (addToGroupSelectedIdx_ >= 0 && addToGroupSelectedIdx_ < (int)groups.size())
+                {
+                    // Add to existing group
+                    manager_.addToCrossRegisterGroup(
+                        groups[addToGroupSelectedIdx_].groupName,
+                        addToGroupBotSite_, addToGroupBotUser_);
+                    addLog("info", "system", "Added " + addToGroupBotUser_ + " to group " + groups[addToGroupSelectedIdx_].groupName);
+                }
+                else if (std::strlen(addToGroupNewName_) > 0)
+                {
+                    // Create new group with this bot as first member
+                    std::vector<std::pair<std::string, std::string>> members = {
+                        {addToGroupBotSite_, addToGroupBotUser_}};
+                    manager_.createCrossRegisterGroup(addToGroupNewName_, members);
+                    addLog("info", "system", "Created group " + std::string(addToGroupNewName_) + " with " + addToGroupBotUser_);
+                }
+                showAddToGroupPopup_ = false;
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", {btnW, 0}))
+                showAddToGroupPopup_ = false;
+        }
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Stream View window (live stream from recording bot)
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderStreamViewWindow()
+    {
+        ImGui::SetNextWindowSize({640 * dpiScale_, 400 * dpiScale_}, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Stream View", &showStreamView_))
+        {
+            ImGui::End();
+            return;
+        }
+
+        // Find the first recording bot (or use selected bot)
+        int viewIdx = -1;
+        if (selectedBot_ >= 0 && selectedBot_ < (int)cachedStates_.size() &&
+            cachedStates_[selectedBot_].recording)
+        {
+            viewIdx = selectedBot_;
+        }
+        else
+        {
+            // Auto-pick first recording bot
+            for (int i = 0; i < (int)cachedStates_.size(); i++)
+            {
+                if (cachedStates_[i].recording)
+                {
+                    viewIdx = i;
+                    break;
+                }
+            }
+        }
+
+        if (viewIdx < 0)
+        {
+            float w = ImGui::GetContentRegionAvail().x;
+            float h = ImGui::GetContentRegionAvail().y;
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(pos, {pos.x + w, pos.y + h}, IM_COL32(15, 15, 20, 255));
+            ImVec2 textSz = ImGui::CalcTextSize("No active recordings");
+            ImVec2 textPos = {pos.x + (w - textSz.x) * 0.5f, pos.y + (h - textSz.y) * 0.5f};
+            dl->AddText(textPos, IM_COL32(120, 120, 140, 255), "No active recordings");
+            ImGui::Dummy({w, h});
+            ImGui::End();
+            return;
+        }
+
+        const auto &bot = cachedStates_[viewIdx];
+
+        // Header: bot name + resolution
+        ImGui::TextColored(COL_ACCENT, "%s [%s]", bot.username.c_str(), bot.siteName.c_str());
+        ImGui::SameLine();
+        if (bot.recordingStats.recordingWidth > 0)
+            ImGui::TextColored(COL_TEXT_DIM, "  %dx%d  %.1fx",
+                               bot.recordingStats.recordingWidth,
+                               bot.recordingStats.recordingHeight,
+                               bot.recordingStats.currentSpeed);
+
+        // Bot selector for switching between recording bots
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 200 * dpiScale_);
+        ImGui::SetNextItemWidth(200 * dpiScale_);
+        if (ImGui::BeginCombo("##StreamBot", (bot.username + " [" + bot.siteName + "]").c_str()))
+        {
+            for (int i = 0; i < (int)cachedStates_.size(); i++)
+            {
+                if (!cachedStates_[i].recording)
+                    continue;
+                bool sel = (viewIdx == i);
+                std::string label = cachedStates_[i].username + " [" + cachedStates_[i].siteName + "]";
+                if (ImGui::Selectable(label.c_str(), sel))
+                    selectedBot_ = i;
+            }
+            ImGui::EndCombo();
+        }
+
+        // Determine the key for preview
+        std::string previewKey = bot.username + "|" + bot.siteName;
+
+        // If we switched to a different bot, discard the old texture
+        if (previewKey != detailPreviewKey_)
+        {
+            if (detailPreviewTex_)
+            {
+                glDeleteTextures(1, &detailPreviewTex_);
+                detailPreviewTex_ = 0;
+            }
+            detailPreviewW_ = detailPreviewH_ = 0;
+            detailPreviewKey_ = previewKey;
+            lastPreviewRequest_ = {};
+        }
+
+        // Request preview every 500ms for a more stream-like experience
+        {
+            auto now = Clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               now - lastPreviewRequest_)
+                               .count();
+            if (elapsed >= 500 || lastPreviewRequest_ == TimePoint{})
+            {
+                manager_.requestPreview(bot.username, bot.siteName);
+                lastPreviewRequest_ = now;
+            }
+        }
+
+        // Consume new frame
+        PreviewFrame frame;
+        if (manager_.consumePreview(bot.username, bot.siteName, frame))
+        {
+            if (detailPreviewTex_ == 0)
+                glGenTextures(1, &detailPreviewTex_);
+
+            glBindTexture(GL_TEXTURE_2D, detailPreviewTex_);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame.width, frame.height, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, frame.pixels.data());
+            glBindTexture(GL_TEXTURE_2D, 0);
+
+            detailPreviewW_ = frame.width;
+            detailPreviewH_ = frame.height;
+        }
+
+        // Render stream view — fill available window space
+        float availW = ImGui::GetContentRegionAvail().x;
+        float availH = ImGui::GetContentRegionAvail().y;
+
+        if (detailPreviewTex_ != 0 && detailPreviewW_ > 0 && detailPreviewH_ > 0)
+        {
+            float aspect = static_cast<float>(detailPreviewH_) / detailPreviewW_;
+            float imgW = availW;
+            float imgH = imgW * aspect;
+            if (imgH > availH)
+            {
+                imgH = availH;
+                imgW = imgH / aspect;
+            }
+            // Center the image
+            float offsetX = (availW - imgW) * 0.5f;
+            if (offsetX > 0)
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offsetX);
+            ImGui::Image((ImTextureID)(intptr_t)detailPreviewTex_, {imgW, imgH});
+        }
+        else
+        {
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(pos, {pos.x + availW, pos.y + availH},
+                              IM_COL32(15, 15, 20, 255));
+            const char *waitLabel = "Waiting for stream frame...";
+            ImVec2 textSz = ImGui::CalcTextSize(waitLabel);
+            ImVec2 textPos = {pos.x + (availW - textSz.x) * 0.5f,
+                              pos.y + (availH - textSz.y) * 0.5f};
+            dl->AddText(textPos, IM_COL32(120, 120, 140, 255), waitLabel);
+            ImGui::Dummy({availW, availH});
+        }
 
         ImGui::End();
     }

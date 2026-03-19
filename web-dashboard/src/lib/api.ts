@@ -65,6 +65,21 @@ export interface GroupInfo {
   members: { site: string; username: string }[]
   linkRecording: boolean
   linkStatus: boolean
+  state?: {
+    running: boolean
+    recording: boolean
+    activePairingIdx: number
+    activeUsername: string
+    activeSite: string
+    activeStatus: string
+    activeMobile: boolean
+    pairings?: {
+      site: string
+      username: string
+      status: string
+      mobile: boolean
+    }[]
+  }
 }
 
 export interface DiskUsage {
@@ -239,7 +254,31 @@ export const createGroup = (name: string, members: { site: string; username: str
   apiFetch('/groups', { method: 'POST', body: JSON.stringify({ name, members }) })
 
 export const deleteGroup = (name: string) =>
-  apiFetch(`/groups/${name}`, { method: 'DELETE' })
+  apiFetch(`/groups/${encodeURIComponent(name)}`, { method: 'DELETE' })
+
+export const startGroup = (name: string) =>
+  apiFetch(`/groups/${encodeURIComponent(name)}/start`, { method: 'POST' })
+
+export const stopGroup = (name: string) =>
+  apiFetch(`/groups/${encodeURIComponent(name)}/stop`, { method: 'POST' })
+
+export const addGroupMember = (groupName: string, site: string, username: string) =>
+  apiFetch(`/groups/${encodeURIComponent(groupName)}/members`, {
+    method: 'POST',
+    body: JSON.stringify({ site, username }),
+  })
+
+export const removeGroupMember = (groupName: string, site: string, username: string) =>
+  apiFetch(`/groups/${encodeURIComponent(groupName)}/members`, {
+    method: 'DELETE',
+    body: JSON.stringify({ site, username }),
+  })
+
+export const getLogs = () => apiFetch<string[]>('/logs')
+
+export function getPreviewUrl(username: string, siteSlug: string): string {
+  return `${API_BASE.replace('/api', '')}/api/preview/${encodeURIComponent(username)}/${encodeURIComponent(siteSlug)}`
+}
 
 // ── Helpers ───────────────────────────────────────────────────────
 export function formatBytes(bytes: number): string {

@@ -279,6 +279,8 @@ namespace sm
                     bool mobileMulti = pairing.lastMobile && !isVrSlug(pairing.site);
                     std::vector<std::unique_ptr<std::jthread>> parallelThreads;
                     std::vector<std::unique_ptr<CancellationToken>> parallelTokens;
+                    // Track whether we started in mobile mode (for mobile→PC transition)
+                    bool startedAsMobile = pairing.lastMobile;
 
                     if (mobileMulti)
                     {
@@ -353,6 +355,34 @@ namespace sm
                     }
                     if (stateCallback_)
                         stateCallback_(state_);
+
+                    // ── Mobile→PC transition ────────────────────────
+                    // After download ends, re-check mobile status. If the
+                    // stream started as mobile but is now PC (landscape),
+                    // cancel all parallel recorders — we only need the
+                    // primary. The primary stays as favorite (index 0).
+                    if (startedAsMobile && !parallelThreads.empty())
+                    {
+                        bool nowMobile = false;
+                        try
+                        {
+                            nowMobile = pairing.plugin->isMobile();
+                        }
+                        catch (...)
+                        {
+                        }
+
+                        if (!nowMobile)
+                        {
+                            spdlog::info("[Group:{}] {} [{}] switched from MOBILE to PC — "
+                                         "cancelling {} parallel recorder(s), keeping primary",
+                                         groupName_, pairing.username, pairing.site,
+                                         parallelThreads.size());
+                            for (auto &t : parallelTokens)
+                                t->cancel();
+                            // Ensure primary stays at index 0 (already is)
+                        }
+                    }
 
                     // If mobile multi-recording, wait for parallel downloads to finish.
                     // If group is being stopped, cancel the parallel tokens first.

@@ -138,18 +138,19 @@ int guiMain(int argc, char **argv)
 
     // Start web server if enabled
     std::unique_ptr<sm::WebServer> webServer;
+    // Always create the WebServer so the GUI can start/stop it on demand
+    webServer = std::make_unique<sm::WebServer>(manager, config, configStore);
+    webServer->setLogRingBuffer(g_logRingBuffer);
     if (config.webEnabled)
     {
-        webServer = std::make_unique<sm::WebServer>(manager, config, configStore);
-        webServer->setLogRingBuffer(g_logRingBuffer);
         if (webServer->start())
         {
             spdlog::info("Web dashboard: {} | {}", webServer->getLocalUrl(), webServer->getNetworkUrl());
         }
     }
 
-    // Run GUI
-    sm::GuiApp gui(config, configStore, manager, guiLogSink);
+    // Run GUI — pass web server pointer so settings can control it
+    sm::GuiApp gui(config, configStore, manager, guiLogSink, webServer.get());
     int exitCode = gui.run();
 
     // Cleanup — IMPORTANT: join all recording threads BEFORE cleaning up

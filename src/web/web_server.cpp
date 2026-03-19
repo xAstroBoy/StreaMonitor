@@ -170,6 +170,51 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
+    // Helper: RGBA → BMP conversion (24-bit, browser-compatible)
+    // ─────────────────────────────────────────────────────────────────
+    static std::string rgbaToBmp(const uint8_t *rgba, int w, int h)
+    {
+        int rowSize = ((w * 3 + 3) / 4) * 4; // rows padded to 4-byte boundary
+        int imageSize = rowSize * h;
+        int fileSize = 54 + imageSize;
+
+        std::string bmp(fileSize, '\0');
+        auto *p = reinterpret_cast<uint8_t *>(&bmp[0]);
+
+        // BMP file header (14 bytes)
+        p[0] = 'B';
+        p[1] = 'M';
+        std::memcpy(p + 2, &fileSize, 4);
+        int offset = 54;
+        std::memcpy(p + 10, &offset, 4);
+
+        // DIB header (BITMAPINFOHEADER, 40 bytes)
+        int dibSize = 40;
+        std::memcpy(p + 14, &dibSize, 4);
+        std::memcpy(p + 18, &w, 4);
+        std::memcpy(p + 22, &h, 4); // positive = bottom-up
+        uint16_t planes = 1, bpp = 24;
+        std::memcpy(p + 26, &planes, 2);
+        std::memcpy(p + 28, &bpp, 2);
+        std::memcpy(p + 34, &imageSize, 4);
+
+        // Pixel data: BGR, bottom-up scanlines
+        for (int y = 0; y < h; y++)
+        {
+            const uint8_t *src = rgba + (h - 1 - y) * w * 4; // flip vertically
+            uint8_t *dst = p + 54 + y * rowSize;
+            for (int x = 0; x < w; x++)
+            {
+                dst[x * 3 + 0] = src[x * 4 + 2]; // B
+                dst[x * 3 + 1] = src[x * 4 + 1]; // G
+                dst[x * 3 + 2] = src[x * 4 + 0]; // R
+            }
+        }
+
+        return bmp;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     // Helper: JSON response
     // ─────────────────────────────────────────────────────────────────
     static void jsonResponse(httplib::Response &res, const json &j, int status = 200)
@@ -441,14 +486,10 @@ namespace sm
                              return;
                          }
 
-                         // Serve raw RGBA as BMP (simplest headerless-ish format)
-                         // or just serve as raw with dimensions in headers
-                         // For web compatibility, serve as raw bitmap with content type
-                         res.set_header("X-Preview-Width", std::to_string(frame.width));
-                         res.set_header("X-Preview-Height", std::to_string(frame.height));
-                         res.set_content(std::string(reinterpret_cast<const char *>(frame.pixels.data()),
-                                                     frame.pixels.size()),
-                                         "application/octet-stream");
+                         // Convert RGBA to BMP for browser-compatible display
+                         std::string bmp = rgbaToBmp(frame.pixels.data(), frame.width, frame.height);
+                         res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
+                         res.set_content(bmp, "image/bmp");
                      });
 
         // ── POST /api/models — Add a model ────────────────────────

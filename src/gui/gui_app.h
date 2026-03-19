@@ -27,6 +27,7 @@ struct GLFWwindow;
 
 namespace sm
 {
+    class WebServer; // Forward declaration for web server control
 
     // ── Log entry for the log viewer ────────────────────────────────
     struct LogEntry
@@ -42,7 +43,8 @@ namespace sm
     {
     public:
         GuiApp(AppConfig &config, ModelConfigStore &configStore, BotManager &manager,
-               std::shared_ptr<ImGuiLogSink> logSink = nullptr);
+               std::shared_ptr<ImGuiLogSink> logSink = nullptr,
+               WebServer *webServer = nullptr);
         ~GuiApp();
 
         // Run the main loop (blocks until window is closed)
@@ -76,6 +78,8 @@ namespace sm
         void renderCrossRegisterWindow();
         void renderBotDetailPanel();
         void renderEditModelDialog();
+        void renderStreamViewWindow();
+        void renderAddToGroupPopup();
 
         // ── Settings sub-panels ─────────────────────────────────────
         void renderSettingsGeneral();
@@ -84,6 +88,7 @@ namespace sm
         void renderSettingsNetwork();
         void renderSettingsSites();
         void renderSettingsAdvanced();
+        void renderSettingsWeb();
 
         // ── Helpers ─────────────────────────────────────────────────
         void refreshBotStates();
@@ -106,7 +111,8 @@ namespace sm
         bool showAddModel_ = false;
         bool showAbout_ = false;
         bool showFFmpegMon_ = false;
-        bool showLogPanel_ = true;
+        bool showLogPanel_ = false;
+        bool showStreamView_ = false;
         bool showDiskUsage_ = false;
         bool showCrossRegister_ = false;
         bool showBotDetail_ = false;
@@ -151,6 +157,13 @@ namespace sm
         int crossSiteIdx_ = 0;
         std::string focusCrossRegisterGroup_; // scroll to this group when opening window
         char bulkGroupName_[128] = {};        // "Create Group" popup from bulk selection
+
+        // Add-to-Group popup state (from right-click context menu)
+        bool showAddToGroupPopup_ = false;
+        std::string addToGroupBotUser_;  // username of bot being added
+        std::string addToGroupBotSite_;  // site name of bot being added
+        int addToGroupSelectedIdx_ = -1; // selected group index, -1 = new
+        char addToGroupNewName_[128] = {};
 
         // Site filter for searchable combo popups
         char siteFilterBuf_[128] = {};
@@ -246,6 +259,17 @@ namespace sm
 #endif
         bool editMinimizeToTray_ = true;
         bool editAutoStart_ = false;
+
+        // Web server reference (owned by main, nullable)
+        WebServer *webServer_ = nullptr;
+
+        // Web server edit state (mirrors AppConfig web fields)
+        bool editWebEnabled_ = true;
+        char editWebHost_[64] = {};
+        int editWebPort_ = 5000;
+        char editWebUsername_[128] = {};
+        char editWebPassword_[128] = {};
+        char editWebNewPassword_[128] = {};
 
         // ── Adaptive frame rate (CPU idle optimization) ─────────────
         double lastInputTime_ = 0.0;       // glfwGetTime() of last user input

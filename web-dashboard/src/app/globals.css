@@ -19,12 +19,26 @@
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
+  -webkit-tap-highlight-color: transparent;
 }
 
 body {
   background: var(--bg-primary);
   color: var(--text-primary);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  overscroll-behavior: none;
+}
+
+/* ── Mobile touch targets ─────────────────────────────────────── */
+@media (max-width: 640px) {
+  button, a, select, input[type="checkbox"] {
+    min-height: 40px;
+    min-width: 40px;
+  }
+
+  select, input[type="text"], input[type="number"], input[type="password"] {
+    font-size: 16px !important; /* Prevent iOS zoom on focus */
+  }
 }
 
 @keyframes pulse-recording {
