@@ -200,6 +200,9 @@ def build(args):
     config = "Debug" if args.debug else "Release"
     cpus = os.cpu_count() or 4
 
+    # Build web dashboard if source is newer than output
+    build_web_dashboard()
+
     print(f"\n[+] Building with {cpus} parallel jobs...")
 
     run([
@@ -207,6 +210,49 @@ def build(args):
         "--config", config,
         "--parallel", str(cpus),
     ])
+
+
+def build_web_dashboard():
+    """Rebuild the Next.js web dashboard if source files are newer than output."""
+    web_src_dir = ROOT / "web-dashboard" / "src"
+    web_out_dir = ROOT / "web"
+    
+    if not web_src_dir.exists():
+        return  # No dashboard source
+    
+    # Check if we need to rebuild
+    needs_build = False
+    if not web_out_dir.exists():
+        needs_build = True
+    else:
+        # Find newest source file
+        newest_src = 0
+        for f in web_src_dir.rglob("*"):
+            if f.is_file():
+                newest_src = max(newest_src, f.stat().st_mtime)
+        
+        # Find newest output file
+        newest_out = 0
+        for f in web_out_dir.rglob("*"):
+            if f.is_file():
+                newest_out = max(newest_out, f.stat().st_mtime)
+        
+        if newest_src > newest_out:
+            needs_build = True
+    
+    if not needs_build:
+        print("[+] Web dashboard is up to date")
+        return
+    
+    print("[+] Rebuilding web dashboard...")
+    npm = "npm.cmd" if IS_WINDOWS else "npm"
+    
+    # Install deps if needed
+    node_modules = ROOT / "web-dashboard" / "node_modules"
+    if not node_modules.exists():
+        run([npm, "install"], cwd=ROOT / "web-dashboard")
+    
+    run([npm, "run", "build"], cwd=ROOT / "web-dashboard")
 
 
 def package(args):
