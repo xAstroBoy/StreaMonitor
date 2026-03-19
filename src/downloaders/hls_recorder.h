@@ -33,6 +33,7 @@ struct AVBufferRef;
 struct SwsContext;
 struct SwrContext;
 struct AVIOContext;
+struct AVCodecParameters;
 
 namespace sm
 {
@@ -157,13 +158,29 @@ namespace sm
         mutable std::mutex statsMutex_;
         RecordingStats stats_;
 
-        // Preview capture state (continuous push, throttled to ~15fps)
-        static constexpr int PREVIEW_TARGET_FPS = 15;
-        std::chrono::steady_clock::time_point lastPreviewTime_{};
+        // ── Preview worker thread (stream-copy mode) ────────────────
+        // Decodes video packets on a background thread so the recording
+        // thread is NEVER blocked by preview decode / sws_scale work.
+        // Recording thread just clones packets and pushes to the queue.
+        void startPreviewThread_(AVCodecParameters *codecpar);
+        void stopPreviewThread_();
+        void previewThreadFunc_();
+
+        std::thread previewThread_;
+        std::mutex previewPktMutex_;
+        std::condition_variable previewPktCv_;
+        std::deque<AVPacket *> previewPktQueue_;
+        std::atomic<bool> previewThreadStop_{false};
+        AVCodecParameters *previewCodecPar_ = nullptr;     // owned copy
+        static constexpr size_t kMaxPreviewPktQueue = 300; // ~10s at 30fps
+
+        // Preview sws state (transcode mode only — used on recording thread)
         SwsContext *previewSwsCtx_ = nullptr;
         int previewSwsSrcW_ = 0, previewSwsSrcH_ = 0;
         int previewSwsSrcFmt_ = -1; // AVPixelFormat as int
         int previewDstW_ = 0, previewDstH_ = 0;
+        int previewFrameCounter_ = 0;              // decimation counter for transcode mode
+        static constexpr int kPreviewDecimate = 2; // convert every Nth frame
         void cleanupPreviewState();
 
         // Audio resampling state (decode audio → f32 stereo 48kHz for playback)

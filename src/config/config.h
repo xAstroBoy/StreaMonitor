@@ -59,8 +59,8 @@ namespace sm
         // Debug
         bool debug = false;
 
-        // Preview capture (runtime flag — GUI sets true, CLI leaves false)
-        bool enablePreviewCapture = false;
+        // Preview capture (decoded video frames for GUI + web preview)
+        bool enablePreviewCapture = true;
 
         // Per-site VR defaults (site slug → VRConfig)
         // Models on VR sites automatically get these unless overridden

@@ -24,6 +24,7 @@ export interface BotState {
   gender: string
   country: string
   websiteUrl: string
+  previewUrl: string
   groupName: string
   roomId: string
   consecutiveErrors: number
@@ -98,6 +99,7 @@ export interface AppConfig {
   webHost: string
   webPort: number
   debug: boolean
+  enablePreviewCapture: boolean
   minFreeDiskPercent: number
   httpTimeoutSec: number
   userAgent: string

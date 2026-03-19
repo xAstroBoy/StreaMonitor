@@ -61,25 +61,48 @@ function statusBadge(bot: BotState): { label: string; color: string } {
   }
 }
 
-// Preview Thumbnail — MJPEG stream for recording models, single BMP for others
-function PreviewThumb({ username, siteSlug, large, isRecording }: {
-  username: string; siteSlug: string; large?: boolean; isRecording?: boolean
+// Preview Thumbnail — MJPEG stream for recording models, native site thumbnail or BMP snapshot for others
+function PreviewThumb({ username, siteSlug, large, isRecording, nativePreviewUrl }: {
+  username: string; siteSlug: string; large?: boolean; isRecording?: boolean; nativePreviewUrl?: string
 }) {
   const [errored, setErrored] = useState(false)
   const [retryKey, setRetryKey] = useState(0)
+  const [useNativeFallback, setUseNativeFallback] = useState(false)
 
-  // If recording, use MJPEG stream URL (true live video, no intervals).
-  // Otherwise use a single preview snapshot.
+  // Priority:
+  // 1. If recording → MJPEG live stream from our API
+  // 2. Else try our API BMP snapshot (works when preview capture enabled)
+  // 3. On error → fall back to native site thumbnail URL (e.g. Chaturbate/StripChat CDN)
   const src = isRecording
     ? getStreamUrl(username, siteSlug)
-    : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
+    : useNativeFallback && nativePreviewUrl
+      ? nativePreviewUrl
+      : `${getPreviewUrl(username, siteSlug)}?t=${retryKey}`
 
   // Retry on error after a delay
   useEffect(() => {
     if (!errored) return
-    const t = setTimeout(() => { setErrored(false); setRetryKey(k => k + 1) }, 5000)
+    const t = setTimeout(() => { setErrored(false); setRetryKey(k => k + 1) }, 8000)
     return () => clearTimeout(t)
   }, [errored])
+
+  // Reset fallback state when recording status changes
+  useEffect(() => {
+    if (isRecording) {
+      setUseNativeFallback(false)
+      setErrored(false)
+    }
+  }, [isRecording])
+
+  const handleError = () => {
+    if (!useNativeFallback && nativePreviewUrl) {
+      // First failure — try native site thumbnail
+      setUseNativeFallback(true)
+    } else {
+      // Native also failed or not available — show placeholder
+      setErrored(true)
+    }
+  }
 
   if (errored) {
     return (
@@ -94,11 +117,11 @@ function PreviewThumb({ username, siteSlug, large, isRecording }: {
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      key={retryKey}
+      key={`${retryKey}-${useNativeFallback}`}
       src={src}
       alt=""
       className={large ? 'preview-large' : 'preview-card-img'}
-      onError={() => setErrored(true)}
+      onError={handleError}
       loading="lazy"
     />
   )
@@ -109,6 +132,18 @@ function LiveStreamViewer({ username, siteSlug, onClose }: {
   username: string; siteSlug: string; onClose: () => void
 }) {
   const [errored, setErrored] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [retryKey, setRetryKey] = useState(0)
+
+  // Auto-retry on error after delay
+  useEffect(() => {
+    if (!errored) return
+    const t = setTimeout(() => { setErrored(false); setLoading(true); setRetryKey(k => k + 1) }, 3000)
+    return () => clearTimeout(t)
+  }, [errored])
+
+  // Add auth token to stream URL so cookies/tokens are included
+  const streamUrl = `${getStreamUrl(username, siteSlug)}?t=${retryKey}`
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center animate-fade-in" onClick={onClose}>
@@ -120,19 +155,31 @@ function LiveStreamViewer({ username, siteSlug, onClose }: {
         </button>
         <div className="relative bg-black rounded-xl overflow-hidden shadow-2xl border border-[var(--border)]">
           {!errored ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={getStreamUrl(username, siteSlug)}
-              alt="Live stream"
-              className="w-full aspect-video object-contain bg-black"
-              onError={() => setErrored(true)}
-            />
+            <>
+              {loading && (
+                <div className="absolute inset-0 flex items-center justify-center z-10">
+                  <div className="text-center">
+                    <div className="w-8 h-8 border-2 border-zinc-600 border-t-white rounded-full animate-spin mx-auto mb-3" />
+                    <p className="text-sm text-zinc-500">Connecting to stream...</p>
+                  </div>
+                </div>
+              )}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                key={retryKey}
+                src={streamUrl}
+                alt="Live stream"
+                className="w-full aspect-video object-contain bg-black"
+                onLoad={() => setLoading(false)}
+                onError={() => { setLoading(false); setErrored(true) }}
+              />
+            </>
           ) : (
             <div className="w-full aspect-video flex items-center justify-center text-zinc-600">
               <div className="text-center">
                 <Ico d={ic.rec} cls="w-12 h-12 mx-auto mb-3 opacity-30" />
                 <p className="text-sm">Stream not available</p>
-                <p className="text-xs text-zinc-700 mt-1">Model may not be recording</p>
+                <p className="text-xs text-zinc-700 mt-1">Retrying...</p>
               </div>
             </div>
           )}
@@ -172,7 +219,7 @@ function ModelDetailModal({ bot, onClose, onAction }: {
           </button>
 
           <div className="p-4 pb-0">
-            <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large isRecording={bot.recording} />
+            <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} large isRecording={bot.recording} nativePreviewUrl={bot.previewUrl} />
           </div>
 
           <div className="p-5 space-y-4">
@@ -300,7 +347,7 @@ function ModelCard({ bot, groups, selected, onClick, onStart, onStop }: {
     <div className={cardCls} onClick={onClick}>
       {/* Preview Image — MJPEG stream for recording, single frame otherwise */}
       <div className="grid-card-preview">
-        <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} isRecording={bot.recording} />
+        <PreviewThumb username={bot.username} siteSlug={bot.siteSlug} isRecording={bot.recording} nativePreviewUrl={bot.previewUrl} />
 
         {/* Status overlay top-left */}
         {bot.recording && (

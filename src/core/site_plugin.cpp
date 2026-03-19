@@ -353,6 +353,7 @@ namespace sm
     bool SitePlugin::consumePreview(PreviewFrame &out, uint64_t &lastVersion)
     {
         std::lock_guard lock(previewMutex_);
+        pumpPreviewQueue_();
         if (previewVersion_ <= lastVersion || pendingPreview_.empty())
             return false;
         // Copy (not move) — multiple consumers may read independently
@@ -365,18 +366,78 @@ namespace sm
 
     bool SitePlugin::waitForPreview(PreviewFrame &out, uint64_t &lastVersion, int timeoutMs)
     {
+        using namespace std::chrono;
+        auto deadline = steady_clock::now() + milliseconds(timeoutMs);
+
         std::unique_lock lock(previewMutex_);
-        if (previewCv_.wait_for(lock, std::chrono::milliseconds(timeoutMs),
-                                [&]
-                                { return previewVersion_ > lastVersion && !pendingPreview_.empty(); }))
+        while (steady_clock::now() < deadline)
         {
-            out.pixels = pendingPreview_.pixels;
-            out.width = pendingPreview_.width;
-            out.height = pendingPreview_.height;
-            lastVersion = previewVersion_;
-            return true;
+            pumpPreviewQueue_();
+            if (previewVersion_ > lastVersion && !pendingPreview_.empty())
+            {
+                out.pixels = pendingPreview_.pixels;
+                out.width = pendingPreview_.width;
+                out.height = pendingPreview_.height;
+                lastVersion = previewVersion_;
+                return true;
+            }
+            // Wait briefly for more data (matches pump interval)
+            previewCv_.wait_for(lock, milliseconds(33));
         }
         return false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Pump: pop one frame from the queue into pendingPreview_ at an
+    // adaptive rate.  Faster when the queue is full (catch up), slower
+    // when nearly empty (stretch remaining frames to avoid gaps).
+    // Caller MUST hold previewMutex_.
+    // ─────────────────────────────────────────────────────────────────
+    void SitePlugin::pumpPreviewQueue_()
+    {
+        if (previewQueue_.empty())
+            return;
+
+        using namespace std::chrono;
+        auto now = steady_clock::now();
+
+        // First frame — deliver immediately
+        if (lastPreviewPumpTime_.time_since_epoch().count() == 0)
+        {
+            pendingPreview_ = std::move(previewQueue_.front());
+            previewQueue_.pop_front();
+            previewVersion_++;
+            lastPreviewPumpTime_ = now;
+            return;
+        }
+
+        // Adaptive interval based on queue depth:
+        //   > 90 frames  →  16 ms (62 fps)  catch up fast
+        //   > 60          →  22 ms (45 fps)
+        //   > 30          →  33 ms (30 fps)  normal rate
+        //   > 10          →  40 ms (25 fps)  conserve
+        //   ≤ 10          →  50 ms (20 fps)  stretch
+        int64_t intervalMs;
+        size_t qs = previewQueue_.size();
+        if (qs > 90)
+            intervalMs = 16;
+        else if (qs > 60)
+            intervalMs = 22;
+        else if (qs > 30)
+            intervalMs = 33;
+        else if (qs > 10)
+            intervalMs = 40;
+        else
+            intervalMs = 50;
+
+        auto elapsed = duration_cast<milliseconds>(now - lastPreviewPumpTime_).count();
+        if (elapsed < intervalMs)
+            return;
+
+        pendingPreview_ = std::move(previewQueue_.front());
+        previewQueue_.pop_front();
+        previewVersion_++;
+        lastPreviewPumpTime_ = now;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -1125,16 +1186,25 @@ namespace sm
         recorder.setLogger(logger_);
 
         // ── Continuous preview from the live stream ─────────────────
-        // Recorder pushes RGBA frames at ~15fps. We store the latest
-        // frame and notify any waiters (MJPEG endpoint, GUI).
-        recorder.setPreviewDataCallback([this](std::vector<uint8_t> rgba, int w, int h)
-                                        {
-            std::lock_guard lock(previewMutex_);
-            pendingPreview_.pixels = std::move(rgba);
-            pendingPreview_.width = w;
-            pendingPreview_.height = h;
-            previewVersion_++;
-            previewCv_.notify_all(); });
+        // Recorder pushes EVERY decoded RGBA frame.  We queue them
+        // and a pump function drains the queue at a steady rate so
+        // the GUI sees smooth video instead of bursty segment dumps.
+        // Only enabled when enablePreviewCapture is true (saves CPU).
+        if (config.enablePreviewCapture)
+        {
+            recorder.setPreviewDataCallback([this](std::vector<uint8_t> rgba, int w, int h)
+                                            {
+                std::lock_guard lock(previewMutex_);
+                PreviewFrame f;
+                f.pixels = std::move(rgba);
+                f.width  = w;
+                f.height = h;
+                previewQueue_.push_back(std::move(f));
+                // Cap queue so memory doesn't grow unbounded
+                while (previewQueue_.size() > kMaxPreviewQueue)
+                    previewQueue_.pop_front();
+                previewCv_.notify_all(); });
+        }
 
         // ── Audio forwarding ────────────────────────────────────────
         // Recorder pushes f32 stereo 48kHz PCM. Forward to whoever

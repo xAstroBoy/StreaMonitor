@@ -36,6 +36,7 @@
 #include <iphlpapi.h>
 #include <Windows.h>
 #include <shellapi.h>
+#include "resources/resource.h"
 #else
 #include <ifaddrs.h>
 #include <netinet/in.h>
@@ -646,6 +647,7 @@ namespace sm
 
         // System tray / behavior settings
         editMinimizeToTray_ = config.minimizeToTray;
+        editEnablePreviewCapture_ = config.enablePreviewCapture;
 #ifdef _WIN32
         editAutoStart_ = SystemTray::isAutoStartEnabled();
 #endif
@@ -969,9 +971,9 @@ namespace sm
         // Active:  30 fps (user interacting / recent state changes)
         // Idle:     4 fps (nothing happening — minimal CPU usage)
         constexpr double kPreviewFrameTime = 1.0 / 60.0; // 16ms
-        constexpr double kActiveFrameTime  = 1.0 / 30.0; // 33ms
-        constexpr double kIdleFrameTime    = 1.0 / 4.0;  // 250ms
-        constexpr double kIdleTimeout      = 2.0;         // seconds before going idle
+        constexpr double kActiveFrameTime = 1.0 / 30.0;  // 33ms
+        constexpr double kIdleFrameTime = 1.0 / 4.0;     // 250ms
+        constexpr double kIdleTimeout = 2.0;             // seconds before going idle
 
         lastInputTime_ = glfwGetTime();
 
@@ -1060,9 +1062,9 @@ namespace sm
             if (showStreamView_ || showBotDetail_)
                 targetFrameTime = kPreviewFrameTime; // 60 fps for live video
             else if (isActive)
-                targetFrameTime = kActiveFrameTime;   // 30 fps for interaction
+                targetFrameTime = kActiveFrameTime; // 30 fps for interaction
             else
-                targetFrameTime = kIdleFrameTime;     //  4 fps when idle
+                targetFrameTime = kIdleFrameTime; //  4 fps when idle
 
             // Sleep the thread until an OS event or the timeout — sole rate limiter.
             // Background threads call glfwPostEmptyEvent() to wake us.
@@ -1148,6 +1150,36 @@ namespace sm
                 ImGui::UpdatePlatformWindows();
                 ImGui::RenderPlatformWindowsDefault();
                 glfwMakeContextCurrent(backup);
+
+#ifdef _WIN32
+                // Set the program icon on all viewport windows (popups, etc.)
+                // so they show our icon in the taskbar instead of the default.
+                static HICON hIconBig = nullptr;
+                static HICON hIconSmall = nullptr;
+                if (!hIconBig)
+                {
+                    HINSTANCE hInst = ::GetModuleHandle(nullptr);
+                    hIconBig = ::LoadIcon(hInst, MAKEINTRESOURCE(IDI_ICON1));
+                    hIconSmall = (HICON)::LoadImage(hInst, MAKEINTRESOURCE(IDI_ICON1),
+                                                    IMAGE_ICON,
+                                                    ::GetSystemMetrics(SM_CXSMICON),
+                                                    ::GetSystemMetrics(SM_CYSMICON),
+                                                    LR_DEFAULTCOLOR);
+                }
+                if (hIconBig)
+                {
+                    ImGuiPlatformIO &pio = ImGui::GetPlatformIO();
+                    for (int i = 1; i < pio.Viewports.Size; i++) // skip 0 = main viewport
+                    {
+                        HWND hwnd = (HWND)pio.Viewports[i]->PlatformHandleRaw;
+                        if (hwnd && ::SendMessage(hwnd, WM_GETICON, ICON_BIG, 0) != (LPARAM)hIconBig)
+                        {
+                            ::SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+                            ::SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)(hIconSmall ? hIconSmall : hIconBig));
+                        }
+                    }
+                }
+#endif
             }
             // No secondary sleep — glfwWaitEventsTimeout at top of loop
             // is the sole rate limiter.
@@ -3314,6 +3346,7 @@ namespace sm
             // System tray & auto-start
             config_.minimizeToTray = editMinimizeToTray_;
             config_.autoStartOnLogin = editAutoStart_;
+            config_.enablePreviewCapture = editEnablePreviewCapture_;
 #ifdef _WIN32
             SystemTray::setAutoStart(editAutoStart_);
 #endif
@@ -3846,6 +3879,18 @@ namespace sm
     void GuiApp::renderSettingsAdvanced()
     {
         ImGui::Spacing();
+        ImGui::TextColored(COL_ACCENT, "Preview Capture");
+        ImGui::Spacing();
+
+        if (ImGui::Checkbox("Enable Live Preview", &editEnablePreviewCapture_))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "Decode video frames for GUI/web preview thumbnails and live stream viewing.");
+        ImGui::TextColored(COL_TEXT_DIM, "Disable to save CPU — recording is unaffected.");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
         ImGui::Text("Logging");
         static int logLevel = 1; // 0=debug, 1=info, 2=warn, 3=error
         const char *levels[] = {"Debug", "Info", "Warning", "Error"};

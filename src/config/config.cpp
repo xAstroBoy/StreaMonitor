@@ -391,6 +391,8 @@ namespace sm
                 webEnabled = j["web_enabled"];
             if (j.contains("web_static_dir"))
                 webStaticDir = j["web_static_dir"].get<std::string>();
+            if (j.contains("enable_preview_capture"))
+                enablePreviewCapture = j["enable_preview_capture"];
 
             // Proxy config — new array format with backward compatibility
             if (j.contains("proxy_enabled"))
@@ -505,6 +507,7 @@ namespace sm
         j["web_password"] = webPassword;
         j["web_enabled"] = webEnabled;
         j["web_static_dir"] = webStaticDir;
+        j["enable_preview_capture"] = enablePreviewCapture;
 
         // Proxy config — new array format
         j["proxy_enabled"] = proxyEnabled;

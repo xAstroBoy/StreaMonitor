@@ -282,6 +282,7 @@ namespace sm
 #endif
         bool editMinimizeToTray_ = true;
         bool editAutoStart_ = false;
+        bool editEnablePreviewCapture_ = true;
 
         // Web server reference (owned by main, nullable)
         WebServer *webServer_ = nullptr;

@@ -21,6 +21,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <deque>
 #include <chrono>
 #include <spdlog/spdlog.h>
 
@@ -242,8 +243,12 @@ namespace sm
         // Continuous preview state (pushed by recorder, consumed by GUI/web)
         std::mutex previewMutex_;
         std::condition_variable previewCv_;
-        PreviewFrame pendingPreview_;
+        PreviewFrame pendingPreview_;           // currently-displayed frame
+        std::deque<PreviewFrame> previewQueue_; // buffered frames for smooth playback
         uint64_t previewVersion_ = 0;
+        std::chrono::steady_clock::time_point lastPreviewPumpTime_{};
+        static constexpr size_t kMaxPreviewQueue = 90; // ~3 s at 30 fps
+        void pumpPreviewQueue_();                      // caller must hold previewMutex_
 
         // Audio forwarding callback (set by GUI, called by recorder thread)
         std::mutex audioMutex_;

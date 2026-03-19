@@ -567,7 +567,10 @@ namespace sm
     {
     }
 
-    HLSRecorder::~HLSRecorder() = default;
+    HLSRecorder::~HLSRecorder()
+    {
+        stopPreviewThread_();
+    }
 
     void HLSRecorder::setProgressCallback(ProgressCallback cb)
     {
@@ -1440,6 +1443,9 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void HLSRecorder::closeAll(FFmpegState &state)
     {
+        // Stop preview thread first — it may reference the callback
+        stopPreviewThread_();
+
         // NOTE: flushEncoder() should be called BEFORE closeAll() with real counters
         // so that flushed bytes are properly counted. If somehow we get here with
         // an un-flushed encoder, flush it now as a safety net.
@@ -1967,7 +1973,9 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     // Deliver preview from a raw video packet (stream-copy mode).
     // Uses a persistent shadow decoder stored in FFmpegState.
-    // Feeds ALL video packets for smooth decode — throttled to 15fps.
+    // Feeds ALL video packets to a shadow decoder and pushes EVERY
+    // decoded RGBA frame through the callback.  No throttle here —
+    // SitePlugin buffers the frames in a queue for smooth playback.
     // ─────────────────────────────────────────────────────────────────
     bool HLSRecorder::deliverPreviewFromPacket(FFmpegState &state, AVPacket *pkt)
     {
@@ -1976,73 +1984,222 @@ namespace sm
         if (state.videoIdx < 0 || !state.inputCtx)
             return false;
 
-        // ── Initialize persistent shadow decoder on first call ──────
-        if (!state.shadowDecCtx)
+        // Start preview thread on first video packet (lazy init)
+        if (!previewThread_.joinable())
         {
             AVStream *videoStream = state.inputCtx->streams[state.videoIdx];
-            const AVCodec *decoder = avcodec_find_decoder(videoStream->codecpar->codec_id);
-            if (!decoder)
-                return false;
-
-            state.shadowDecCtx = avcodec_alloc_context3(decoder);
-            if (!state.shadowDecCtx)
-                return false;
-
-            avcodec_parameters_to_context(state.shadowDecCtx, videoStream->codecpar);
-            state.shadowDecCtx->thread_count = 1;
-
-            if (avcodec_open2(state.shadowDecCtx, decoder, nullptr) < 0)
-            {
-                avcodec_free_context(&state.shadowDecCtx);
-                return false;
-            }
-
-            state.shadowFrame = av_frame_alloc();
-            if (!state.shadowFrame)
-            {
-                avcodec_free_context(&state.shadowDecCtx);
-                return false;
-            }
+            startPreviewThread_(videoStream->codecpar);
         }
 
-        // ── Feed packet to shadow decoder ───────────────────────────
-        int ret = avcodec_send_packet(state.shadowDecCtx, pkt);
-        if (ret < 0 && ret != AVERROR(EAGAIN))
+        // Clone packet and push to queue — near-zero cost on recording thread.
+        AVPacket *clone = av_packet_clone(pkt);
+        if (!clone)
             return false;
 
-        // ── Receive all decoded frames, throttle RGBA delivery ──────
-        bool delivered = false;
-        while (true)
         {
-            ret = avcodec_receive_frame(state.shadowDecCtx, state.shadowFrame);
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-                break;
-            if (ret < 0)
-                break;
-
-            // Throttle: skip RGBA conversion if too soon
-            auto now = std::chrono::steady_clock::now();
-            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 now - lastPreviewTime_)
-                                 .count();
-            if (elapsedMs < (1000 / PREVIEW_TARGET_FPS))
+            std::lock_guard lock(previewPktMutex_);
+            previewPktQueue_.push_back(clone);
+            // Drop oldest if queue too deep (recording is producing faster
+            // than preview thread can consume — shouldn’t normally happen)
+            while (previewPktQueue_.size() > kMaxPreviewPktQueue)
             {
-                av_frame_unref(state.shadowFrame);
-                continue;
+                AVPacket *old = previewPktQueue_.front();
+                previewPktQueue_.pop_front();
+                av_packet_free(&old);
             }
-
-            // Convert to RGBA and deliver
-            std::vector<uint8_t> rgba;
-            int w = 0, h = 0;
-            if (decodeFrameToRGBA(state.shadowFrame, rgba, w, h))
-            {
-                lastPreviewTime_ = now;
-                previewDataCb_(std::move(rgba), w, h);
-                delivered = true;
-            }
-            av_frame_unref(state.shadowFrame);
         }
-        return delivered;
+        previewPktCv_.notify_one();
+        return true;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Start the preview background thread.  Creates an independent
+    // decoder context from the given codec parameters so the recording
+    // thread’s FFmpeg state is never touched.
+    // ─────────────────────────────────────────────────────────────────
+    void HLSRecorder::startPreviewThread_(AVCodecParameters *codecpar)
+    {
+        if (previewThread_.joinable())
+            return;
+
+        // Take an owned copy of codec parameters (input may close/reopen)
+        previewCodecPar_ = avcodec_parameters_alloc();
+        if (!previewCodecPar_)
+            return;
+        avcodec_parameters_copy(previewCodecPar_, codecpar);
+
+        previewThreadStop_.store(false);
+        previewThread_ = std::thread(&HLSRecorder::previewThreadFunc_, this);
+        log_->info("[Preview] Background decode thread started");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Signal the preview thread to stop and join it.
+    // ─────────────────────────────────────────────────────────────────
+    void HLSRecorder::stopPreviewThread_()
+    {
+        if (!previewThread_.joinable())
+            return;
+
+        previewThreadStop_.store(true);
+        previewPktCv_.notify_all();
+        previewThread_.join();
+
+        // Drain remaining packets
+        {
+            std::lock_guard lock(previewPktMutex_);
+            for (AVPacket *p : previewPktQueue_)
+                av_packet_free(&p);
+            previewPktQueue_.clear();
+        }
+
+        // Free owned codec params
+        if (previewCodecPar_)
+        {
+            avcodec_parameters_free(&previewCodecPar_);
+            previewCodecPar_ = nullptr;
+        }
+
+        log_->info("[Preview] Background decode thread stopped");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Preview thread main loop.  Owns its own decoder + sws context;
+    // completely independent of the recording thread’s FFmpegState.
+    // Decodes every packet, converts every Nth frame to RGBA, pushes
+    // through the callback.  Runs at OS-scheduler priority (lower
+    // than the recording thread in practice).
+    // ─────────────────────────────────────────────────────────────────
+    void HLSRecorder::previewThreadFunc_()
+    {
+        // ── Create local decoder from saved codec params ────────────
+        const AVCodec *decoder = avcodec_find_decoder(previewCodecPar_->codec_id);
+        if (!decoder)
+        {
+            log_->warn("[Preview-Thread] No decoder for codec {}", (int)previewCodecPar_->codec_id);
+            return;
+        }
+
+        AVCodecContext *decCtx = avcodec_alloc_context3(decoder);
+        if (!decCtx)
+            return;
+
+        avcodec_parameters_to_context(decCtx, previewCodecPar_);
+        decCtx->thread_count = 1;
+
+        if (avcodec_open2(decCtx, decoder, nullptr) < 0)
+        {
+            log_->warn("[Preview-Thread] Failed to open decoder");
+            avcodec_free_context(&decCtx);
+            return;
+        }
+
+        AVFrame *frame = av_frame_alloc();
+        if (!frame)
+        {
+            avcodec_free_context(&decCtx);
+            return;
+        }
+
+        log_->info("[Preview-Thread] Decoder ready: {} ({}x{})",
+                   decoder->name, previewCodecPar_->width, previewCodecPar_->height);
+
+        // Local sws context (not shared with recording thread)
+        SwsContext *localSws = nullptr;
+        int swsSrcW = 0, swsSrcH = 0, swsSrcFmt = -1;
+        int dstW = 0, dstH = 0;
+        int frameCounter = 0;
+
+        // ── Main loop: drain packet queue, decode, convert, push ────
+        while (!previewThreadStop_.load())
+        {
+            // Wait for packets with a short timeout
+            AVPacket *pkt = nullptr;
+            {
+                std::unique_lock lock(previewPktMutex_);
+                previewPktCv_.wait_for(lock, std::chrono::milliseconds(50),
+                                       [this]
+                                       { return !previewPktQueue_.empty() || previewThreadStop_.load(); });
+                if (previewThreadStop_.load() && previewPktQueue_.empty())
+                    break;
+                if (previewPktQueue_.empty())
+                    continue;
+                pkt = previewPktQueue_.front();
+                previewPktQueue_.pop_front();
+            }
+
+            // Feed packet to decoder
+            int ret = avcodec_send_packet(decCtx, pkt);
+            av_packet_free(&pkt);
+            if (ret < 0 && ret != AVERROR(EAGAIN))
+                continue;
+
+            // Receive all decoded frames
+            while (true)
+            {
+                av_frame_unref(frame);
+                ret = avcodec_receive_frame(decCtx, frame);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                    break;
+                if (ret < 0)
+                    break;
+
+                frameCounter++;
+                // Decimate: only convert every Nth frame to RGBA
+                if ((frameCounter % kPreviewDecimate) != 0)
+                    continue;
+
+                // Scale down for preview (max 640px wide)
+                int w = frame->width;
+                int h = frame->height;
+                if (w > 640)
+                {
+                    h = h * 640 / w;
+                    w = 640;
+                }
+                w = (w / 2) * 2;
+                h = (h / 2) * 2;
+                if (w <= 0 || h <= 0)
+                    continue;
+
+                // Recreate sws if source changed
+                int srcFmt = static_cast<int>(frame->format);
+                if (!localSws || swsSrcW != frame->width || swsSrcH != frame->height ||
+                    swsSrcFmt != srcFmt || dstW != w || dstH != h)
+                {
+                    if (localSws)
+                        sws_freeContext(localSws);
+                    localSws = sws_getContext(
+                        frame->width, frame->height, (AVPixelFormat)frame->format,
+                        w, h, AV_PIX_FMT_RGBA,
+                        SWS_BILINEAR, nullptr, nullptr, nullptr);
+                    if (!localSws)
+                        continue;
+                    swsSrcW = frame->width;
+                    swsSrcH = frame->height;
+                    swsSrcFmt = srcFmt;
+                    dstW = w;
+                    dstH = h;
+                }
+
+                // Convert to RGBA
+                std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+                uint8_t *dstData[1] = {rgba.data()};
+                int dstLinesize[1] = {w * 4};
+                sws_scale(localSws, frame->data, frame->linesize, 0, frame->height,
+                          dstData, dstLinesize);
+
+                // Push through callback
+                if (previewDataCb_)
+                    previewDataCb_(std::move(rgba), w, h);
+            }
+        }
+
+        // ── Cleanup ─────────────────────────────────────────────────
+        av_frame_free(&frame);
+        avcodec_free_context(&decCtx);
+        if (localSws)
+            sws_freeContext(localSws);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -2056,21 +2213,16 @@ namespace sm
         if (!previewDataCb_)
             return;
 
-        // Throttle: skip if too soon since last delivery
-        auto now = std::chrono::steady_clock::now();
-        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             now - lastPreviewTime_)
-                             .count();
-        if (elapsedMs < (1000 / PREVIEW_TARGET_FPS))
+        // Decimate: only convert every Nth frame to RGBA.
+        // This keeps CPU cost bounded on the recording thread.
+        previewFrameCounter_++;
+        if ((previewFrameCounter_ % kPreviewDecimate) != 0)
             return;
 
         std::vector<uint8_t> rgba;
         int w = 0, h = 0;
         if (decodeFrameToRGBA(frame, rgba, w, h))
-        {
-            lastPreviewTime_ = now;
             previewDataCb_(std::move(rgba), w, h);
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -2078,6 +2230,7 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void HLSRecorder::cleanupPreviewState()
     {
+        stopPreviewThread_();
         if (previewSwsCtx_)
         {
             sws_freeContext(previewSwsCtx_);
@@ -2086,7 +2239,7 @@ namespace sm
         previewSwsSrcW_ = previewSwsSrcH_ = 0;
         previewSwsSrcFmt_ = -1;
         previewDstW_ = previewDstH_ = 0;
-        lastPreviewTime_ = {};
+        previewFrameCounter_ = 0;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -2588,19 +2741,13 @@ namespace sm
                         bool packetOk = false;
 
                         // ── Preview capture (stream-copy mode) ──────────────
-                        // In stream-copy mode we don't decode, so feed all
-                        // video packets to a persistent shadow decoder for
-                        // smooth live preview. Throttled inside deliverPreviewFromPacket.
+                        // In stream-copy mode we don't decode on this thread.
+                        // Just queue the raw packet for the background preview
+                        // thread — zero decode/sws cost on the recording thread.
                         if (!state.transcoding && previewDataCb_ &&
                             pkt->stream_index == state.videoIdx)
                         {
-                            // Make a ref copy — processPacket will unref the original
-                            AVPacket *previewPkt = av_packet_clone(pkt);
-                            if (previewPkt)
-                            {
-                                deliverPreviewFromPacket(state, previewPkt);
-                                av_packet_free(&previewPkt);
-                            }
+                            deliverPreviewFromPacket(state, pkt);
                         }
 
                         // ── Audio capture (all modes) ───────────────────────

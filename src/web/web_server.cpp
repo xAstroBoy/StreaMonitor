@@ -14,6 +14,7 @@
 #include <sstream>
 #include <random>
 #include <iomanip>
+#include <thread>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -501,15 +502,26 @@ namespace sm
 
                          res.set_content_provider(
                              "multipart/x-mixed-replace; boundary=" + boundary,
-                             [this, username, site, boundary, lastVersion = uint64_t(0)](size_t /*offset*/, httplib::DataSink &sink) mutable -> bool
+                             [this, username, site, boundary,
+                              lastVersion = uint64_t(0),
+                              notRecordingCount = 0](size_t /*offset*/, httplib::DataSink &sink) mutable -> bool
                              {
                                  if (!sink.is_writable())
                                      return false;
 
-                                 // Check if bot is still recording — stop stream if not
+                                 // Check if bot is still recording — allow some grace
+                                 // before terminating (recording state can flap briefly)
                                  auto state = manager_.getBotState(username, site);
                                  if (!state || !state->recording)
-                                     return false;
+                                 {
+                                     notRecordingCount++;
+                                     if (notRecordingCount > 10) // ~5 seconds of not-recording
+                                         return false;
+                                     // Keep trying — might be a brief state flap
+                                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                                     return sink.is_writable();
+                                 }
+                                 notRecordingCount = 0; // Reset grace counter
 
                                  // Block until a new preview frame is available (up to 500ms)
                                  PreviewFrame frame;
@@ -879,6 +891,7 @@ namespace sm
                 {"webHost", config_.webHost},
                 {"webPort", config_.webPort},
                 {"debug", config_.debug},
+                {"enablePreviewCapture", config_.enablePreviewCapture},
                 {"minFreeDiskPercent", config_.minFreeDiskPercent},
                 {"httpTimeoutSec", config_.httpTimeoutSec},
                 {"userAgent", config_.userAgent}
@@ -900,6 +913,8 @@ namespace sm
                     config_.debug = body["debug"].get<bool>();
                 if (body.contains("minFreeDiskPercent"))
                     config_.minFreeDiskPercent = body["minFreeDiskPercent"].get<float>();
+                if (body.contains("enablePreviewCapture"))
+                    config_.enablePreviewCapture = body["enablePreviewCapture"].get<bool>();
 
                 jsonResponse(res, {{"success", true}, {"message", "Config updated"}});
             } catch (const std::exception &e) {
