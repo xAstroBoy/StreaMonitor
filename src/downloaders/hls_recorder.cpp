@@ -2569,7 +2569,7 @@ namespace sm
                             auto *firstPar = state.inputCtx->streams[state.videoIdx]->codecpar;
                             int firstW = firstPar->width;
                             int firstH = firstPar->height;
-                            if (firstW > 0 && firstH > 0 && firstH > firstW)
+                            if (isPortraitStream(firstW, firstH))
                             {
                                 log_->info("First-open portrait detected: {}x{} → switching to Mobile/",
                                            firstW, firstH);
@@ -2642,7 +2642,7 @@ namespace sm
                                 ResolutionInfo ri;
                                 ri.width = newW;
                                 ri.height = newH;
-                                ri.isMobile = (newH > newW); // portrait = mobile
+                                ri.isMobile = isPortraitStream(newW, newH);
                                 newPath = resChangeCb_(ri);
                             }
 

@@ -10,10 +10,13 @@
 //   ...
 //   if ALL offline → sleep → restart cycle
 //
-// Mobile dual-recording: when a model broadcasts from mobile,
+// Mobile dual-recording: when the API reports a mobile broadcaster,
 // ALL non-VR public pairings are recorded in parallel to capture
 // both camera views (mobile portrait + desktop landscape).
-// Stream resolution (h > w = portrait) determines Mobile/ subfolder.
+// The API hint (apiMobileHint) TRIGGERS dual-recording, but the
+// actual output FOLDER (PC vs Mobile/) is determined exclusively
+// by stream resolution (isPortraitStream: h > w, ratio < 0.85).
+// The site API is NEVER trusted for folder decisions.
 // VR pairings are ALWAYS independent — never mobile, never parallel.
 // ─────────────────────────────────────────────────────────────────
 

@@ -249,7 +249,9 @@ namespace sm
                     }
 
                     pairing.lastStatus = status;
-                    pairing.lastMobile = pairing.plugin->isMobile();
+                    // Use API mobile hint for dual-recording trigger.
+                    // Actual mobile detection is from stream resolution.
+                    pairing.lastMobile = pairing.plugin->apiMobileHint();
 
                     // Update state for GUI
                     {
@@ -275,16 +277,21 @@ namespace sm
                         anyLive = true;
 
                         // ── Mobile dual-recording ───────────────────────
-                        // If this pairing is mobile AND non-VR, check all
-                        // other non-VR pairings — if any are also PUBLIC,
-                        // download from them in parallel to capture both
-                        // camera views (mobile + desktop).
+                        // If this pairing's API reports mobile AND non-VR,
+                        // check all other non-VR pairings — if any are also
+                        // PUBLIC, download from them in parallel to capture
+                        // both camera views (mobile + desktop).
                         // VR pairings are ALWAYS left alone — never
                         // participate in dual-recording.
+                        // NOTE: We use apiMobileHint() (from the site API)
+                        // to TRIGGER dual-recording because we need to know
+                        // before the stream opens.  The actual output FOLDER
+                        // (PC vs Mobile/) is determined by stream resolution
+                        // in the recorder's first-open detection.
                         bool mobileMulti = pairing.lastMobile && !isVrSlug(pairing.site);
                         std::vector<std::unique_ptr<std::jthread>> parallelThreads;
                         std::vector<std::unique_ptr<CancellationToken>> parallelTokens;
-                        bool startedAsMobile = pairing.lastMobile;
+                        bool startedAsMobile = pairing.lastMobile; // API hint at launch time
 
                         if (mobileMulti)
                         {
@@ -309,7 +316,7 @@ namespace sm
                                     continue;
                                 }
                                 other.lastStatus = otherStatus;
-                                other.lastMobile = other.plugin->isMobile();
+                                other.lastMobile = other.plugin->apiMobileHint();
 
                                 // Update GUI state for this pairing
                                 {

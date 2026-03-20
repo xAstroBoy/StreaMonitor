@@ -86,8 +86,27 @@ namespace sm
     {
         int width = 0;
         int height = 0;
-        bool isMobile = false; // true if height > width (portrait)
+        bool isMobile = false; // true if stream is portrait (mobile device)
     };
+
+    // ── Improved portrait/mobile detection ──────────────────────────
+    // A stream is considered "mobile" (portrait orientation) when:
+    //   1. Both dimensions are valid (> 100 — not codec placeholders)
+    //   2. Height > Width (portrait)
+    //   3. Aspect ratio (W/H) < 0.85 — avoids near-square edge cases
+    // Typical mobile: 720×1280 (0.5625), 1080×1920 (0.5625), 480×854
+    // Typical PC:     1920×1080 (1.778),  1280×720  (1.778)
+    // The gap is large, so 0.85 threshold safely separates them.
+    inline bool isPortraitStream(int w, int h)
+    {
+        if (w <= 100 || h <= 100)
+            return false; // placeholder or tiny
+        if (h <= w)
+            return false; // landscape or square
+        float ratio = static_cast<float>(w) / static_cast<float>(h);
+        return ratio < 0.85f; // clearly portrait
+    }
+
     using ResolutionChangeCallback = std::function<std::string(const ResolutionInfo &)>;
 
     // ── HLS Recorder (native FFmpeg API) ────────────────────────────

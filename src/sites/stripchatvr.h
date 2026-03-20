@@ -20,8 +20,9 @@ namespace sm
         Status checkStatus() override;
         std::string getWebsiteUrl() const override;
         bool supportsBulkUpdate() const override { return false; }
-        // VR streams are NEVER mobile — ignore API's isMobile flag
+        // VR streams are NEVER mobile — override both detection methods
         bool isMobile() const override { return false; }
+        bool apiMobileHint() const override { return false; }
 
         std::pair<std::string, std::vector<std::string>> getSiteColor() const override
         {

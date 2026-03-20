@@ -208,14 +208,19 @@ namespace sm
             if (!country.empty())
                 setCountry(country);
 
-            // Mobile detection from cam-level data (json["cam"])
+            // Mobile hint from cam-level data (json["cam"])
+            // NOTE: This is the broadcaster's DEVICE type (phone vs PC), NOT
+            // the stream orientation.  It is kept ONLY as a hint for
+            // cross-register dual-recording triggers.  Actual mobile detection
+            // comes from the recorder's first-open portrait check (h > w).
             auto cam = json.value("cam", nlohmann::json::object());
             auto broadcastSettings = cam.value("broadcastSettings", nlohmann::json::object());
 
-            isMobile_ = broadcastSettings.value("isMobile", false);
-            if (!isMobile_)
-                isMobile_ = userInner.value("isMobile", false);
-            setMobile(isMobile_);
+            apiMobileHint_ = broadcastSettings.value("isMobile", false);
+            if (!apiMobileHint_)
+                apiMobileHint_ = userInner.value("isMobile", false);
+            // Do NOT call setMobile() here — mobile state is set exclusively
+            // from the actual stream resolution by the recorder's callback.
 
             // NOTE: isVr_ is NOT set here. The base StripChat class always
             // records the non-VR stream. Only StripChatVR sets isVr_ = true

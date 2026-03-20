@@ -20,7 +20,11 @@ namespace sm
         std::string getWebsiteUrl() const override;
         std::string getPreviewUrl() const override;
         bool supportsBulkUpdate() const override { return true; }
-        bool isMobile() const override { return isMobile_; }
+
+        // API mobile hint — used ONLY as a trigger for cross-register
+        // dual-recording.  Actual mobile detection comes from stream
+        // resolution (portrait = h > w), never from this flag.
+        bool apiMobileHint() const override { return apiMobileHint_; }
 
         std::pair<std::string, std::vector<std::string>> getSiteColor() const override
         {
@@ -39,9 +43,9 @@ namespace sm
         nlohmann::json lastInfo_;
         int64_t modelId_ = 0;
         std::string hlsStreamName_;
-        bool isMobile_ = false;
-        bool isVr_ = false;    // for VR subclass
-        std::string vrSuffix_; // VR stream suffix
+        bool apiMobileHint_ = false; // API-reported mobile (broadcaster device), NOT trusted for folders
+        bool isVr_ = false;          // for VR subclass
+        std::string vrSuffix_;       // VR stream suffix
 
         // Lazy mouflon init — called on first use, not in constructor
         static void ensureMouflonInit();

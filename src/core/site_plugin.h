@@ -174,7 +174,17 @@ namespace sm
         virtual std::string getPreviewUrl() const { return ""; }
 
         // ── Mobile detection ────────────────────────────────────────
-        virtual bool isMobile() const { return false; }
+        // Returns the stream-detected mobile state.  This is set by the
+        // recorder's resolution callback when it first sees the actual
+        // video dimensions (portrait = mobile).  Always starts false and
+        // is updated automatically — NEVER trust the site API.
+        virtual bool isMobile() const;
+
+        // API mobile hint — sites (like StripChat) may report isMobile
+        // from the broadcaster's device.  This is ONLY used as a trigger
+        // hint for cross-register dual-recording (model_group), NOT for
+        // output folder decisions.  Default: false.
+        virtual bool apiMobileHint() const { return false; }
 
         // ── Bulk update support ─────────────────────────────────────
         virtual bool supportsBulkUpdate() const { return false; }
@@ -228,6 +238,7 @@ namespace sm
         std::atomic<bool> running_{false};
         std::atomic<bool> quitting_{false};
         std::atomic<bool> resyncPending_{false}; // Force immediate status check
+        std::atomic<bool> streamMobile_{false};  // Stream-detected portrait (h > w)
         CancellationToken cancelToken_;
 
         // Condition variable for efficient sleeping (replaces 1-second polling)

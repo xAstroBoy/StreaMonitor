@@ -287,8 +287,14 @@ namespace sm
 
     void SitePlugin::setMobile(bool mobile)
     {
+        streamMobile_.store(mobile, std::memory_order_relaxed);
         std::lock_guard lock(stateMutex_);
         state_.mobile = mobile;
+    }
+
+    bool SitePlugin::isMobile() const
+    {
+        return streamMobile_.load(std::memory_order_relaxed);
     }
 
     void SitePlugin::setGender(Gender g)
@@ -1326,8 +1332,9 @@ namespace sm
         // Set resolution change callback — when the stream's resolution
         // changes (e.g. model switches mobile↔desktop), close the current
         // file and start a new one in the appropriate subfolder.
-        // This detects mobile at the FFmpeg level (portrait = height > width)
-        // instead of relying on the SC API which can be slow.
+        // Mobile detection is ALWAYS from the actual stream resolution
+        // (portrait = isPortraitStream: h > w, ratio < 0.85).
+        // The site API's isMobile flag is NEVER trusted for this.
         recorder.setResolutionChangeCallback([this, &config](const ResolutionInfo &ri) -> std::string
                                              {
             // VR sites (slug ends with "VR") are NEVER mobile — ignore
@@ -1336,11 +1343,11 @@ namespace sm
                           siteSlug_.compare(siteSlug_.size() - 2, 2, "VR") == 0;
             bool mobile = ri.isMobile && !vrSite;
 
-            logger_->info("Resolution change detected: {}x{} (mobile={})",
+            logger_->info("Resolution: {}x{} → mobile={} (stream-detected)",
                           ri.width, ri.height, mobile);
 
-            // Update mobile state from the actual video resolution — faster
-            // and more reliable than waiting for the next SC API response.
+            // Update mobile state from the actual video resolution.
+            // This is the ONLY source of truth for mobile detection.
             setMobile(mobile);
 
             // Generate a new output path (picks up the Mobile subfolder change)

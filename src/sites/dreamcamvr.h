@@ -17,8 +17,9 @@ namespace sm
 
         explicit DreamCamVR(const std::string &username);
 
-        // VR streams are NEVER mobile
+        // VR streams are NEVER mobile — override both detection methods
         bool isMobile() const override { return false; }
+        bool apiMobileHint() const override { return false; }
 
         std::string getWebsiteUrl() const override
         {
