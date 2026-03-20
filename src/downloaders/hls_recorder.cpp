@@ -145,7 +145,7 @@ namespace sm
             // we check as defense-in-depth.
             const int32_t *matrix = nullptr;
             size_t matrixSize = 0;
-#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 0, 0)
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(60, 0, 0)
             // FFmpeg 7+: side_data moved to codecpar->coded_side_data
             if (stream->codecpar)
             {
