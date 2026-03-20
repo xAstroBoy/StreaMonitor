@@ -186,6 +186,13 @@ namespace sm
         // output folder decisions.  Default: false.
         virtual bool apiMobileHint() const { return false; }
 
+        // ── Master playlist URL (for SegmentFeeder monitoring) ───────
+        // Stored by selectResolution() or site-specific getVideoUrl().
+        // Used by the recorder to periodically re-fetch the master m3u8
+        // and detect orientation changes from RESOLUTION= tags.
+        std::string masterUrl() const;
+        void setMasterUrl(const std::string &url);
+
         // ── Bulk update support ─────────────────────────────────────
         virtual bool supportsBulkUpdate() const { return false; }
 
@@ -240,6 +247,8 @@ namespace sm
         std::atomic<bool> resyncPending_{false}; // Force immediate status check
         std::atomic<bool> streamMobile_{false};  // Stream-detected portrait (h > w)
         CancellationToken cancelToken_;
+        std::string lastMasterUrl_; // Master playlist URL for feeder monitoring
+        mutable std::mutex masterUrlMutex_;
 
         // Condition variable for efficient sleeping (replaces 1-second polling)
         std::mutex sleepMutex_;

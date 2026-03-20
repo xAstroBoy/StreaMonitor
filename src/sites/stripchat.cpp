@@ -385,6 +385,9 @@ namespace sm
                 return playlistUrl;
             }
 
+            // Store master URL for SegmentFeeder orientation monitoring
+            setMasterUrl(playlistUrl);
+
             auto master = M3U8Parser::parseMaster(m3u8Doc, playlistUrl);
             if (master.variants.empty())
             {

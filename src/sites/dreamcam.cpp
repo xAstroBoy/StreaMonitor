@@ -84,7 +84,9 @@ namespace sm
 
     std::string DreamCam::getVideoUrl()
     {
-        return streamUrl_; // direct stream URL, no resolution selection
+        if (streamUrl_.empty())
+            return {};
+        return selectResolution(streamUrl_);
     }
 
 } // namespace sm

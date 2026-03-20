@@ -101,7 +101,8 @@ namespace sm
         // Hardcoded CDN URL pattern — lowercased username
         std::string lowerUser = username();
         std::transform(lowerUser.begin(), lowerUser.end(), lowerUser.begin(), ::tolower);
-        return "https://camscdn.cams.com/camscdn/cdn-" + lowerUser + ".m3u8";
+        std::string url = "https://camscdn.cams.com/camscdn/cdn-" + lowerUser + ".m3u8";
+        return selectResolution(url);
     }
 
 } // namespace sm

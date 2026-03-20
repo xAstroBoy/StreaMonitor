@@ -297,6 +297,18 @@ namespace sm
         return streamMobile_.load(std::memory_order_relaxed);
     }
 
+    std::string SitePlugin::masterUrl() const
+    {
+        std::lock_guard lock(masterUrlMutex_);
+        return lastMasterUrl_;
+    }
+
+    void SitePlugin::setMasterUrl(const std::string &url)
+    {
+        std::lock_guard lock(masterUrlMutex_);
+        lastMasterUrl_ = url;
+    }
+
     void SitePlugin::setGender(Gender g)
     {
         std::lock_guard lock(stateMutex_);
@@ -477,6 +489,9 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     std::string SitePlugin::selectResolution(const std::string &masterUrl)
     {
+        // Store master URL for SegmentFeeder orientation monitoring
+        setMasterUrl(masterUrl);
+
         auto resp = http_.get(masterUrl, 15);
         if (!resp.ok())
         {
@@ -1343,8 +1358,10 @@ namespace sm
                           siteSlug_.compare(siteSlug_.size() - 2, 2, "VR") == 0;
             bool mobile = ri.isMobile && !vrSite;
 
-            logger_->info("Resolution: {}x{} → mobile={} (stream-detected)",
-                          ri.width, ri.height, mobile);
+            logger_->info("Resolution: {}x{} → mobile={} (detected via {})",
+                          ri.width, ri.height, mobile,
+                          ri.source == ResolutionInfo::Source::MasterPlaylist
+                              ? "master-playlist" : "codec-params");
 
             // Update mobile state from the actual video resolution.
             // This is the ONLY source of truth for mobile detection.
@@ -1353,7 +1370,11 @@ namespace sm
             // Generate a new output path (picks up the Mobile subfolder change)
             return generateOutputPath(config); });
 
-        auto result = recorder.record(videoUrl, outputPath, cancelToken_, config.userAgent);
+        // Pass masterUrl for SegmentFeeder orientation monitoring.
+        // The feeder will periodically re-fetch the master m3u8 and
+        // detect portrait↔landscape changes from RESOLUTION= tags.
+        auto result = recorder.record(videoUrl, outputPath, cancelToken_,
+                                      config.userAgent, "", {}, {}, masterUrl());
 
         setRecording(false);
 

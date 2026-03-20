@@ -111,6 +111,7 @@ namespace sm
         auto stream = lastInfo_.value("stream", nlohmann::json::object());
         auto servers = stream.value("edge_servers", std::vector<std::string>{});
         std::string streamName = stream.value("stream_name", "");
+        std::string token = stream.value("token", "");
 
         if (servers.empty() || streamName.empty())
             return "";
@@ -119,7 +120,12 @@ namespace sm
         if (base.find("http") != 0)
             base = "https://" + base;
 
-        std::string masterUrl = base + "/" + streamName + "_v1/index.ll.m3u8";
+        // Python: filter=tracks:v4v3v2v1a1a2&multitrack=true&token={token}
+        std::string masterUrl = base + "/" + streamName +
+                                "_v1/index.ll.m3u8?filter=tracks:v4v3v2v1a1a2&multitrack=true";
+        if (!token.empty())
+            masterUrl += "&token=" + token;
+
         return selectResolution(masterUrl);
     }
 

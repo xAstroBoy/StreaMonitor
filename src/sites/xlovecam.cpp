@@ -148,7 +148,9 @@ namespace sm
 
     std::string XLoveCam::getVideoUrl()
     {
-        return hlsUrl_; // direct playlist URL
+        if (hlsUrl_.empty())
+            return {};
+        return selectResolution(hlsUrl_);
     }
 
 } // namespace sm

@@ -14,6 +14,7 @@ extern "C"
 {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavcodec/packet.h>
 #include <libavutil/avutil.h>
 #include <libavutil/opt.h>
 #include <libavutil/mathematics.h>
@@ -24,6 +25,7 @@ extern "C"
 #include <libavutil/pixdesc.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/mem.h>
+#include <libavutil/display.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 #include <libavutil/channel_layout.h>
@@ -114,6 +116,182 @@ namespace sm
         url = M3U8Parser::inheritQueryParams(baseUrl, url);
         url = rewriteMediaHlsUrl(url);
         return url;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Comprehensive portrait/mobile stream detection
+    //
+    // Checks multiple signals in order of reliability:
+    //   1. Display matrix rotation (90°/270° → swap w/h)
+    //   2. SAR correction (display_w = coded_w × SAR_num / SAR_den)
+    //   3. Aspect ratio threshold (w/h < 0.85 after corrections)
+    //
+    // The AVStream parameter is optional — if null, only raw w/h
+    // are checked (sufficient 99% of the time for live cam sites).
+    // ─────────────────────────────────────────────────────────────────
+    bool isPortraitStream(int w, int h, const AVStream *stream)
+    {
+        if (w <= 100 || h <= 100)
+            return false; // codec placeholder or tiny
+
+        int dispW = w;
+        int dispH = h;
+
+        if (stream)
+        {
+            // ── Check display matrix for rotation ───────────────────
+            // Mobile encoders may output landscape pixels + 90°/270°
+            // rotation metadata.  Transcoders usually strip this, but
+            // we check as defense-in-depth.
+            const int32_t *matrix = nullptr;
+            size_t matrixSize = 0;
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 0, 0)
+            // FFmpeg 7+: side_data moved to codecpar->coded_side_data
+            if (stream->codecpar)
+            {
+                const AVPacketSideData *sd = av_packet_side_data_get(
+                    stream->codecpar->coded_side_data,
+                    stream->codecpar->nb_coded_side_data,
+                    AV_PKT_DATA_DISPLAYMATRIX);
+                if (sd)
+                {
+                    matrix = reinterpret_cast<const int32_t *>(sd->data);
+                    matrixSize = sd->size;
+                }
+            }
+#elif LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 0, 0)
+            // FFmpeg 5-6: side_data on AVStream directly
+            for (int i = 0; i < stream->nb_side_data; i++)
+            {
+                if (stream->side_data[i].type == AV_PKT_DATA_DISPLAYMATRIX)
+                {
+                    matrix = reinterpret_cast<const int32_t *>(stream->side_data[i].data);
+                    matrixSize = stream->side_data[i].size;
+                    break;
+                }
+            }
+#endif
+            if (matrix && matrixSize >= 9 * sizeof(int32_t))
+            {
+                double rotation = av_display_rotation_get(matrix);
+                // Normalize: -180 to 180
+                rotation = fmod(rotation, 360.0);
+                if (rotation < -180.0)
+                    rotation += 360.0;
+                if (rotation > 180.0)
+                    rotation -= 360.0;
+                // 90° or 270° (±45° tolerance) means rotated portrait
+                double absRot = fabs(fmod(rotation, 180.0));
+                if (absRot > 45.0 && absRot < 135.0)
+                {
+                    std::swap(dispW, dispH);
+                }
+            }
+
+            // ── Apply SAR (Sample Aspect Ratio) correction ──────────
+            // If SAR ≠ 1:1, the display dimensions differ from coded.
+            // display_width = coded_width × SAR_num / SAR_den
+            const AVCodecParameters *par = stream->codecpar;
+            if (par)
+            {
+                AVRational sar = par->sample_aspect_ratio;
+                if (sar.num > 0 && sar.den > 0 && sar.num != sar.den)
+                {
+                    dispW = dispW * sar.num / sar.den;
+                }
+            }
+        }
+
+        // ── Final portrait check with aspect ratio threshold ────────
+        if (dispH <= dispW)
+            return false; // landscape or square
+
+        float ratio = static_cast<float>(dispW) / static_cast<float>(dispH);
+        return ratio < 0.85f; // clearly portrait (typical mobile: 0.5625)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Master playlist orientation check
+    //
+    // Re-fetches the master m3u8, parses RESOLUTION= from all variants,
+    // and determines if the stream is now portrait or landscape.
+    // If orientation changed from last known state, fires the callback.
+    // ─────────────────────────────────────────────────────────────────
+    void HLSRecorder::SegmentFeeder::checkMasterOrientation(HttpClient &http)
+    {
+        if (masterUrl.empty() || !orientationCb)
+            return;
+
+        auto resp = http.get(masterUrl, 8);
+        if (!resp.ok())
+            return;
+
+        auto content = resp.body;
+        // Decode (mouflon) if needed
+        if (masterDecoder)
+            content = masterDecoder(content);
+
+        if (!M3U8Parser::isMasterPlaylist(content))
+            return;
+
+        auto master = M3U8Parser::parseMaster(content, masterUrl);
+        if (master.variants.empty())
+            return;
+
+        // Check ALL variants — if ANY is portrait, the stream is portrait.
+        // The broadcaster switched camera → ALL variants flip orientation.
+        bool anyPortrait = false;
+        int bestW = 0, bestH = 0;
+        for (const auto &v : master.variants)
+        {
+            if (v.width > 0 && v.height > 0)
+            {
+                // Use isPortraitStream for consistent detection
+                if (isPortraitStream(v.width, v.height))
+                    anyPortrait = true;
+                // Track the highest-bandwidth variant for reporting
+                if (v.bandwidth > 0 && (bestW == 0 || v.bandwidth > master.variants[0].bandwidth))
+                {
+                    bestW = v.width;
+                    bestH = v.height;
+                }
+            }
+        }
+
+        // Use first variant if we didn't find best by bandwidth
+        if (bestW == 0 && !master.variants.empty())
+        {
+            bestW = master.variants[0].width;
+            bestH = master.variants[0].height;
+        }
+
+        // Initialize on first check (no callback — just record baseline)
+        if (!orientationInitialized)
+        {
+            lastOrientationPortrait = anyPortrait;
+            orientationInitialized = true;
+            log->info("SegmentFeeder: master playlist orientation baseline: {} ({}x{})",
+                      anyPortrait ? "PORTRAIT" : "LANDSCAPE", bestW, bestH);
+            return;
+        }
+
+        // Detect orientation change
+        if (anyPortrait != lastOrientationPortrait)
+        {
+            lastOrientationPortrait = anyPortrait;
+            log->info("SegmentFeeder: *** ORIENTATION CHANGED to {} ({}x{}) — "
+                      "detected from master playlist BEFORE video data ***",
+                      anyPortrait ? "PORTRAIT/MOBILE" : "LANDSCAPE/PC",
+                      bestW, bestH);
+
+            // Fire the resolution change callback with master-detected info
+            ResolutionInfo ri;
+            ri.width = bestW;
+            ri.height = bestH;
+            ri.isMobile = anyPortrait;
+            ri.source = ResolutionInfo::Source::MasterPlaylist;
+            orientationCb(ri);
+        }
     }
 
     // ── SegmentFeeder: push bytes into ring buffer ──────────────────
@@ -319,6 +497,14 @@ namespace sm
         running = true;
         log->info("SegmentFeeder: started (lastSeq={})", lastSeq);
 
+        // ── Initial master playlist orientation baseline ─────────────
+        // If a masterUrl was provided, do the first orientation check
+        // synchronously so we have a baseline before any video data.
+        if (!masterUrl.empty())
+        {
+            checkMasterOrientation(http);
+        }
+
         // ── Background thread: poll → parse → download → feed ───────
         thread = std::thread([this, playlistUrl, userAgent, decoder,
                               lastSeqInit = lastSeq]()
@@ -332,6 +518,7 @@ namespace sm
             std::string lastInitUrl;
             int consecutiveErrors = 0;
             int cpaCount = 0;
+            int masterCheckCounter = 0; // master poll every N iterations
 
             while (running.load() && !cancel->isCancelled())
             {
@@ -342,6 +529,27 @@ namespace sm
 
                 if (!running.load() || cancel->isCancelled())
                     break;
+
+                // ── Periodic master playlist orientation check ───────
+                // Every kMasterPollInterval iterations (~5s at 1s poll),
+                // re-fetch the master m3u8 and check RESOLUTION= tags.
+                // This detects orientation changes 2-4s BEFORE the video
+                // data changes, allowing the recorder to prepare the new
+                // output path immediately.
+                masterCheckCounter++;
+                if (!masterUrl.empty() && orientationCb &&
+                    masterCheckCounter >= kMasterPollInterval)
+                {
+                    masterCheckCounter = 0;
+                    try
+                    {
+                        checkMasterOrientation(threadHttp);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        log->debug("SegmentFeeder: master orientation check failed: {}", e.what());
+                    }
+                }
 
                 try
                 {
@@ -2362,7 +2570,8 @@ namespace sm
                                         const std::string &userAgent,
                                         const std::string &cookies,
                                         const std::map<std::string, std::string> &headers,
-                                        const VRConfig &vrConfig)
+                                        const VRConfig &vrConfig,
+                                        const std::string &masterUrl)
     {
         RecordingResult result;
 
@@ -2426,6 +2635,21 @@ namespace sm
             }
 
             feeder.statusCheckCb = statusCheckCb_;
+
+            // ── Master playlist monitoring for orientation detection ──
+            // If a masterUrl is provided, the feeder's background thread
+            // will periodically re-fetch the master m3u8 and parse
+            // RESOLUTION= tags.  When orientation flips, it fires the
+            // resolution change callback 2-4s BEFORE the actual video
+            // data changes — the earliest possible detection.
+            if (!masterUrl.empty() && resChangeCb_)
+            {
+                feeder.masterUrl = masterUrl;
+                feeder.masterDecoder = feederDecoder; // share mouflon decoder
+                feeder.orientationCb = resChangeCb_;
+                log_->info("Master playlist monitoring enabled: {}", masterUrl);
+            }
+
             if (feeder.start(hlsUrl, feederUa, cancel, feederDecoder))
             {
                 useFeeder = true;
@@ -2560,16 +2784,19 @@ namespace sm
 
                         // ── First-open mobile detection ─────────────────────
                         // Check if the stream is portrait (mobile) on the very
-                        // first open. The caller may have started us at a PC
-                        // path; if the actual stream is portrait, fire the
-                        // resolution callback to switch to Mobile/ immediately
-                        // (before writing any packets to the wrong file).
+                        // first open using ALL signals: codec params, display
+                        // matrix rotation, SAR correction, plus aspect ratio.
+                        // The caller may have started us at a PC path; if the
+                        // actual stream is portrait, fire the resolution
+                        // callback to switch to Mobile/ immediately (before
+                        // writing any packets to the wrong file).
                         if (resChangeCb_ && state.videoIdx >= 0 && state.inputCtx)
                         {
-                            auto *firstPar = state.inputCtx->streams[state.videoIdx]->codecpar;
+                            auto *vstream = state.inputCtx->streams[state.videoIdx];
+                            auto *firstPar = vstream->codecpar;
                             int firstW = firstPar->width;
                             int firstH = firstPar->height;
-                            if (isPortraitStream(firstW, firstH))
+                            if (isPortraitStream(firstW, firstH, vstream))
                             {
                                 log_->info("First-open portrait detected: {}x{} → switching to Mobile/",
                                            firstW, firstH);
@@ -2627,7 +2854,8 @@ namespace sm
                         // Rather than muxing mixed resolutions into one MKV
                         // (which produces ugly variable-res files), close the
                         // current output and start a new file.
-                        auto *par = state.inputCtx->streams[state.videoIdx]->codecpar;
+                        auto *vstream = state.inputCtx->streams[state.videoIdx];
+                        auto *par = vstream->codecpar;
                         int newW = par->width;
                         int newH = par->height;
                         if (newW > 0 && newH > 0 &&
@@ -2642,7 +2870,8 @@ namespace sm
                                 ResolutionInfo ri;
                                 ri.width = newW;
                                 ri.height = newH;
-                                ri.isMobile = isPortraitStream(newW, newH);
+                                ri.isMobile = isPortraitStream(newW, newH, vstream);
+                                ri.source = ResolutionInfo::Source::CodecParams;
                                 newPath = resChangeCb_(ri);
                             }
 

@@ -27,7 +27,7 @@ namespace sm
         }
 
     private:
-        std::string selectBestEncoding() const;
+        std::string selectBestEncoding();
 
         nlohmann::json lastInfo_;
     };

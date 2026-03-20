@@ -87,25 +87,44 @@ namespace sm
         int width = 0;
         int height = 0;
         bool isMobile = false; // true if stream is portrait (mobile device)
+
+        // How the orientation was detected
+        enum class Source
+        {
+            MasterPlaylist, // From RESOLUTION= tags in master m3u8 (cheapest, earliest)
+            CodecParams,    // From AVCodecParameters width/height
+            DisplayMatrix,  // From rotation side-data (90°/270°)
+            SARCorrected,   // From SAR-adjusted dimensions
+        };
+        Source source = Source::CodecParams;
     };
 
-    // ── Improved portrait/mobile detection ──────────────────────────
-    // A stream is considered "mobile" (portrait orientation) when:
-    //   1. Both dimensions are valid (> 100 — not codec placeholders)
-    //   2. Height > Width (portrait)
-    //   3. Aspect ratio (W/H) < 0.85 — avoids near-square edge cases
-    // Typical mobile: 720×1280 (0.5625), 1080×1920 (0.5625), 480×854
-    // Typical PC:     1920×1080 (1.778),  1280×720  (1.778)
-    // The gap is large, so 0.85 threshold safely separates them.
-    inline bool isPortraitStream(int w, int h)
-    {
-        if (w <= 100 || h <= 100)
-            return false; // placeholder or tiny
-        if (h <= w)
-            return false; // landscape or square
-        float ratio = static_cast<float>(w) / static_cast<float>(h);
-        return ratio < 0.85f; // clearly portrait
-    }
+    // ── Comprehensive portrait/mobile detection ─────────────────────
+    //
+    // Detection signals (checked in order, all applied):
+    //
+    //   1. Display matrix rotation (AV_PKT_DATA_DISPLAYMATRIX):
+    //      Mobile encoders may output landscape pixels with 90°/270°
+    //      rotation metadata.  Transcoders usually strip this and
+    //      produce native portrait pixels, but we check as defense.
+    //      If rotation ≈ ±90°, width and height are swapped.
+    //
+    //   2. Sample Aspect Ratio (SAR) correction:
+    //      If SAR ≠ 1:1, display width = coded_width × SAR_num/SAR_den.
+    //      Rare in live streams but must be checked.
+    //
+    //   3. Aspect ratio threshold:
+    //      After rotation + SAR correction, portrait = h > w AND
+    //      (w / h) < 0.85.  This avoids near-square edge cases.
+    //      Both dimensions must be > 100 (rejects codec placeholders).
+    //
+    // Returns true if the stream is portrait (mobile orientation).
+    //
+    // Parameters:
+    //   w, h    — coded dimensions (AVCodecParameters width/height)
+    //   stream  — AVStream pointer (nullable) for side-data checks
+    //             (display matrix, SAR). Pass nullptr to skip.
+    bool isPortraitStream(int w, int h, const struct AVStream *stream = nullptr);
 
     using ResolutionChangeCallback = std::function<std::string(const ResolutionInfo &)>;
 
@@ -122,13 +141,18 @@ namespace sm
 
         // ── Main recording function ─────────────────────────────────
         // Records HLS stream to file. Blocks until cancelled or error.
+        // masterUrl: optional master playlist URL for orientation monitoring.
+        //   If set, the SegmentFeeder periodically re-fetches the master
+        //   m3u8 and detects portrait↔landscape changes from RESOLUTION=
+        //   tags BEFORE the video data changes (2-4s early detection).
         RecordingResult record(const std::string &hlsUrl,
                                const std::string &outputPath,
                                CancellationToken &cancel,
                                const std::string &userAgent = "",
                                const std::string &cookies = "",
                                const std::map<std::string, std::string> &headers = {},
-                               const VRConfig &vrConfig = {});
+                               const VRConfig &vrConfig = {},
+                               const std::string &masterUrl = "");
 
         // ── Progress ────────────────────────────────────────────────
         void setProgressCallback(ProgressCallback cb);
@@ -387,6 +411,19 @@ namespace sm
             // ── Status check (early abort on private/offline) ──
             StatusCheckCallback statusCheckCb;
 
+            // ── Master playlist monitoring (orientation detection) ──
+            // When masterUrl is set, the feeder periodically re-fetches
+            // the master m3u8 and parses RESOLUTION= tags from all
+            // variants.  If any variant's orientation flips (portrait ↔
+            // landscape), the orientation callback fires IMMEDIATELY —
+            // before FFmpeg even sees the new segment data.
+            std::string masterUrl;
+            PlaylistDecoder masterDecoder; // mouflon decoder for master
+            ResolutionChangeCallback orientationCb;
+            bool lastOrientationPortrait = false;
+            bool orientationInitialized = false;
+            static constexpr int kMasterPollInterval = 5; // seconds between master checks
+
             bool isStale(int stallSec = 30) const
             {
                 auto ts = lastFeedEpochNs.load(std::memory_order_relaxed);
@@ -416,6 +453,9 @@ namespace sm
             // Push raw bytes into the ring buffer
             void feedBytes(const uint8_t *data, size_t len);
             void feedBytes(const std::string &data);
+
+            // Check master playlist for orientation changes
+            void checkMasterOrientation(HttpClient &http);
         };
 
         // Interrupt callback for FFmpeg (allows cancellation)

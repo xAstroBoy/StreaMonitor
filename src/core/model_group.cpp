@@ -570,11 +570,19 @@ namespace sm
         recorder.setResolutionChangeCallback([&](const ResolutionInfo &ri) -> std::string
                                              {
             bool mobile = ri.isMobile && !isVrSlug(pairing.site);
-            spdlog::info("[Group:{}] Resolution change: {}x{} (mobile={})",
-                         groupName_, ri.width, ri.height, mobile);
+            spdlog::info("[Group:{}] Resolution {}: {}x{} (mobile={}, via {})",
+                         groupName_,
+                         ri.source == ResolutionInfo::Source::MasterPlaylist
+                             ? "from master playlist" : "change",
+                         ri.width, ri.height, mobile,
+                         ri.source == ResolutionInfo::Source::MasterPlaylist
+                             ? "master-playlist" : "codec-params");
             return generateNextPath(mobile); });
 
-        auto result = recorder.record(videoUrl, outputPath, token, config.userAgent);
+        // Pass masterUrl for SegmentFeeder orientation monitoring
+        std::string mUrl = pairing.plugin->masterUrl();
+        auto result = recorder.record(videoUrl, outputPath, token,
+                                      config.userAgent, "", {}, {}, mUrl);
 
         // Post-recording validation
         std::error_code ec;

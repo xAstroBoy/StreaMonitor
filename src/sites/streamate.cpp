@@ -24,10 +24,11 @@ namespace sm
         return "https://streamate.com/cam/" + username();
     }
 
-    std::string StreaMate::selectBestEncoding() const
+    std::string StreaMate::selectBestEncoding()
     {
+        // Port from Python: getPlaylistVariants() override + getWantedResolutionPlaylist(None)
         // Extract encodings from formats.mp4-hls.encodings array
-        // Select best resolution based on user preference
+        // Apply user's resolution preference (not just highest!)
         if (!lastInfo_.contains("formats"))
             return "";
 
@@ -39,22 +40,85 @@ namespace sm
         if (!mp4hls.contains("encodings") || !mp4hls["encodings"].is_array())
             return "";
 
-        std::string bestUrl;
-        int bestHeight = 0;
+        // Build variant list from API encodings (like Python's getPlaylistVariants)
+        struct EncodingVariant
+        {
+            int width;
+            int height;
+            std::string url;
+            int diff; // min(w,h) - wantedResolution
+        };
+        std::vector<EncodingVariant> variants;
 
         for (const auto &enc : mp4hls["encodings"])
         {
             std::string location = enc.value("location", "");
+            int width = enc.value("videoWidth", 0);
             int height = enc.value("videoHeight", 0);
-
-            if (!location.empty() && height > bestHeight)
-            {
-                bestHeight = height;
-                bestUrl = location;
-            }
+            if (!location.empty() && height > 0)
+                variants.push_back({width, height, location, 0});
         }
 
-        return bestUrl;
+        if (variants.empty())
+            return "";
+
+        // Apply user's resolution preference (mirrors Python getWantedResolutionPlaylist)
+        int wantedRes = config_ ? config_->wantedResolution : 99999;
+        ResolutionPref pref = config_ ? config_->resolutionPref : ResolutionPref::Closest;
+
+        for (auto &v : variants)
+        {
+            int minDim = std::min(v.width, v.height);
+            if (minDim == 0)
+                minDim = v.height;
+            v.diff = minDim - wantedRes;
+        }
+
+        std::sort(variants.begin(), variants.end(),
+                  [](const EncodingVariant &a, const EncodingVariant &b)
+                  { return std::abs(a.diff) < std::abs(b.diff); });
+
+        const EncodingVariant *selected = nullptr;
+
+        switch (pref)
+        {
+        case ResolutionPref::Exact:
+            if (variants[0].diff == 0)
+                selected = &variants[0];
+            break;
+        case ResolutionPref::Closest:
+            selected = &variants[0];
+            break;
+        case ResolutionPref::ExactOrLeastHigher:
+            for (const auto &v : variants)
+            {
+                if (v.diff >= 0)
+                {
+                    selected = &v;
+                    break;
+                }
+            }
+            break;
+        case ResolutionPref::ExactOrHighestLower:
+            for (const auto &v : variants)
+            {
+                if (v.diff <= 0)
+                {
+                    selected = &v;
+                    break;
+                }
+            }
+            break;
+        }
+
+        if (!selected)
+        {
+            logger_->error("Couldn't select encoding resolution");
+            return "";
+        }
+
+        logger_->info("Selected encoding: {}x{}", selected->width, selected->height);
+        return selected->url;
     }
 
     Status StreaMate::checkStatus()

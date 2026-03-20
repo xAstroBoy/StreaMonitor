@@ -27,7 +27,7 @@ namespace sm
         }
 
     private:
-        std::string selectBestQuality() const;
+        std::string selectBestQuality();
 
         nlohmann::json lastInfo_;
     };
