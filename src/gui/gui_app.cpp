@@ -47,6 +47,30 @@ namespace sm
 {
 
     // ─────────────────────────────────────────────────────────────────
+    // Safe detached thread helper — wraps lambda in try/catch to
+    // prevent std::terminate() from unhandled exceptions on
+    // background threads (the #1 cause of silent crashes).
+    // ─────────────────────────────────────────────────────────────────
+    template <typename Fn>
+    static void safeDetach(Fn &&fn, const char *ctx = "background")
+    {
+        std::thread([f = std::forward<Fn>(fn), ctx]() {
+            try
+            {
+                f();
+            }
+            catch (const std::exception &e)
+            {
+                spdlog::error("[{}] thread exception: {}", ctx, e.what());
+            }
+            catch (...)
+            {
+                spdlog::error("[{}] unknown thread exception", ctx);
+            }
+        }).detach();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     // Color palette
     // ─────────────────────────────────────────────────────────────────
     static ImVec4 COL_BG_DARK = {0.06f, 0.06f, 0.08f, 1.0f};
@@ -1062,17 +1086,17 @@ namespace sm
                 }
                 else if (idx == startIdx)
                 {
-                    std::thread([this]() {
+                    safeDetach([this]() {
                         manager_.startAllBots();
                         manager_.startAllGroups();
-                    }).detach();
+                    }, "tray-start-all");
                 }
                 else if (idx == stopIdx)
                 {
-                    std::thread([this]() {
+                    safeDetach([this]() {
                         manager_.stopAll();
                         manager_.stopAllGroups();
-                    }).detach();
+                    }, "tray-stop-all");
                 }
                 else if (idx == quitIdx)
                 {
@@ -1085,21 +1109,22 @@ namespace sm
 
         while (!glfwWindowShouldClose(window_))
         {
-            // Determine frame rate tier
-            double glfwNow = glfwGetTime();
-            bool isActive = (glfwNow - lastInputTime_) < kIdleTimeout || guiDirty_.exchange(false);
+            try {
+                // Determine frame rate tier
+                double glfwNow = glfwGetTime();
+                bool isActive = (glfwNow - lastInputTime_) < kIdleTimeout || guiDirty_.exchange(false);
 
-            double targetFrameTime;
-            if (showStreamView_ || showBotDetail_)
-                targetFrameTime = kPreviewFrameTime; // 60 fps for live video
-            else if (isActive)
-                targetFrameTime = kActiveFrameTime; // 30 fps for interaction
-            else
-                targetFrameTime = kIdleFrameTime; //  4 fps when idle
+                double targetFrameTime;
+                if (showStreamView_ || showBotDetail_)
+                    targetFrameTime = kPreviewFrameTime; // 60 fps for live video
+                else if (isActive)
+                    targetFrameTime = kActiveFrameTime; // 30 fps for interaction
+                else
+                    targetFrameTime = kIdleFrameTime; //  4 fps when idle
 
-            // Sleep the thread until an OS event or the timeout — sole rate limiter.
-            // Background threads call glfwPostEmptyEvent() to wake us.
-            glfwWaitEventsTimeout(targetFrameTime);
+                // Sleep the thread until an OS event or the timeout — sole rate limiter.
+                // Background threads call glfwPostEmptyEvent() to wake us.
+                glfwWaitEventsTimeout(targetFrameTime);
 
 #ifdef _WIN32
             // ── System tray message pump ────────────────────────────
@@ -1214,6 +1239,15 @@ namespace sm
             }
             // No secondary sleep — glfwWaitEventsTimeout at top of loop
             // is the sole rate limiter.
+            }
+            catch (const std::exception& e) {
+                spdlog::error("GUI main loop exception: {}", e.what());
+                // Continue running despite error
+            }
+            catch (...) {
+                spdlog::error("Unknown GUI main loop exception");
+                // Continue running despite error
+            }
         }
 
         // ── Orderly shutdown — prevent callbacks touching GLFW ──
@@ -1314,30 +1348,28 @@ namespace sm
         {
             auto [user, site] = *pendingMoveBot_;
             pendingMoveBot_.reset();
-            std::thread([this, user, site]()
+            safeDetach([this, user, site]()
                         {
                 auto result = manager_.moveFilesToUnprocessed(user, site);
                 {
                     std::lock_guard lk(asyncResultMutex_);
                     moveResyncResult_ = "[" + site + "] " + user + ": " + result.message;
                 }
-                moveResyncDone_.store(true); })
-                .detach();
+                moveResyncDone_.store(true); }, "move-bot");
         }
 
         if (pendingResyncBot_.has_value())
         {
             auto [user, site] = *pendingResyncBot_;
             pendingResyncBot_.reset();
-            std::thread([this, user, site]()
+            safeDetach([this, user, site]()
                         {
                 auto result = manager_.resyncBot(user, site);
                 {
                     std::lock_guard lk(asyncResultMutex_);
                     moveResyncResult_ = "[" + site + "] " + user + ": " + result;
                 }
-                moveResyncDone_.store(true); })
-                .detach();
+                moveResyncDone_.store(true); }, "resync-bot");
         }
 
         // Show result toast
@@ -1391,27 +1423,24 @@ namespace sm
         {
             if (ImGui::MenuItem("Start All"))
             {
-                std::thread([this]()
+                safeDetach([this]()
                             {
                     manager_.startAllBots();
-                    manager_.startAllGroups(); })
-                    .detach();
+                    manager_.startAllGroups(); }, "menu-start-all");
             }
             if (ImGui::MenuItem("Stop All"))
             {
-                std::thread([this]()
+                safeDetach([this]()
                             {
                     manager_.stopAll();
-                    manager_.stopAllGroups(); })
-                    .detach();
+                    manager_.stopAllGroups(); }, "menu-stop-all");
             }
             if (ImGui::MenuItem("Resync All"))
             {
-                std::thread([this]()
+                safeDetach([this]()
                             {
                     auto result = manager_.resyncAll();
-                    addLog("info", "system", result); })
-                    .detach();
+                    addLog("info", "system", result); }, "menu-resync-all");
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Settings...", "Ctrl+,"))
@@ -1474,29 +1503,26 @@ namespace sm
         ImGui::SameLine();
         if (ImGui::Button(" Start All "))
         {
-            std::thread([this]()
+            safeDetach([this]()
                         {
                 manager_.startAllBots();
-                manager_.startAllGroups(); })
-                .detach();
+                manager_.startAllGroups(); }, "toolbar-start-all");
         }
         ImGui::SameLine();
         if (ImGui::Button(" Stop All "))
         {
-            std::thread([this]()
+            safeDetach([this]()
                         {
                 manager_.stopAll();
-                manager_.stopAllGroups(); })
-                .detach();
+                manager_.stopAllGroups(); }, "toolbar-stop-all");
         }
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Button, {0.45f, 0.30f, 0.10f, 1.0f});
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.55f, 0.38f, 0.15f, 1.0f});
         if (ImGui::Button(" Move to Unprocessed "))
         {
-            std::thread([this]()
-                        { manager_.moveAllFilesToUnprocessed(); })
-                .detach();
+            safeDetach([this]()
+                        { manager_.moveAllFilesToUnprocessed(); }, "toolbar-move-all");
         }
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
@@ -1504,9 +1530,8 @@ namespace sm
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.15f, 0.55f, 0.65f, 1.0f});
         if (ImGui::Button(" Resync All "))
         {
-            std::thread([this]()
-                        { manager_.resyncAll(); })
-                .detach();
+            safeDetach([this]()
+                        { manager_.resyncAll(); }, "toolbar-resync-all");
         }
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
@@ -1798,13 +1823,12 @@ namespace sm
                         for (int idx : grp.indices)
                             bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
-                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
+                safeDetach([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
                             {
                     for (auto &gn : groupNames)
                         manager_.startGroup(gn);
                     for (auto &[u, s] : bots)
-                        manager_.startBot(u, s); })
-                    .detach();
+                        manager_.startBot(u, s); }, "start-selected");
             }
             ImGui::PopStyleColor();
 
@@ -1825,13 +1849,12 @@ namespace sm
                         for (int idx : grp.indices)
                             bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
-                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
+                safeDetach([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
                             {
                     for (auto &gn : groupNames)
                         manager_.stopGroup(gn);
                     for (auto &[u, s] : bots)
-                        manager_.stopBot(u, s); })
-                    .detach();
+                        manager_.stopBot(u, s); }, "stop-selected");
             }
             ImGui::PopStyleColor();
 
@@ -1853,7 +1876,7 @@ namespace sm
                         for (int idx : grp.indices)
                             bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
-                std::thread([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
+                safeDetach([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
                             {
                     for (auto &gn : groupNames)
                     {
@@ -1862,8 +1885,7 @@ namespace sm
                         manager_.startGroup(gn);
                     }
                     for (auto &[user, site] : bots)
-                        manager_.restartBot(user, site); })
-                    .detach();
+                        manager_.restartBot(user, site); }, "restart-selected");
             }
             ImGui::PopStyleColor();
 
@@ -1882,7 +1904,7 @@ namespace sm
                 }
                 if (!targets.empty())
                 {
-                    std::thread([this, targets = std::move(targets)]()
+                    safeDetach([this, targets = std::move(targets)]()
                                 {
                         int ok = 0, fail = 0;
                         for (auto &[user, site] : targets)
@@ -1900,8 +1922,7 @@ namespace sm
                             std::lock_guard lk(asyncResultMutex_);
                             moveResyncResult_ = std::move(msg);
                         }
-                        moveResyncDone_.store(true); })
-                        .detach();
+                        moveResyncDone_.store(true); }, "resync-selected");
                 }
             }
             ImGui::PopStyleColor();
@@ -1933,7 +1954,7 @@ namespace sm
                 }
                 if (!targets.empty())
                 {
-                    std::thread([this, targets = std::move(targets)]()
+                    safeDetach([this, targets = std::move(targets)]()
                                 {
                         std::string summary;
                         int ok = 0, fail = 0;
@@ -1952,8 +1973,7 @@ namespace sm
                             std::lock_guard lk(asyncResultMutex_);
                             moveResyncResult_ = std::move(msg);
                         }
-                        moveResyncDone_.store(true); })
-                        .detach();
+                        moveResyncDone_.store(true); }, "move-selected");
                 }
             }
             ImGui::PopStyleColor();
@@ -2296,18 +2316,16 @@ namespace sm
                         if (ImGui::MenuItem("Stop"))
                         {
                             std::string u = b.username, s = b.siteName;
-                            std::thread([this, u, s]()
-                                        { manager_.stopBot(u, s); })
-                                .detach();
+                            safeDetach([this, u, s]()
+                                        { manager_.stopBot(u, s); }, "ctx-stop-bot");
                         }
                         ImGui::PopStyleColor();
                         ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
                         if (ImGui::MenuItem("Restart"))
                         {
                             std::string u = b.username, s = b.siteName;
-                            std::thread([this, u, s]()
-                                        { manager_.restartBot(u, s); })
-                                .detach();
+                            safeDetach([this, u, s]()
+                                        { manager_.restartBot(u, s); }, "ctx-restart-bot");
                         }
                         ImGui::PopStyleColor();
                     }
@@ -2331,9 +2349,8 @@ namespace sm
                             if (ImGui::MenuItem(("Stop  [" + b.siteName + "]").c_str()))
                             {
                                 std::string u = b.username, s = b.siteName;
-                                std::thread([this, u, s]()
-                                            { manager_.stopBot(u, s); })
-                                    .detach();
+                                safeDetach([this, u, s]()
+                                            { manager_.stopBot(u, s); }, "ctx-stop-site");
                             }
                             ImGui::PopStyleColor();
                         }
@@ -2353,22 +2370,20 @@ namespace sm
                             std::vector<std::pair<std::string, std::string>> targets;
                             for (int idx : grp.indices)
                                 targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
-                            std::thread([this, targets = std::move(targets)]()
+                            safeDetach([this, targets = std::move(targets)]()
                                         {
                                 for (auto& [u, s] : targets)
-                                    manager_.stopBot(u, s); })
-                                .detach();
+                                    manager_.stopBot(u, s); }, "ctx-stop-all");
                         }
                         if (ImGui::MenuItem("Restart All"))
                         {
                             std::vector<std::pair<std::string, std::string>> targets;
                             for (int idx : grp.indices)
                                 targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
-                            std::thread([this, targets = std::move(targets)]()
+                            safeDetach([this, targets = std::move(targets)]()
                                         {
                                 for (auto& [u, s] : targets)
-                                    manager_.restartBot(u, s); })
-                                .detach();
+                                    manager_.restartBot(u, s); }, "ctx-restart-all");
                         }
                     }
                     else
@@ -2378,11 +2393,10 @@ namespace sm
                             std::vector<std::pair<std::string, std::string>> targets;
                             for (int idx : grp.indices)
                                 targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
-                            std::thread([this, targets = std::move(targets)]()
+                            safeDetach([this, targets = std::move(targets)]()
                                         {
                                 for (auto& [u, s] : targets)
-                                    manager_.startBot(u, s); })
-                                .detach();
+                                    manager_.startBot(u, s); }, "ctx-start-all");
                         }
                     }
                 }
@@ -2434,11 +2448,10 @@ namespace sm
                     {
                         // Stop the group cycling first, then disband the entire group
                         std::string gname = grp.groupName;
-                        std::thread([this, gname]()
+                        safeDetach([this, gname]()
                                     {
                             manager_.stopGroup(gname);
-                            manager_.removeCrossRegisterGroup(gname); })
-                            .detach();
+                            manager_.removeCrossRegisterGroup(gname); }, "break-group");
                     }
                 }
                 else if (grp.indices.size() > 1)
@@ -2795,18 +2808,16 @@ namespace sm
                             if (ImGui::MenuItem("Stop"))
                             {
                                 std::string u = b.username, s = b.siteName;
-                                std::thread([this, u, s]()
-                                            { manager_.stopBot(u, s); })
-                                    .detach();
+                                safeDetach([this, u, s]()
+                                            { manager_.stopBot(u, s); }, "sub-ctx-stop");
                             }
                             ImGui::PopStyleColor();
                             ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
                             if (ImGui::MenuItem("Restart"))
                             {
                                 std::string u = b.username, s = b.siteName;
-                                std::thread([this, u, s]()
-                                            { manager_.restartBot(u, s); })
-                                    .detach();
+                                safeDetach([this, u, s]()
+                                            { manager_.restartBot(u, s); }, "sub-ctx-restart");
                             }
                             ImGui::PopStyleColor();
                         }
@@ -4072,7 +4083,7 @@ namespace sm
         if (ImGui::Button("Re-extract from Doppio JS"))
         {
             addLog("info", "system", "Re-extracting mouflon keys...");
-            std::thread([this]()
+            safeDetach([this]()
                         {
                 auto &mk = MouflonKeys::instance();
                 HttpClient http;
@@ -4080,8 +4091,7 @@ namespace sm
                 mk.reinitialize(http);
                 addLog("info", "system",
                        "Mouflon key re-extraction complete (" +
-                           std::to_string(mk.getKeys().size()) + " keys)"); })
-                .detach();
+                           std::to_string(mk.getKeys().size()) + " keys)"); }, "mouflon-reextract");
         }
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
@@ -5244,9 +5254,8 @@ namespace sm
                 if (ImGui::Button("Stop", {btnW, 0}))
                 {
                     std::string u = bot.username, s = bot.siteName;
-                    std::thread([this, u, s]()
-                                { manager_.stopBot(u, s); })
-                        .detach();
+                    safeDetach([this, u, s]()
+                                { manager_.stopBot(u, s); }, "detail-stop");
                 }
                 ImGui::PopStyleColor();
             }
@@ -5261,9 +5270,8 @@ namespace sm
             if (ImGui::Button("Restart", {btnW, 0}))
             {
                 std::string u = bot.username, s = bot.siteName;
-                std::thread([this, u, s]()
-                            { manager_.restartBot(u, s); })
-                    .detach();
+                safeDetach([this, u, s]()
+                            { manager_.restartBot(u, s); }, "detail-restart");
             }
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_Button, {0.5f, 0.15f, 0.15f, 1.0f});

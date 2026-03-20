@@ -166,6 +166,7 @@ namespace sm
 
     void ModelGroup::setStateCallback(GroupStateCallback cb)
     {
+        std::lock_guard lock(stateMutex_);
         stateCallback_ = std::move(cb);
     }
 
@@ -213,6 +214,7 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void ModelGroup::threadFunc(const AppConfig &config)
     {
+      try {
         spdlog::info("[Group:{}] Cycling thread started ({} pairings)",
                      groupName_, pairings_.size());
 
@@ -452,6 +454,21 @@ namespace sm
             stateCallback_(state_);
 
         spdlog::info("[Group:{}] Cycling thread exiting", groupName_);
+      } catch (const std::exception &e) {
+          spdlog::error("[Group:{}] FATAL thread exception: {}", groupName_, e.what());
+      } catch (...) {
+          spdlog::error("[Group:{}] FATAL unknown thread exception", groupName_);
+      }
+
+      // Ensure state is cleaned up even after exception
+      {
+          std::lock_guard lock(stateMutex_);
+          state_.running = false;
+          state_.recording = false;
+          state_.activeStatus = Status::NotRunning;
+          state_.activePairingIdx = -1;
+      }
+      running_.store(false);
     }
 
     // ─────────────────────────────────────────────────────────────────

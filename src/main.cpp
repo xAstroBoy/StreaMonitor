@@ -88,11 +88,19 @@ static bool acquireSingleInstance()
 
     PROCESSENTRY32W pe{};
     pe.dwSize = sizeof(pe);
+    
+    int processCount = 0;
+    const int MAX_PROCESS_CHECK = 1000; // Prevent infinite loops
 
     if (Process32FirstW(snap, &pe))
     {
         do
         {
+            if (++processCount > MAX_PROCESS_CHECK) {
+                CloseHandle(snap);
+                return true; // Too many processes, allow running to be safe
+            }
+            
             if (pe.th32ProcessID == myPid)
                 continue;
 
@@ -236,8 +244,17 @@ int main(int argc, char **argv)
     // Writes detailed stack traces to crashes/ on any unhandled crash.
     sm::installCrashHandler("crashes");
 
+    // Check for --no-duplicate-check flag
+    bool checkDuplicates = true;
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--no-duplicate-check") == 0) {
+            checkDuplicates = false;
+            break;
+        }
+    }
+
     // ── Anti-duplicate: prevent running two copies at once ──────
-    if (!acquireSingleInstance())
+    if (checkDuplicates && !acquireSingleInstance())
     {
 #ifdef _WIN32
         MessageBoxW(nullptr,

@@ -887,6 +887,7 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void SitePlugin::threadFunc(const AppConfig &config)
     {
+      try {
         logger_->info("Thread started for {}", username_);
 
         int offlineTime = 0; // cumulative offline seconds (Python: offline_time)
@@ -1071,6 +1072,20 @@ namespace sm
         if (stateCallback_)
             stateCallback_(state_);
         logger_->info("Thread exiting for {}", username_);
+      } catch (const std::exception &e) {
+          logger_->error("FATAL thread exception for {}: {}", username_, e.what());
+      } catch (...) {
+          logger_->error("FATAL unknown thread exception for {}", username_);
+      }
+
+      // Ensure state cleanup even after exception
+      {
+          std::lock_guard lock(stateMutex_);
+          state_.running = false;
+          state_.recording = false;
+          state_.status = Status::NotRunning;
+      }
+      running_.store(false);
     }
 
     // ─────────────────────────────────────────────────────────────────

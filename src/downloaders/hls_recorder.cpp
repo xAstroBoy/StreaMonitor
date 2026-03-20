@@ -187,7 +187,10 @@ namespace sm
 
         if (!avioCtx)
         {
-            av_free(avioBuf);
+            if (avioBuf) {
+                av_free(avioBuf);
+                avioBuf = nullptr;
+            }
             avioBuf = nullptr;
             return nullptr;
         }
@@ -779,7 +782,10 @@ namespace sm
                         customAVIO ? "(AVIO)" : url, ffError(ret));
             // inputCtx is freed by avformat_open_input on failure
             state.inputCtx = nullptr;
-            delete interruptData;
+            if (interruptData) {
+                delete interruptData;
+                interruptData = nullptr;
+            }
             return false;
         }
 
@@ -3088,10 +3094,15 @@ namespace sm
         }
 
         // ── Clean up zero-byte output files ─────────────────────────
-        if (std::filesystem::exists(currentOutputPath) &&
-            std::filesystem::file_size(currentOutputPath) == 0)
-        {
-            std::filesystem::remove(currentOutputPath);
+        try {
+            std::error_code fsEc;
+            if (std::filesystem::exists(currentOutputPath, fsEc) &&
+                std::filesystem::file_size(currentOutputPath, fsEc) == 0)
+            {
+                std::filesystem::remove(currentOutputPath, fsEc);
+            }
+        } catch (...) {
+            log_->warn("Failed to clean up zero-byte output file");
         }
 
         result.success = result.bytesWritten > 0;

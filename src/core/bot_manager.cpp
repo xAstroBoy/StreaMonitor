@@ -385,8 +385,14 @@ namespace sm
         std::string s = site;
         std::thread([this, u, s]()
                     {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            startBot(u, s); })
+            try {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                startBot(u, s);
+            } catch (const std::exception &e) {
+                spdlog::error("restartBot({}, {}) exception: {}", u, s, e.what());
+            } catch (...) {
+                spdlog::error("restartBot({}, {}) unknown exception", u, s);
+            } })
             .detach();
         return true;
     }

@@ -392,6 +392,7 @@ namespace sm
         {
             fprintf(f, "StreaMonitor — std::terminate() called\n");
             fprintf(f, "Time: %s\n", makeReadableTime().c_str());
+            fprintf(f, "This usually means an unhandled exception on a background thread.\n\n");
 
             // Try to get current exception info
             if (auto eptr = std::current_exception())
@@ -409,8 +410,41 @@ namespace sm
                     fprintf(f, "Exception: (unknown non-std::exception type)\n");
                 }
             }
+            else
+            {
+                fprintf(f, "No active exception (terminate called directly or from noexcept violation).\n");
+            }
+
+            // Capture stack trace for terminate too
+            fprintf(f, "\n── Stack Trace ────────────────────────────────────\n");
+            HANDLE proc = GetCurrentProcess();
+            HANDLE thread = GetCurrentThread();
+            SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+            SymInitialize(proc, nullptr, TRUE);
+
+            void *stack[64];
+            USHORT frames = CaptureStackBackTrace(0, 64, stack, nullptr);
+            for (USHORT i = 0; i < frames; i++)
+            {
+                DWORD64 pc = (DWORD64)stack[i];
+                alignas(SYMBOL_INFO) char symBuf[sizeof(SYMBOL_INFO) + 256];
+                SYMBOL_INFO *sym = reinterpret_cast<SYMBOL_INFO *>(symBuf);
+                sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+                sym->MaxNameLen = 255;
+                DWORD64 symDisp = 0;
+                if (SymFromAddr(proc, pc, &symDisp, sym))
+                    fprintf(f, "  #%-3d 0x%016llX  %s +0x%llX\n", i, pc, sym->Name, symDisp);
+                else
+                    fprintf(f, "  #%-3d 0x%016llX  <unknown>\n", i, pc);
+            }
+            SymCleanup(proc);
+
+            fprintf(f, "\n");
             fclose(f);
         }
+
+        // Also log to stderr
+        fprintf(stderr, "\n[FATAL] std::terminate() called — crash report written to %s/\n", g_crashDir.c_str());
         std::abort();
     }
 

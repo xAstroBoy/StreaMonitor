@@ -105,7 +105,17 @@ namespace sm
             activeDownloads_.fetch_add(1);
             std::thread([this, url]()
                         {
-                            downloadAndDecode(url);
+                            try {
+                                downloadAndDecode(url);
+                            } catch (const std::exception& e) {
+                                spdlog::error("[ImageCache] download exception: {}", e.what());
+                                std::lock_guard lock(mutex_);
+                                auto it = cache_.find(url);
+                                if (it != cache_.end())
+                                    it->second.state = State::Failed;
+                            } catch (...) {
+                                spdlog::error("[ImageCache] unknown download exception");
+                            }
                             activeDownloads_.fetch_sub(1); })
                 .detach();
         }
@@ -337,6 +347,7 @@ namespace sm
 
     void ImageCache::downloadAndDecode(const std::string &url)
     {
+      try {
         std::vector<unsigned char> data;
 
         // Check if this is a local file path (e.g. preview captured from stream)
@@ -412,6 +423,17 @@ namespace sm
             std::lock_guard lock(uploadMutex_);
             pendingUploads_.push_back(std::move(upload));
         }
+      } catch (const std::exception& e) {
+          spdlog::error("[ImageCache] downloadAndDecode('{}') exception: {}", url.substr(0, 80), e.what());
+          std::lock_guard lock(mutex_);
+          auto it = cache_.find(url);
+          if (it != cache_.end()) {
+              it->second.state = State::Failed;
+              it->second.loadedAt = std::chrono::steady_clock::now();
+          }
+      } catch (...) {
+          spdlog::error("[ImageCache] downloadAndDecode unknown exception");
+      }
     }
 
 } // namespace sm
