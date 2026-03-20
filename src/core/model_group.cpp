@@ -214,235 +214,258 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void ModelGroup::threadFunc(const AppConfig &config)
     {
-      try {
-        spdlog::info("[Group:{}] Cycling thread started ({} pairings)",
-                     groupName_, pairings_.size());
-
-        while (running_.load() && !quitting_.load())
+        try
         {
-            bool anyLive = false;
+            spdlog::info("[Group:{}] Cycling thread started ({} pairings)",
+                         groupName_, pairings_.size());
 
-            for (size_t i = 0; i < pairings_.size() && running_.load() && !quitting_.load(); i++)
+            while (running_.load() && !quitting_.load())
             {
-                auto &pairing = pairings_[i];
+                bool anyLive = false;
 
-                // Update active pairing indicator
+                for (size_t i = 0; i < pairings_.size() && running_.load() && !quitting_.load(); i++)
                 {
-                    std::lock_guard lock(stateMutex_);
-                    state_.activePairingIdx = (int)i;
-                    state_.activeSite = pairing.site;
-                    state_.activeUsername = pairing.username;
-                }
+                    auto &pairing = pairings_[i];
 
-                // Check status — NO DELAY between pairings
-                Status status;
-                try
-                {
-                    status = pairing.plugin->checkStatus();
-                }
-                catch (const std::exception &e)
-                {
-                    spdlog::error("[Group:{}] {} [{}] checkStatus exception: {}",
-                                  groupName_, pairing.username, pairing.site, e.what());
-                    status = Status::RateLimit;
-                }
-
-                pairing.lastStatus = status;
-                pairing.lastMobile = pairing.plugin->isMobile();
-
-                // Update state for GUI
-                {
-                    std::lock_guard lock(stateMutex_);
-                    state_.activeStatus = status;
-                    state_.activeMobile = pairing.lastMobile;
-                    if (i < state_.pairings.size())
+                    // Update active pairing indicator
                     {
-                        state_.pairings[i].lastStatus = status;
-                        state_.pairings[i].mobile = pairing.lastMobile;
+                        std::lock_guard lock(stateMutex_);
+                        state_.activePairingIdx = (int)i;
+                        state_.activeSite = pairing.site;
+                        state_.activeUsername = pairing.username;
                     }
-                }
-                if (stateCallback_)
-                    stateCallback_(state_);
 
-                spdlog::debug("[Group:{}] {} [{}] → {}",
-                              groupName_, pairing.username, pairing.site,
-                              statusToString(status));
-
-                // ── PUBLIC → download from this pairing ─────────────
-                if (status == Status::Public)
-                {
-                    anyLive = true;
-
-                    // ── Mobile dual-recording ───────────────────────
-                    // If this pairing is mobile AND non-VR, check all
-                    // other non-VR pairings — if any are also PUBLIC,
-                    // download from them in parallel to capture both
-                    // camera views (mobile + desktop).
-                    bool mobileMulti = pairing.lastMobile && !isVrSlug(pairing.site);
-                    std::vector<std::unique_ptr<std::jthread>> parallelThreads;
-                    std::vector<std::unique_ptr<CancellationToken>> parallelTokens;
-                    // Track whether we started in mobile mode (for mobile→PC transition)
-                    bool startedAsMobile = pairing.lastMobile;
-
-                    if (mobileMulti)
+                    // Check status — NO DELAY between pairings
+                    Status status;
+                    try
                     {
-                        spdlog::info("[Group:{}] {} [{}] is MOBILE — checking other pairings for dual recording",
-                                     groupName_, pairing.username, pairing.site);
+                        status = pairing.plugin->checkStatus();
+                    }
+                    catch (const std::exception &e)
+                    {
+                        spdlog::error("[Group:{}] {} [{}] checkStatus exception: {}",
+                                      groupName_, pairing.username, pairing.site, e.what());
+                        status = Status::RateLimit;
+                    }
 
-                        for (size_t j = 0; j < pairings_.size() && running_.load() && !quitting_.load(); j++)
+                    pairing.lastStatus = status;
+                    pairing.lastMobile = pairing.plugin->isMobile();
+
+                    // Update state for GUI
+                    {
+                        std::lock_guard lock(stateMutex_);
+                        state_.activeStatus = status;
+                        state_.activeMobile = pairing.lastMobile;
+                        if (i < state_.pairings.size())
                         {
-                            if (j == i)
-                                continue; // skip the mobile pairing itself
-                            auto &other = pairings_[j];
-                            if (isVrSlug(other.site))
-                                continue; // VR always independent
+                            state_.pairings[i].lastStatus = status;
+                            state_.pairings[i].mobile = pairing.lastMobile;
+                        }
+                    }
+                    if (stateCallback_)
+                        stateCallback_(state_);
 
-                            Status otherStatus;
+                    spdlog::debug("[Group:{}] {} [{}] → {}",
+                                  groupName_, pairing.username, pairing.site,
+                                  statusToString(status));
+
+                    // ── PUBLIC → download from this pairing ─────────────
+                    if (status == Status::Public)
+                    {
+                        anyLive = true;
+
+                        // ── Mobile dual-recording ───────────────────────
+                        // If this pairing is mobile AND non-VR, check all
+                        // other non-VR pairings — if any are also PUBLIC,
+                        // download from them in parallel to capture both
+                        // camera views (mobile + desktop).
+                        bool mobileMulti = pairing.lastMobile && !isVrSlug(pairing.site);
+                        std::vector<std::unique_ptr<std::jthread>> parallelThreads;
+                        std::vector<std::unique_ptr<CancellationToken>> parallelTokens;
+                        // Track whether we started in mobile mode (for mobile→PC transition)
+                        bool startedAsMobile = pairing.lastMobile;
+
+                        if (mobileMulti)
+                        {
+                            spdlog::info("[Group:{}] {} [{}] is MOBILE — checking other pairings for dual recording",
+                                         groupName_, pairing.username, pairing.site);
+
+                            for (size_t j = 0; j < pairings_.size() && running_.load() && !quitting_.load(); j++)
+                            {
+                                if (j == i)
+                                    continue; // skip the mobile pairing itself
+                                auto &other = pairings_[j];
+                                if (isVrSlug(other.site))
+                                    continue; // VR always independent
+
+                                Status otherStatus;
+                                try
+                                {
+                                    otherStatus = other.plugin->checkStatus();
+                                }
+                                catch (...)
+                                {
+                                    continue;
+                                }
+                                other.lastStatus = otherStatus;
+                                other.lastMobile = other.plugin->isMobile();
+
+                                // Update GUI state for this pairing
+                                {
+                                    std::lock_guard lock(stateMutex_);
+                                    if (j < state_.pairings.size())
+                                    {
+                                        state_.pairings[j].lastStatus = otherStatus;
+                                        state_.pairings[j].mobile = other.lastMobile;
+                                    }
+                                }
+
+                                if (otherStatus == Status::Public)
+                                {
+                                    spdlog::info("[Group:{}] {} [{}] also PUBLIC — starting parallel download",
+                                                 groupName_, other.username, other.site);
+
+                                    auto token = std::make_unique<CancellationToken>();
+                                    auto *tokenPtr = token.get();
+                                    size_t idx = j;
+                                    parallelTokens.push_back(std::move(token));
+                                    parallelThreads.push_back(std::make_unique<std::jthread>(
+                                        [this, idx, &config, tokenPtr]()
+                                        {
+                                            downloadFromWithToken(pairings_[idx], config, *tokenPtr);
+                                        }));
+                                }
+                            }
+                        }
+
+                        spdlog::info("[Group:{}] {} [{}] is LIVE{} — downloading",
+                                     groupName_, pairing.username, pairing.site,
+                                     mobileMulti ? " (MOBILE, dual-recording)" : "");
+
+                        {
+                            std::lock_guard lock(stateMutex_);
+                            state_.recording = true;
+                        }
+                        if (stateCallback_)
+                            stateCallback_(state_);
+
+                        // Download from this pairing (blocks until stream ends or error)
+                        downloadFrom(pairing, config);
+
+                        {
+                            std::lock_guard lock(stateMutex_);
+                            state_.recording = false;
+                        }
+                        if (stateCallback_)
+                            stateCallback_(state_);
+
+                        // ── Mobile→PC transition ────────────────────────
+                        // After download ends, re-check mobile status. If the
+                        // stream started as mobile but is now PC (landscape),
+                        // cancel all parallel recorders — we only need the
+                        // primary. The primary stays as favorite (index 0).
+                        if (startedAsMobile && !parallelThreads.empty())
+                        {
+                            bool nowMobile = false;
                             try
                             {
-                                otherStatus = other.plugin->checkStatus();
+                                nowMobile = pairing.plugin->isMobile();
                             }
                             catch (...)
                             {
-                                continue;
-                            }
-                            other.lastStatus = otherStatus;
-                            other.lastMobile = other.plugin->isMobile();
-
-                            // Update GUI state for this pairing
-                            {
-                                std::lock_guard lock(stateMutex_);
-                                if (j < state_.pairings.size())
-                                {
-                                    state_.pairings[j].lastStatus = otherStatus;
-                                    state_.pairings[j].mobile = other.lastMobile;
-                                }
                             }
 
-                            if (otherStatus == Status::Public)
+                            if (!nowMobile)
                             {
-                                spdlog::info("[Group:{}] {} [{}] also PUBLIC — starting parallel download",
-                                             groupName_, other.username, other.site);
-
-                                auto token = std::make_unique<CancellationToken>();
-                                auto *tokenPtr = token.get();
-                                size_t idx = j;
-                                parallelTokens.push_back(std::move(token));
-                                parallelThreads.push_back(std::make_unique<std::jthread>(
-                                    [this, idx, &config, tokenPtr]()
-                                    {
-                                        downloadFromWithToken(pairings_[idx], config, *tokenPtr);
-                                    }));
+                                spdlog::info("[Group:{}] {} [{}] switched from MOBILE to PC — "
+                                             "cancelling {} parallel recorder(s), keeping primary",
+                                             groupName_, pairing.username, pairing.site,
+                                             parallelThreads.size());
+                                for (auto &t : parallelTokens)
+                                    t->cancel();
+                                // Ensure primary stays at index 0 (already is)
                             }
                         }
+
+                        // If mobile multi-recording, wait for parallel downloads to finish.
+                        // If group is being stopped, cancel the parallel tokens first.
+                        if (!parallelThreads.empty())
+                        {
+                            if (!running_.load() || quitting_.load())
+                            {
+                                for (auto &t : parallelTokens)
+                                    t->cancel();
+                            }
+                            spdlog::info("[Group:{}] Waiting for {} parallel download(s) to finish",
+                                         groupName_, parallelThreads.size());
+                            parallelThreads.clear(); // join all
+                            parallelTokens.clear();
+                        }
+
+                        // Brief pause after download, then continue cycling
+                        sleepInterruptible(sleepAfterDownload_);
+                        break; // restart cycle from pairing[0]
                     }
 
-                    spdlog::info("[Group:{}] {} [{}] is LIVE{} — downloading",
-                                 groupName_, pairing.username, pairing.site,
-                                 mobileMulti ? " (MOBILE, dual-recording)" : "");
+                    // ── NOTEXIST / DELETED → skip this pairing ──────────
+                    if (status == Status::NotExist || status == Status::Deleted)
+                    {
+                        spdlog::warn("[Group:{}] {} [{}] does not exist, skipping in cycle",
+                                     groupName_, pairing.username, pairing.site);
+                        continue;
+                    }
 
+                    // ── RATELIMIT → tiny pause then continue ────────────
+                    if (status == Status::RateLimit || status == Status::Cloudflare)
+                    {
+                        sleepInterruptible(2); // brief backoff, then next pairing
+                        continue;
+                    }
+
+                    // ── OFFLINE / PRIVATE / anything else → next pairing immediately
+                    // No delay! That's the whole point.
+                }
+
+                // ── All pairings checked, none were live ────────────────
+                if (!anyLive && running_.load() && !quitting_.load())
+                {
                     {
                         std::lock_guard lock(stateMutex_);
-                        state_.recording = true;
+                        state_.activePairingIdx = -1;
+                        state_.activeStatus = Status::Offline;
                     }
                     if (stateCallback_)
                         stateCallback_(state_);
 
-                    // Download from this pairing (blocks until stream ends or error)
-                    downloadFrom(pairing, config);
-
-                    {
-                        std::lock_guard lock(stateMutex_);
-                        state_.recording = false;
-                    }
-                    if (stateCallback_)
-                        stateCallback_(state_);
-
-                    // ── Mobile→PC transition ────────────────────────
-                    // After download ends, re-check mobile status. If the
-                    // stream started as mobile but is now PC (landscape),
-                    // cancel all parallel recorders — we only need the
-                    // primary. The primary stays as favorite (index 0).
-                    if (startedAsMobile && !parallelThreads.empty())
-                    {
-                        bool nowMobile = false;
-                        try
-                        {
-                            nowMobile = pairing.plugin->isMobile();
-                        }
-                        catch (...)
-                        {
-                        }
-
-                        if (!nowMobile)
-                        {
-                            spdlog::info("[Group:{}] {} [{}] switched from MOBILE to PC — "
-                                         "cancelling {} parallel recorder(s), keeping primary",
-                                         groupName_, pairing.username, pairing.site,
-                                         parallelThreads.size());
-                            for (auto &t : parallelTokens)
-                                t->cancel();
-                            // Ensure primary stays at index 0 (already is)
-                        }
-                    }
-
-                    // If mobile multi-recording, wait for parallel downloads to finish.
-                    // If group is being stopped, cancel the parallel tokens first.
-                    if (!parallelThreads.empty())
-                    {
-                        if (!running_.load() || quitting_.load())
-                        {
-                            for (auto &t : parallelTokens)
-                                t->cancel();
-                        }
-                        spdlog::info("[Group:{}] Waiting for {} parallel download(s) to finish",
-                                     groupName_, parallelThreads.size());
-                        parallelThreads.clear(); // join all
-                        parallelTokens.clear();
-                    }
-
-                    // Brief pause after download, then continue cycling
-                    sleepInterruptible(sleepAfterDownload_);
-                    break; // restart cycle from pairing[0]
+                    spdlog::debug("[Group:{}] All pairings offline, sleeping {}s",
+                                  groupName_, sleepAllOffline_);
+                    sleepInterruptible(sleepAllOffline_);
                 }
-
-                // ── NOTEXIST / DELETED → skip this pairing ──────────
-                if (status == Status::NotExist || status == Status::Deleted)
-                {
-                    spdlog::warn("[Group:{}] {} [{}] does not exist, skipping in cycle",
-                                 groupName_, pairing.username, pairing.site);
-                    continue;
-                }
-
-                // ── RATELIMIT → tiny pause then continue ────────────
-                if (status == Status::RateLimit || status == Status::Cloudflare)
-                {
-                    sleepInterruptible(2); // brief backoff, then next pairing
-                    continue;
-                }
-
-                // ── OFFLINE / PRIVATE / anything else → next pairing immediately
-                // No delay! That's the whole point.
             }
 
-            // ── All pairings checked, none were live ────────────────
-            if (!anyLive && running_.load() && !quitting_.load())
+            // Cleanup
             {
-                {
-                    std::lock_guard lock(stateMutex_);
-                    state_.activePairingIdx = -1;
-                    state_.activeStatus = Status::Offline;
-                }
-                if (stateCallback_)
-                    stateCallback_(state_);
-
-                spdlog::debug("[Group:{}] All pairings offline, sleeping {}s",
-                              groupName_, sleepAllOffline_);
-                sleepInterruptible(sleepAllOffline_);
+                std::lock_guard lock(stateMutex_);
+                state_.running = false;
+                state_.recording = false;
+                state_.activeStatus = Status::NotRunning;
+                state_.activePairingIdx = -1;
             }
+            if (stateCallback_)
+                stateCallback_(state_);
+
+            spdlog::info("[Group:{}] Cycling thread exiting", groupName_);
+        }
+        catch (const std::exception &e)
+        {
+            spdlog::error("[Group:{}] FATAL thread exception: {}", groupName_, e.what());
+        }
+        catch (...)
+        {
+            spdlog::error("[Group:{}] FATAL unknown thread exception", groupName_);
         }
 
-        // Cleanup
+        // Ensure state is cleaned up even after exception
         {
             std::lock_guard lock(stateMutex_);
             state_.running = false;
@@ -450,25 +473,7 @@ namespace sm
             state_.activeStatus = Status::NotRunning;
             state_.activePairingIdx = -1;
         }
-        if (stateCallback_)
-            stateCallback_(state_);
-
-        spdlog::info("[Group:{}] Cycling thread exiting", groupName_);
-      } catch (const std::exception &e) {
-          spdlog::error("[Group:{}] FATAL thread exception: {}", groupName_, e.what());
-      } catch (...) {
-          spdlog::error("[Group:{}] FATAL unknown thread exception", groupName_);
-      }
-
-      // Ensure state is cleaned up even after exception
-      {
-          std::lock_guard lock(stateMutex_);
-          state_.running = false;
-          state_.recording = false;
-          state_.activeStatus = Status::NotRunning;
-          state_.activePairingIdx = -1;
-      }
-      running_.store(false);
+        running_.store(false);
     }
 
     // ─────────────────────────────────────────────────────────────────

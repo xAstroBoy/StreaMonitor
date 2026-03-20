@@ -55,6 +55,10 @@ namespace sm
         void addLog(const std::string &level, const std::string &source,
                     const std::string &message);
 
+        // Minimize-to-tray accessors (used by Win32 WndProc subclass)
+        bool shouldMinimizeToTray() const { return config_.minimizeToTray; }
+        void setMinimizedToTray(bool v) { minimizedToTray_ = v; }
+
     private:
         // ── Initialization ──────────────────────────────────────────
         bool initWindow();

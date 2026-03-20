@@ -37,6 +37,33 @@
 #include <Windows.h>
 #include <shellapi.h>
 #include "resources/resource.h"
+
+// ── Win32 subclass to intercept minimize BEFORE GLFW processes it ────
+// GLFW's iconify callback fires AFTER the minimize animation, causing
+// a brief taskbar flash. Subclassing catches SC_MINIMIZE immediately.
+static WNDPROC g_origWndProc = nullptr;
+static sm::GuiApp *g_guiAppForSubclass = nullptr;
+
+static LRESULT CALLBACK minimizeSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_SYSCOMMAND && (wp & 0xFFF0) == SC_MINIMIZE)
+    {
+        auto *self = g_guiAppForSubclass;
+        if (self && self->shouldMinimizeToTray())
+        {
+            // Disable multi-viewport BEFORE hiding so ImGui pulls
+            // all secondary OS windows back into the main viewport.
+            // Then hide the main window — nothing remains on screen.
+            ImGuiIO &io = ImGui::GetIO();
+            io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+            ShowWindow(hwnd, SW_HIDE);
+            self->setMinimizedToTray(true);
+            return 0; // Swallow the message
+        }
+    }
+    return CallWindowProcW(g_origWndProc, hwnd, msg, wp, lp);
+}
+
 #else
 #include <ifaddrs.h>
 #include <netinet/in.h>
@@ -54,7 +81,8 @@ namespace sm
     template <typename Fn>
     static void safeDetach(Fn &&fn, const char *ctx = "background")
     {
-        std::thread([f = std::forward<Fn>(fn), ctx]() {
+        std::thread([f = std::forward<Fn>(fn), ctx]()
+                    {
             try
             {
                 f();
@@ -66,8 +94,8 @@ namespace sm
             catch (...)
             {
                 spdlog::error("[{}] unknown thread exception", ctx);
-            }
-        }).detach();
+            } })
+            .detach();
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -804,22 +832,19 @@ namespace sm
                                            self->shuttingDown_.store(true);
                                        glfwSetWindowShouldClose(w, GLFW_TRUE); });
 
-        // ── GLFW iconify callback (minimize interception) ───────────
-        glfwSetWindowIconifyCallback(window_, [](GLFWwindow *w, int iconified)
-                                     {
-                                         auto *self = static_cast<GuiApp *>(glfwGetWindowUserPointer(w));
-                                         if (!self)
-                                             return;
+        // ── Win32 subclass: intercept minimize BEFORE GLFW processes it ─
+        // GLFW's iconify callback fires AFTER the minimize animation,
+        // causing the window to briefly flash on the taskbar. Subclassing
+        // catches WM_SYSCOMMAND/SC_MINIMIZE and hides instantly.
 #ifdef _WIN32
-                                         if (iconified && self->config_.minimizeToTray)
-                                         {
-                                             // Hide window from taskbar → tray only
-                                             HWND hwnd = glfwGetWin32Window(w);
-                                             ShowWindow(hwnd, SW_HIDE);
-                                             self->minimizedToTray_ = true;
-                                         }
+        {
+            HWND hwnd = glfwGetWin32Window(window_);
+            g_guiAppForSubclass = this;
+            g_origWndProc = reinterpret_cast<WNDPROC>(
+                SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                                  reinterpret_cast<LONG_PTR>(minimizeSubclassProc)));
+        }
 #endif
-                                     });
 
         return true;
     }
@@ -1078,6 +1103,9 @@ namespace sm
                 if (idx == showIdx)
                 {
                     tray_.clearRestore();
+                    // Re-enable multi-viewport before showing
+                    ImGuiIO &io = ImGui::GetIO();
+                    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
                     HWND hwnd = glfwGetWin32Window(window_);
                     ShowWindow(hwnd, SW_SHOW);
                     ShowWindow(hwnd, SW_RESTORE);
@@ -1109,7 +1137,8 @@ namespace sm
 
         while (!glfwWindowShouldClose(window_))
         {
-            try {
+            try
+            {
                 // Determine frame rate tier
                 double glfwNow = glfwGetTime();
                 bool isActive = (glfwNow - lastInputTime_) < kIdleTimeout || guiDirty_.exchange(false);
@@ -1127,124 +1156,129 @@ namespace sm
                 glfwWaitEventsTimeout(targetFrameTime);
 
 #ifdef _WIN32
-            // ── System tray message pump ────────────────────────────
-            tray_.pollEvents();
+                // ── System tray message pump ────────────────────────────
+                tray_.pollEvents();
 
-            // Handle restore from tray (left-click on tray icon)
-            if (tray_.wantsRestore())
-            {
-                tray_.clearRestore();
-                HWND hwnd = glfwGetWin32Window(window_);
-                ShowWindow(hwnd, SW_SHOW);
-                ShowWindow(hwnd, SW_RESTORE);
-                SetForegroundWindow(hwnd);
-                minimizedToTray_ = false;
-                markActive();
-            }
+                // Handle restore from tray (left-click on tray icon)
+                if (tray_.wantsRestore())
+                {
+                    tray_.clearRestore();
+                    // Re-enable multi-viewport before showing
+                    ImGuiIO &io = ImGui::GetIO();
+                    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+                    HWND hwnd = glfwGetWin32Window(window_);
+                    ShowWindow(hwnd, SW_SHOW);
+                    ShowWindow(hwnd, SW_RESTORE);
+                    SetForegroundWindow(hwnd);
+                    minimizedToTray_ = false;
+                    markActive();
+                }
 
-            // Update tray tooltip with live status
-            {
-                int rec = 0;
-                for (auto &s : cachedStates_)
-                    if (s.recording)
-                        rec++;
-                std::wstring tip = L"StreaMonitor";
-                if (rec > 0)
-                    tip += L" - Recording " + std::to_wstring(rec) + L" model(s)";
-                tray_.setTooltip(tip);
-            }
+                // Update tray tooltip with live status
+                {
+                    int rec = 0;
+                    for (auto &s : cachedStates_)
+                        if (s.recording)
+                            rec++;
+                    std::wstring tip = L"StreaMonitor";
+                    if (rec > 0)
+                        tip += L" - Recording " + std::to_wstring(rec) + L" model(s)";
+                    tray_.setTooltip(tip);
+                }
 
-            // Rebuild tray menu periodically (state changes)
-            buildTrayMenu();
+                // Rebuild tray menu periodically (state changes)
+                buildTrayMenu();
 #endif
 
-            auto now = Clock::now();
-            animTime_ = std::chrono::duration<float>(now.time_since_epoch()).count();
+                auto now = Clock::now();
+                animTime_ = std::chrono::duration<float>(now.time_since_epoch()).count();
 
-            // Refresh bot states periodically (state changes push via events,
-            // this is just a safety net)
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - lastRefresh_)
-                    .count() > 2000)
-            {
-                refreshBotStates();
-                lastRefresh_ = now;
-            }
+                // Refresh bot states periodically (state changes push via events,
+                // this is just a safety net)
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - lastRefresh_)
+                        .count() > 2000)
+                {
+                    refreshBotStates();
+                    lastRefresh_ = now;
+                }
 
-            // Refresh disk usage every 60 seconds (recursive dir scan is expensive)
-            if (std::chrono::duration_cast<std::chrono::seconds>(
-                    now - lastDiskRefresh_)
-                    .count() > 60)
-            {
-                cachedDiskUsage_ = manager_.getDiskUsage();
-                lastDiskRefresh_ = now;
-            }
+                // Refresh disk usage every 60 seconds (recursive dir scan is expensive)
+                if (std::chrono::duration_cast<std::chrono::seconds>(
+                        now - lastDiskRefresh_)
+                        .count() > 60)
+                {
+                    cachedDiskUsage_ = manager_.getDiskUsage();
+                    lastDiskRefresh_ = now;
+                }
 
-            ImGui_ImplOpenGL3_NewFrame();
-            ImGui_ImplGlfw_NewFrame();
-            ImGui::NewFrame();
+                ImGui_ImplOpenGL3_NewFrame();
+                ImGui_ImplGlfw_NewFrame();
+                ImGui::NewFrame();
 
-            renderFrame();
+                renderFrame();
 
-            ImGui::Render();
-            int displayW, displayH;
-            glfwGetFramebufferSize(window_, &displayW, &displayH);
-            glViewport(0, 0, displayW, displayH);
-            glClearColor(COL_BG_DARK.x, COL_BG_DARK.y, COL_BG_DARK.z, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+                ImGui::Render();
+                int displayW, displayH;
+                glfwGetFramebufferSize(window_, &displayW, &displayH);
+                glViewport(0, 0, displayW, displayH);
+                glClearColor(COL_BG_DARK.x, COL_BG_DARK.y, COL_BG_DARK.z, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-            glfwSwapBuffers(window_);
+                glfwSwapBuffers(window_);
 
-            // ── Multi-viewport: update & render platform windows ────
-            // This allows ImGui windows (settings, popups, etc.) to be
-            // dragged outside the main application window as real OS windows.
-            ImGuiIO &io = ImGui::GetIO();
-            if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-            {
-                GLFWwindow *backup = glfwGetCurrentContext();
-                ImGui::UpdatePlatformWindows();
-                ImGui::RenderPlatformWindowsDefault();
-                glfwMakeContextCurrent(backup);
+                // ── Multi-viewport: update & render platform windows ────
+                // This allows ImGui windows (settings, popups, etc.) to be
+                // dragged outside the main application window as real OS windows.
+                ImGuiIO &io = ImGui::GetIO();
+                if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+                {
+                    GLFWwindow *backup = glfwGetCurrentContext();
+                    ImGui::UpdatePlatformWindows();
+                    ImGui::RenderPlatformWindowsDefault();
+                    glfwMakeContextCurrent(backup);
 
 #ifdef _WIN32
-                // Set the program icon on all viewport windows (popups, etc.)
-                // so they show our icon in the taskbar instead of the default.
-                static HICON hIconBig = nullptr;
-                static HICON hIconSmall = nullptr;
-                if (!hIconBig)
-                {
-                    HINSTANCE hInst = ::GetModuleHandle(nullptr);
-                    hIconBig = ::LoadIcon(hInst, MAKEINTRESOURCE(IDI_ICON1));
-                    hIconSmall = (HICON)::LoadImage(hInst, MAKEINTRESOURCE(IDI_ICON1),
-                                                    IMAGE_ICON,
-                                                    ::GetSystemMetrics(SM_CXSMICON),
-                                                    ::GetSystemMetrics(SM_CYSMICON),
-                                                    LR_DEFAULTCOLOR);
-                }
-                if (hIconBig)
-                {
-                    ImGuiPlatformIO &pio = ImGui::GetPlatformIO();
-                    for (int i = 1; i < pio.Viewports.Size; i++) // skip 0 = main viewport
+                    // Set the program icon on all viewport windows (popups, etc.)
+                    // so they show our icon in the taskbar instead of the default.
+                    static HICON hIconBig = nullptr;
+                    static HICON hIconSmall = nullptr;
+                    if (!hIconBig)
                     {
-                        HWND hwnd = (HWND)pio.Viewports[i]->PlatformHandleRaw;
-                        if (hwnd && ::SendMessage(hwnd, WM_GETICON, ICON_BIG, 0) != (LPARAM)hIconBig)
+                        HINSTANCE hInst = ::GetModuleHandle(nullptr);
+                        hIconBig = ::LoadIcon(hInst, MAKEINTRESOURCE(IDI_ICON1));
+                        hIconSmall = (HICON)::LoadImage(hInst, MAKEINTRESOURCE(IDI_ICON1),
+                                                        IMAGE_ICON,
+                                                        ::GetSystemMetrics(SM_CXSMICON),
+                                                        ::GetSystemMetrics(SM_CYSMICON),
+                                                        LR_DEFAULTCOLOR);
+                    }
+                    if (hIconBig)
+                    {
+                        ImGuiPlatformIO &pio = ImGui::GetPlatformIO();
+                        for (int i = 1; i < pio.Viewports.Size; i++) // skip 0 = main viewport
                         {
-                            ::SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
-                            ::SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)(hIconSmall ? hIconSmall : hIconBig));
+                            HWND hwnd = (HWND)pio.Viewports[i]->PlatformHandleRaw;
+                            if (hwnd && ::SendMessage(hwnd, WM_GETICON, ICON_BIG, 0) != (LPARAM)hIconBig)
+                            {
+                                ::SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+                                ::SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)(hIconSmall ? hIconSmall : hIconBig));
+                            }
                         }
                     }
-                }
 #endif
+                }
+                // No secondary sleep — glfwWaitEventsTimeout at top of loop
+                // is the sole rate limiter.
             }
-            // No secondary sleep — glfwWaitEventsTimeout at top of loop
-            // is the sole rate limiter.
-            }
-            catch (const std::exception& e) {
+            catch (const std::exception &e)
+            {
                 spdlog::error("GUI main loop exception: {}", e.what());
                 // Continue running despite error
             }
-            catch (...) {
+            catch (...)
+            {
                 spdlog::error("Unknown GUI main loop exception");
                 // Continue running despite error
             }
@@ -1349,7 +1383,7 @@ namespace sm
             auto [user, site] = *pendingMoveBot_;
             pendingMoveBot_.reset();
             safeDetach([this, user, site]()
-                        {
+                       {
                 auto result = manager_.moveFilesToUnprocessed(user, site);
                 {
                     std::lock_guard lk(asyncResultMutex_);
@@ -1363,7 +1397,7 @@ namespace sm
             auto [user, site] = *pendingResyncBot_;
             pendingResyncBot_.reset();
             safeDetach([this, user, site]()
-                        {
+                       {
                 auto result = manager_.resyncBot(user, site);
                 {
                     std::lock_guard lk(asyncResultMutex_);
@@ -1424,21 +1458,21 @@ namespace sm
             if (ImGui::MenuItem("Start All"))
             {
                 safeDetach([this]()
-                            {
+                           {
                     manager_.startAllBots();
                     manager_.startAllGroups(); }, "menu-start-all");
             }
             if (ImGui::MenuItem("Stop All"))
             {
                 safeDetach([this]()
-                            {
+                           {
                     manager_.stopAll();
                     manager_.stopAllGroups(); }, "menu-stop-all");
             }
             if (ImGui::MenuItem("Resync All"))
             {
                 safeDetach([this]()
-                            {
+                           {
                     auto result = manager_.resyncAll();
                     addLog("info", "system", result); }, "menu-resync-all");
             }
@@ -1504,7 +1538,7 @@ namespace sm
         if (ImGui::Button(" Start All "))
         {
             safeDetach([this]()
-                        {
+                       {
                 manager_.startAllBots();
                 manager_.startAllGroups(); }, "toolbar-start-all");
         }
@@ -1512,7 +1546,7 @@ namespace sm
         if (ImGui::Button(" Stop All "))
         {
             safeDetach([this]()
-                        {
+                       {
                 manager_.stopAll();
                 manager_.stopAllGroups(); }, "toolbar-stop-all");
         }
@@ -1522,7 +1556,7 @@ namespace sm
         if (ImGui::Button(" Move to Unprocessed "))
         {
             safeDetach([this]()
-                        { manager_.moveAllFilesToUnprocessed(); }, "toolbar-move-all");
+                       { manager_.moveAllFilesToUnprocessed(); }, "toolbar-move-all");
         }
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
@@ -1531,7 +1565,7 @@ namespace sm
         if (ImGui::Button(" Resync All "))
         {
             safeDetach([this]()
-                        { manager_.resyncAll(); }, "toolbar-resync-all");
+                       { manager_.resyncAll(); }, "toolbar-resync-all");
         }
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
@@ -1824,7 +1858,7 @@ namespace sm
                             bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
                 safeDetach([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
-                            {
+                           {
                     for (auto &gn : groupNames)
                         manager_.startGroup(gn);
                     for (auto &[u, s] : bots)
@@ -1850,7 +1884,7 @@ namespace sm
                             bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
                 safeDetach([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
-                            {
+                           {
                     for (auto &gn : groupNames)
                         manager_.stopGroup(gn);
                     for (auto &[u, s] : bots)
@@ -1877,7 +1911,7 @@ namespace sm
                             bots.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                 }
                 safeDetach([this, groupNames = std::move(groupNames), bots = std::move(bots)]()
-                            {
+                           {
                     for (auto &gn : groupNames)
                     {
                         manager_.stopGroup(gn);
@@ -1905,7 +1939,7 @@ namespace sm
                 if (!targets.empty())
                 {
                     safeDetach([this, targets = std::move(targets)]()
-                                {
+                               {
                         int ok = 0, fail = 0;
                         for (auto &[user, site] : targets)
                         {
@@ -1955,7 +1989,7 @@ namespace sm
                 if (!targets.empty())
                 {
                     safeDetach([this, targets = std::move(targets)]()
-                                {
+                               {
                         std::string summary;
                         int ok = 0, fail = 0;
                         for (auto &[user, site] : targets)
@@ -2317,7 +2351,7 @@ namespace sm
                         {
                             std::string u = b.username, s = b.siteName;
                             safeDetach([this, u, s]()
-                                        { manager_.stopBot(u, s); }, "ctx-stop-bot");
+                                       { manager_.stopBot(u, s); }, "ctx-stop-bot");
                         }
                         ImGui::PopStyleColor();
                         ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
@@ -2325,7 +2359,7 @@ namespace sm
                         {
                             std::string u = b.username, s = b.siteName;
                             safeDetach([this, u, s]()
-                                        { manager_.restartBot(u, s); }, "ctx-restart-bot");
+                                       { manager_.restartBot(u, s); }, "ctx-restart-bot");
                         }
                         ImGui::PopStyleColor();
                     }
@@ -2350,7 +2384,7 @@ namespace sm
                             {
                                 std::string u = b.username, s = b.siteName;
                                 safeDetach([this, u, s]()
-                                            { manager_.stopBot(u, s); }, "ctx-stop-site");
+                                           { manager_.stopBot(u, s); }, "ctx-stop-site");
                             }
                             ImGui::PopStyleColor();
                         }
@@ -2371,7 +2405,7 @@ namespace sm
                             for (int idx : grp.indices)
                                 targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                             safeDetach([this, targets = std::move(targets)]()
-                                        {
+                                       {
                                 for (auto& [u, s] : targets)
                                     manager_.stopBot(u, s); }, "ctx-stop-all");
                         }
@@ -2381,7 +2415,7 @@ namespace sm
                             for (int idx : grp.indices)
                                 targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                             safeDetach([this, targets = std::move(targets)]()
-                                        {
+                                       {
                                 for (auto& [u, s] : targets)
                                     manager_.restartBot(u, s); }, "ctx-restart-all");
                         }
@@ -2394,7 +2428,7 @@ namespace sm
                             for (int idx : grp.indices)
                                 targets.emplace_back(cachedStates_[idx].username, cachedStates_[idx].siteName);
                             safeDetach([this, targets = std::move(targets)]()
-                                        {
+                                       {
                                 for (auto& [u, s] : targets)
                                     manager_.startBot(u, s); }, "ctx-start-all");
                         }
@@ -2449,7 +2483,7 @@ namespace sm
                         // Stop the group cycling first, then disband the entire group
                         std::string gname = grp.groupName;
                         safeDetach([this, gname]()
-                                    {
+                                   {
                             manager_.stopGroup(gname);
                             manager_.removeCrossRegisterGroup(gname); }, "break-group");
                     }
@@ -2809,7 +2843,7 @@ namespace sm
                             {
                                 std::string u = b.username, s = b.siteName;
                                 safeDetach([this, u, s]()
-                                            { manager_.stopBot(u, s); }, "sub-ctx-stop");
+                                           { manager_.stopBot(u, s); }, "sub-ctx-stop");
                             }
                             ImGui::PopStyleColor();
                             ImGui::PushStyleColor(ImGuiCol_Text, COL_YELLOW);
@@ -2817,7 +2851,7 @@ namespace sm
                             {
                                 std::string u = b.username, s = b.siteName;
                                 safeDetach([this, u, s]()
-                                            { manager_.restartBot(u, s); }, "sub-ctx-restart");
+                                           { manager_.restartBot(u, s); }, "sub-ctx-restart");
                             }
                             ImGui::PopStyleColor();
                         }
@@ -4084,7 +4118,7 @@ namespace sm
         {
             addLog("info", "system", "Re-extracting mouflon keys...");
             safeDetach([this]()
-                        {
+                       {
                 auto &mk = MouflonKeys::instance();
                 HttpClient http;
                 http.setDefaultUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
@@ -5255,7 +5289,7 @@ namespace sm
                 {
                     std::string u = bot.username, s = bot.siteName;
                     safeDetach([this, u, s]()
-                                { manager_.stopBot(u, s); }, "detail-stop");
+                               { manager_.stopBot(u, s); }, "detail-stop");
                 }
                 ImGui::PopStyleColor();
             }
@@ -5271,7 +5305,7 @@ namespace sm
             {
                 std::string u = bot.username, s = bot.siteName;
                 safeDetach([this, u, s]()
-                            { manager_.restartBot(u, s); }, "detail-restart");
+                           { manager_.restartBot(u, s); }, "detail-restart");
             }
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_Button, {0.5f, 0.15f, 0.15f, 1.0f});

@@ -347,41 +347,87 @@ namespace sm
 
     void ImageCache::downloadAndDecode(const std::string &url)
     {
-      try {
-        std::vector<unsigned char> data;
+        try
+        {
+            std::vector<unsigned char> data;
 
-        // Check if this is a local file path (e.g. preview captured from stream)
-        bool isLocalFile = false;
+            // Check if this is a local file path (e.g. preview captured from stream)
+            bool isLocalFile = false;
 #ifdef _WIN32
-        isLocalFile = (url.size() > 2 && url[1] == ':' && (url[2] == '\\' || url[2] == '/'));
+            isLocalFile = (url.size() > 2 && url[1] == ':' && (url[2] == '\\' || url[2] == '/'));
 #else
-        isLocalFile = (!url.empty() && url[0] == '/');
+            isLocalFile = (!url.empty() && url[0] == '/');
 #endif
 
-        if (isLocalFile)
-        {
-            // Read directly from local file
-            FILE *f = fopen(url.c_str(), "rb");
-            if (f)
+            if (isLocalFile)
             {
-                fseek(f, 0, SEEK_END);
-                long sz = ftell(f);
-                fseek(f, 0, SEEK_SET);
-                if (sz > 0 && sz < 10 * 1024 * 1024)
+                // Read directly from local file
+                FILE *f = fopen(url.c_str(), "rb");
+                if (f)
                 {
-                    data.resize(static_cast<size_t>(sz));
-                    fread(data.data(), 1, data.size(), f);
+                    fseek(f, 0, SEEK_END);
+                    long sz = ftell(f);
+                    fseek(f, 0, SEEK_SET);
+                    if (sz > 0 && sz < 10 * 1024 * 1024)
+                    {
+                        data.resize(static_cast<size_t>(sz));
+                        fread(data.data(), 1, data.size(), f);
+                    }
+                    fclose(f);
                 }
-                fclose(f);
+            }
+            else
+            {
+                httpDownload(url, data);
+            }
+
+            if (data.empty())
+            {
+                std::lock_guard lock(mutex_);
+                auto it = cache_.find(url);
+                if (it != cache_.end())
+                {
+                    it->second.state = State::Failed;
+                    it->second.loadedAt = std::chrono::steady_clock::now();
+                }
+                return;
+            }
+
+            // Decode with stb_image
+            int w = 0, h = 0, channels = 0;
+            unsigned char *pixels = stbi_load_from_memory(
+                data.data(), (int)data.size(), &w, &h, &channels, 4 /*RGBA*/);
+
+            if (!pixels || w <= 0 || h <= 0)
+            {
+                if (pixels)
+                    stbi_image_free(pixels);
+                std::lock_guard lock(mutex_);
+                auto it = cache_.find(url);
+                if (it != cache_.end())
+                {
+                    it->second.state = State::Failed;
+                    it->second.loadedAt = std::chrono::steady_clock::now();
+                }
+                return;
+            }
+
+            // Queue for GL upload on the main thread
+            PendingUpload upload;
+            upload.url = url;
+            upload.width = w;
+            upload.height = h;
+            upload.pixels.assign(pixels, pixels + (w * h * 4));
+            stbi_image_free(pixels);
+
+            {
+                std::lock_guard lock(uploadMutex_);
+                pendingUploads_.push_back(std::move(upload));
             }
         }
-        else
+        catch (const std::exception &e)
         {
-            httpDownload(url, data);
-        }
-
-        if (data.empty())
-        {
+            spdlog::error("[ImageCache] downloadAndDecode('{}') exception: {}", url.substr(0, 80), e.what());
             std::lock_guard lock(mutex_);
             auto it = cache_.find(url);
             if (it != cache_.end())
@@ -389,51 +435,11 @@ namespace sm
                 it->second.state = State::Failed;
                 it->second.loadedAt = std::chrono::steady_clock::now();
             }
-            return;
         }
-
-        // Decode with stb_image
-        int w = 0, h = 0, channels = 0;
-        unsigned char *pixels = stbi_load_from_memory(
-            data.data(), (int)data.size(), &w, &h, &channels, 4 /*RGBA*/);
-
-        if (!pixels || w <= 0 || h <= 0)
+        catch (...)
         {
-            if (pixels)
-                stbi_image_free(pixels);
-            std::lock_guard lock(mutex_);
-            auto it = cache_.find(url);
-            if (it != cache_.end())
-            {
-                it->second.state = State::Failed;
-                it->second.loadedAt = std::chrono::steady_clock::now();
-            }
-            return;
+            spdlog::error("[ImageCache] downloadAndDecode unknown exception");
         }
-
-        // Queue for GL upload on the main thread
-        PendingUpload upload;
-        upload.url = url;
-        upload.width = w;
-        upload.height = h;
-        upload.pixels.assign(pixels, pixels + (w * h * 4));
-        stbi_image_free(pixels);
-
-        {
-            std::lock_guard lock(uploadMutex_);
-            pendingUploads_.push_back(std::move(upload));
-        }
-      } catch (const std::exception& e) {
-          spdlog::error("[ImageCache] downloadAndDecode('{}') exception: {}", url.substr(0, 80), e.what());
-          std::lock_guard lock(mutex_);
-          auto it = cache_.find(url);
-          if (it != cache_.end()) {
-              it->second.state = State::Failed;
-              it->second.loadedAt = std::chrono::steady_clock::now();
-          }
-      } catch (...) {
-          spdlog::error("[ImageCache] downloadAndDecode unknown exception");
-      }
     }
 
 } // namespace sm

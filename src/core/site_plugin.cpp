@@ -887,205 +887,210 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void SitePlugin::threadFunc(const AppConfig &config)
     {
-      try {
-        logger_->info("Thread started for {}", username_);
-
-        int offlineTime = 0; // cumulative offline seconds (Python: offline_time)
-
-        while (running_.load() && !quitting_.load())
+        try
         {
-            // ── Max consecutive error check (Python: _max_consecutive_errors)
+            logger_->info("Thread started for {}", username_);
+
+            int offlineTime = 0; // cumulative offline seconds (Python: offline_time)
+
+            while (running_.load() && !quitting_.load())
             {
-                bool errorLimitReached = false;
+                // ── Max consecutive error check (Python: _max_consecutive_errors)
                 {
-                    std::lock_guard lock(stateMutex_);
-                    if (state_.consecutiveErrors >= maxConsecutiveErrors_)
+                    bool errorLimitReached = false;
                     {
-                        logger_->warn("Hit {} consecutive errors, backing off for {}s before retrying",
-                                      maxConsecutiveErrors_, sleepOnLongOffline_);
-                        state_.consecutiveErrors = 0;
-                        errorLimitReached = true;
+                        std::lock_guard lock(stateMutex_);
+                        if (state_.consecutiveErrors >= maxConsecutiveErrors_)
+                        {
+                            logger_->warn("Hit {} consecutive errors, backing off for {}s before retrying",
+                                          maxConsecutiveErrors_, sleepOnLongOffline_);
+                            state_.consecutiveErrors = 0;
+                            errorLimitReached = true;
+                        }
+                    }
+                    if (errorLimitReached)
+                    {
+                        // Python: sleeps sleep_on_long_offline (15s), continues
+                        // NOT setting RateLimit status like before
+                        sleepInterruptible(sleepOnLongOffline_);
+                        continue;
                     }
                 }
-                if (errorLimitReached)
+
+                // ── Check status ────────────────────────────────────────
+                Status status;
+                try
                 {
-                    // Python: sleeps sleep_on_long_offline (15s), continues
-                    // NOT setting RateLimit status like before
+                    status = checkStatus();
+                }
+                catch (const std::exception &e)
+                {
+                    logger_->error("Exception in checkStatus: {}", e.what());
+                    status = Status::Error;
+                }
+
+                // Log status changes (Python: if self.sc != self.previous_status)
+                Status prevStatus;
+                {
+                    std::lock_guard lock(stateMutex_);
+                    prevStatus = state_.status;
+                }
+                setState(status);
+
+                if (status != prevStatus)
+                {
+                    logger_->info("Status: {} → {}", statusToString(prevStatus),
+                                  statusToString(status));
+                }
+
+                // ── State machine dispatch ──────────────────────────────
+
+                if (status == Status::Error)
+                {
+                    // Python: self._consecutive_errors += 1; self._sleep(self.sleep_on_error)
+                    {
+                        std::lock_guard lock(stateMutex_);
+                        state_.consecutiveErrors++;
+                    }
+                    sleepInterruptible(sleepOnError_);
+                    continue;
+                }
+
+                if (status == Status::ConnectionError)
+                {
+                    // Connection error: network/DNS/timeout failure — NOT a rate limit!
+                    // Track as consecutive error and sleep briefly before retry
+                    {
+                        std::lock_guard lock(stateMutex_);
+                        state_.consecutiveErrors++;
+                    }
+                    logger_->debug("Connection error, sleeping {}s", sleepOnError_);
+                    sleepInterruptible(sleepOnError_);
+                    continue;
+                }
+
+                // Reset consecutive errors on ANY non-error status
+                // (Python: if self.sc != Status.ERROR: self._consecutive_errors = 0)
+                {
+                    std::lock_guard lock(stateMutex_);
+                    state_.consecutiveErrors = 0;
+                }
+
+                if (status == Status::NotExist)
+                {
+                    // Python: auto-removes, sets running=False, breaks
+                    logger_->error("User {} does not exist - auto-removing", username_);
+                    autoRemoveModel("non-existent");
+                    running_.store(false);
+                    break;
+                }
+
+                if (status == Status::Deleted)
+                {
+                    // Python: auto-removes, sets running=False, breaks
+                    logger_->error("Model account {} has been DELETED - auto-removing", username_);
+                    autoRemoveModel("deleted");
+                    running_.store(false);
+                    break;
+                }
+
+                if (status == Status::Cloudflare)
+                {
+                    // Python: self._sleep(self.sleep_on_ratelimit)
+                    logger_->error("Cloudflare challenge detected");
+                    sleepInterruptible(sleepOnRateLimit_);
+                    continue;
+                }
+
+                if (status == Status::RateLimit)
+                {
+                    // Python: self._sleep(self.sleep_on_ratelimit)
+                    logger_->warn("Rate limited");
+                    sleepInterruptible(sleepOnRateLimit_);
+                    continue;
+                }
+
+                if (status == Status::Offline)
+                {
+                    // Python: offline_time += self.sleep_on_offline
+                    offlineTime += sleepOnOffline_;
+                    int sleepTime = (offlineTime > longOfflineTimeout_)
+                                        ? sleepOnLongOffline_
+                                        : sleepOnOffline_;
+                    sleepInterruptible(sleepTime);
+                    continue;
+                }
+
+                if (status == Status::LongOffline)
+                {
+                    // Python: self._sleep(self.sleep_on_long_offline)
                     sleepInterruptible(sleepOnLongOffline_);
                     continue;
                 }
+
+                if (status == Status::Online)
+                {
+                    // Python: offline_time = 0; self._sleep(self.sleep_on_private)
+                    offlineTime = 0;
+                    sleepInterruptible(sleepOnPrivate_);
+                    continue;
+                }
+
+                if (status == Status::Private)
+                {
+                    // Python: offline_time = 0; self._sleep(self.sleep_on_private)
+                    offlineTime = 0;
+                    sleepInterruptible(sleepOnPrivate_);
+                    continue;
+                }
+
+                if (status == Status::Restricted)
+                {
+                    // Python: falls through to default error handler
+                    sleepInterruptible(sleepOnError_);
+                    continue;
+                }
+
+                if (status == Status::Public)
+                {
+                    // Python: offline_time = 0; download loop
+                    offlineTime = 0;
+                    downloadLoop(config);
+                    continue;
+                }
+
+                // Unknown or unhandled status
+                sleepInterruptible(sleepOnError_);
             }
 
-            // ── Check status ────────────────────────────────────────
-            Status status;
-            try
-            {
-                status = checkStatus();
-            }
-            catch (const std::exception &e)
-            {
-                logger_->error("Exception in checkStatus: {}", e.what());
-                status = Status::Error;
-            }
-
-            // Log status changes (Python: if self.sc != self.previous_status)
-            Status prevStatus;
+            // Cleanup
             {
                 std::lock_guard lock(stateMutex_);
-                prevStatus = state_.status;
+                state_.running = false;
+                state_.recording = false;
+                state_.status = Status::NotRunning;
             }
-            setState(status);
-
-            if (status != prevStatus)
-            {
-                logger_->info("Status: {} → {}", statusToString(prevStatus),
-                              statusToString(status));
-            }
-
-            // ── State machine dispatch ──────────────────────────────
-
-            if (status == Status::Error)
-            {
-                // Python: self._consecutive_errors += 1; self._sleep(self.sleep_on_error)
-                {
-                    std::lock_guard lock(stateMutex_);
-                    state_.consecutiveErrors++;
-                }
-                sleepInterruptible(sleepOnError_);
-                continue;
-            }
-
-            if (status == Status::ConnectionError)
-            {
-                // Connection error: network/DNS/timeout failure — NOT a rate limit!
-                // Track as consecutive error and sleep briefly before retry
-                {
-                    std::lock_guard lock(stateMutex_);
-                    state_.consecutiveErrors++;
-                }
-                logger_->debug("Connection error, sleeping {}s", sleepOnError_);
-                sleepInterruptible(sleepOnError_);
-                continue;
-            }
-
-            // Reset consecutive errors on ANY non-error status
-            // (Python: if self.sc != Status.ERROR: self._consecutive_errors = 0)
-            {
-                std::lock_guard lock(stateMutex_);
-                state_.consecutiveErrors = 0;
-            }
-
-            if (status == Status::NotExist)
-            {
-                // Python: auto-removes, sets running=False, breaks
-                logger_->error("User {} does not exist - auto-removing", username_);
-                autoRemoveModel("non-existent");
-                running_.store(false);
-                break;
-            }
-
-            if (status == Status::Deleted)
-            {
-                // Python: auto-removes, sets running=False, breaks
-                logger_->error("Model account {} has been DELETED - auto-removing", username_);
-                autoRemoveModel("deleted");
-                running_.store(false);
-                break;
-            }
-
-            if (status == Status::Cloudflare)
-            {
-                // Python: self._sleep(self.sleep_on_ratelimit)
-                logger_->error("Cloudflare challenge detected");
-                sleepInterruptible(sleepOnRateLimit_);
-                continue;
-            }
-
-            if (status == Status::RateLimit)
-            {
-                // Python: self._sleep(self.sleep_on_ratelimit)
-                logger_->warn("Rate limited");
-                sleepInterruptible(sleepOnRateLimit_);
-                continue;
-            }
-
-            if (status == Status::Offline)
-            {
-                // Python: offline_time += self.sleep_on_offline
-                offlineTime += sleepOnOffline_;
-                int sleepTime = (offlineTime > longOfflineTimeout_)
-                                    ? sleepOnLongOffline_
-                                    : sleepOnOffline_;
-                sleepInterruptible(sleepTime);
-                continue;
-            }
-
-            if (status == Status::LongOffline)
-            {
-                // Python: self._sleep(self.sleep_on_long_offline)
-                sleepInterruptible(sleepOnLongOffline_);
-                continue;
-            }
-
-            if (status == Status::Online)
-            {
-                // Python: offline_time = 0; self._sleep(self.sleep_on_private)
-                offlineTime = 0;
-                sleepInterruptible(sleepOnPrivate_);
-                continue;
-            }
-
-            if (status == Status::Private)
-            {
-                // Python: offline_time = 0; self._sleep(self.sleep_on_private)
-                offlineTime = 0;
-                sleepInterruptible(sleepOnPrivate_);
-                continue;
-            }
-
-            if (status == Status::Restricted)
-            {
-                // Python: falls through to default error handler
-                sleepInterruptible(sleepOnError_);
-                continue;
-            }
-
-            if (status == Status::Public)
-            {
-                // Python: offline_time = 0; download loop
-                offlineTime = 0;
-                downloadLoop(config);
-                continue;
-            }
-
-            // Unknown or unhandled status
-            sleepInterruptible(sleepOnError_);
+            if (stateCallback_)
+                stateCallback_(state_);
+            logger_->info("Thread exiting for {}", username_);
+        }
+        catch (const std::exception &e)
+        {
+            logger_->error("FATAL thread exception for {}: {}", username_, e.what());
+        }
+        catch (...)
+        {
+            logger_->error("FATAL unknown thread exception for {}", username_);
         }
 
-        // Cleanup
+        // Ensure state cleanup even after exception
         {
             std::lock_guard lock(stateMutex_);
             state_.running = false;
             state_.recording = false;
             state_.status = Status::NotRunning;
         }
-        if (stateCallback_)
-            stateCallback_(state_);
-        logger_->info("Thread exiting for {}", username_);
-      } catch (const std::exception &e) {
-          logger_->error("FATAL thread exception for {}: {}", username_, e.what());
-      } catch (...) {
-          logger_->error("FATAL unknown thread exception for {}", username_);
-      }
-
-      // Ensure state cleanup even after exception
-      {
-          std::lock_guard lock(stateMutex_);
-          state_.running = false;
-          state_.recording = false;
-          state_.status = Status::NotRunning;
-      }
-      running_.store(false);
+        running_.store(false);
     }
 
     // ─────────────────────────────────────────────────────────────────
