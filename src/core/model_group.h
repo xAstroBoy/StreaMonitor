@@ -3,16 +3,18 @@
 // ─────────────────────────────────────────────────────────────────
 // StreaMonitor C++ — Model Group (Cross-Register Cycling Engine)
 //
-// PURE FAILOVER: groups multiple site/username pairings for the
-// same model. ONE thread, ONE download at a time:
-//   check pairing[0] → if public → download (exclusively)
+// Groups multiple site/username pairings for the same model.
+// ONE thread per group cycles through pairings:
+//   check pairing[0] → if public → download
 //                     → if offline → immediately check pairing[1]
 //   ...
 //   if ALL offline → sleep → restart cycle
-//   when stream ends → restart cycle (check all pairings again)
 //
-// NO parallel downloads. If model goes private on site A but is
-// still live on site B, the cycle picks up site B next iteration.
+// Mobile dual-recording: when a model broadcasts from mobile,
+// ALL non-VR public pairings are recorded in parallel to capture
+// both camera views (mobile portrait + desktop landscape).
+// Stream resolution (h > w = portrait) determines Mobile/ subfolder.
+// VR pairings are ALWAYS independent — never mobile, never parallel.
 // ─────────────────────────────────────────────────────────────────
 
 #include "core/site_plugin.h"

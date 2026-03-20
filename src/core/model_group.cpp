@@ -270,15 +270,78 @@ namespace sm
                                   statusToString(status));
 
                     // ── PUBLIC → download from this pairing ─────────────
-                    // Cross-register = PURE FAILOVER. Record from ONE site
-                    // at a time. When the stream ends (private, offline, error),
-                    // restart the cycle and check all pairings again.
                     if (status == Status::Public)
                     {
                         anyLive = true;
 
-                        spdlog::info("[Group:{}] {} [{}] is LIVE — downloading",
-                                     groupName_, pairing.username, pairing.site);
+                        // ── Mobile dual-recording ───────────────────────
+                        // If this pairing is mobile AND non-VR, check all
+                        // other non-VR pairings — if any are also PUBLIC,
+                        // download from them in parallel to capture both
+                        // camera views (mobile + desktop).
+                        // VR pairings are ALWAYS left alone — never
+                        // participate in dual-recording.
+                        bool mobileMulti = pairing.lastMobile && !isVrSlug(pairing.site);
+                        std::vector<std::unique_ptr<std::jthread>> parallelThreads;
+                        std::vector<std::unique_ptr<CancellationToken>> parallelTokens;
+                        bool startedAsMobile = pairing.lastMobile;
+
+                        if (mobileMulti)
+                        {
+                            spdlog::info("[Group:{}] {} [{}] is MOBILE — checking other pairings for dual recording",
+                                         groupName_, pairing.username, pairing.site);
+
+                            for (size_t j = 0; j < pairings_.size() && running_.load() && !quitting_.load(); j++)
+                            {
+                                if (j == i)
+                                    continue;
+                                auto &other = pairings_[j];
+                                if (isVrSlug(other.site))
+                                    continue; // VR always independent
+
+                                Status otherStatus;
+                                try
+                                {
+                                    otherStatus = other.plugin->checkStatus();
+                                }
+                                catch (...)
+                                {
+                                    continue;
+                                }
+                                other.lastStatus = otherStatus;
+                                other.lastMobile = other.plugin->isMobile();
+
+                                // Update GUI state for this pairing
+                                {
+                                    std::lock_guard lock(stateMutex_);
+                                    if (j < state_.pairings.size())
+                                    {
+                                        state_.pairings[j].lastStatus = otherStatus;
+                                        state_.pairings[j].mobile = other.lastMobile;
+                                    }
+                                }
+
+                                if (otherStatus == Status::Public)
+                                {
+                                    spdlog::info("[Group:{}] {} [{}] also PUBLIC — starting parallel download",
+                                                 groupName_, other.username, other.site);
+
+                                    auto token = std::make_unique<CancellationToken>();
+                                    auto *tokenPtr = token.get();
+                                    size_t idx = j;
+                                    parallelTokens.push_back(std::move(token));
+                                    parallelThreads.push_back(std::make_unique<std::jthread>(
+                                        [this, idx, &config, tokenPtr]()
+                                        {
+                                            downloadFromWithToken(pairings_[idx], config, *tokenPtr);
+                                        }));
+                                }
+                            }
+                        }
+
+                        spdlog::info("[Group:{}] {} [{}] is LIVE{} — downloading",
+                                     groupName_, pairing.username, pairing.site,
+                                     mobileMulti ? " (MOBILE, dual-recording)" : "");
 
                         {
                             std::lock_guard lock(stateMutex_);
@@ -296,6 +359,48 @@ namespace sm
                         }
                         if (stateCallback_)
                             stateCallback_(state_);
+
+                        // ── Mobile→PC transition ────────────────────────
+                        // After download ends, re-check mobile status. If the
+                        // stream started as mobile but is now PC (landscape),
+                        // cancel all parallel recorders — we only need the
+                        // primary. The primary stays as favorite (index 0).
+                        if (startedAsMobile && !parallelThreads.empty())
+                        {
+                            bool nowMobile = false;
+                            try
+                            {
+                                nowMobile = pairing.plugin->isMobile();
+                            }
+                            catch (...)
+                            {
+                            }
+
+                            if (!nowMobile)
+                            {
+                                spdlog::info("[Group:{}] {} [{}] switched from MOBILE to PC — "
+                                             "cancelling {} parallel recorder(s), keeping primary",
+                                             groupName_, pairing.username, pairing.site,
+                                             parallelThreads.size());
+                                for (auto &t : parallelTokens)
+                                    t->cancel();
+                            }
+                        }
+
+                        // Wait for parallel downloads to finish.
+                        // If group is being stopped, cancel the parallel tokens first.
+                        if (!parallelThreads.empty())
+                        {
+                            if (!running_.load() || quitting_.load())
+                            {
+                                for (auto &t : parallelTokens)
+                                    t->cancel();
+                            }
+                            spdlog::info("[Group:{}] Waiting for {} parallel download(s) to finish",
+                                         groupName_, parallelThreads.size());
+                            parallelThreads.clear(); // join all
+                            parallelTokens.clear();
+                        }
 
                         // Brief pause after download, then continue cycling
                         sleepInterruptible(sleepAfterDownload_);
@@ -438,7 +543,13 @@ namespace sm
             return (baseDir / (std::to_string(num) + fmt2.extension)).string();
         };
 
-        std::string outputPath = generateNextPath(pairing.plugin->isMobile());
+        // Start ALL recordings in the non-mobile (PC) folder.
+        // The API's isMobile flag tells us the broadcaster's DEVICE,
+        // not the stream orientation — ALL sites report the same flag.
+        // The resolution change callback will detect portrait (h > w)
+        // on the first packet and move the mobile view to Mobile/.
+        // VR sites also always start here (VR is never mobile).
+        std::string outputPath = generateNextPath(false);
         spdlog::info("[Group:{}] Recording {} [{}] to: {}",
                      groupName_, pairing.username, pairing.site, outputPath);
 

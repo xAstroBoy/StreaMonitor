@@ -2557,6 +2557,67 @@ namespace sm
                             break; // Output failures are fatal
                         }
                         outputOpened = true;
+
+                        // ── First-open mobile detection ─────────────────────
+                        // Check if the stream is portrait (mobile) on the very
+                        // first open. The caller may have started us at a PC
+                        // path; if the actual stream is portrait, fire the
+                        // resolution callback to switch to Mobile/ immediately
+                        // (before writing any packets to the wrong file).
+                        if (resChangeCb_ && state.videoIdx >= 0 && state.inputCtx)
+                        {
+                            auto *firstPar = state.inputCtx->streams[state.videoIdx]->codecpar;
+                            int firstW = firstPar->width;
+                            int firstH = firstPar->height;
+                            if (firstW > 0 && firstH > 0 && firstH > firstW)
+                            {
+                                log_->info("First-open portrait detected: {}x{} → switching to Mobile/",
+                                           firstW, firstH);
+                                ResolutionInfo ri;
+                                ri.width = firstW;
+                                ri.height = firstH;
+                                ri.isMobile = true;
+                                std::string newPath = resChangeCb_(ri);
+                                if (!newPath.empty())
+                                {
+                                    // Close the empty PC output, switch to mobile path
+                                    if (state.outputCtx && state.headerWritten)
+                                    {
+                                        // Flush encoder if transcoding
+                                        if (state.transcoding && state.videoEncCtx)
+                                        {
+                                            uint64_t flushBytes = 0;
+                                            uint32_t flushPkts = 0;
+                                            flushEncoder(state, flushBytes, flushPkts);
+                                        }
+                                        av_write_trailer(state.outputCtx);
+                                    }
+                                    if (state.outputCtx)
+                                    {
+                                        if (!(state.outputCtx->oformat->flags & AVFMT_NOFILE) &&
+                                            state.outputCtx->pb)
+                                            avio_closep(&state.outputCtx->pb);
+                                        avformat_free_context(state.outputCtx);
+                                        state.outputCtx = nullptr;
+                                    }
+                                    state.headerWritten = false;
+
+                                    // Delete the empty PC file
+                                    std::error_code fsEc;
+                                    if (std::filesystem::exists(currentOutputPath, fsEc) &&
+                                        std::filesystem::file_size(currentOutputPath, fsEc) <= 4096)
+                                        std::filesystem::remove(currentOutputPath, fsEc);
+
+                                    currentOutputPath = newPath;
+                                    if (!openOutput(state, currentOutputPath, vrConfig))
+                                    {
+                                        result.error = "Failed to open mobile output file";
+                                        closeAll(state);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                     else if (state.videoIdx >= 0 && state.inputCtx)
                     {
