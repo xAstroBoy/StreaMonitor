@@ -1330,12 +1330,18 @@ namespace sm
         // instead of relying on the SC API which can be slow.
         recorder.setResolutionChangeCallback([this, &config](const ResolutionInfo &ri) -> std::string
                                              {
+            // VR sites (slug ends with "VR") are NEVER mobile — ignore
+            // portrait detection for them.
+            bool vrSite = siteSlug_.size() >= 2 &&
+                          siteSlug_.compare(siteSlug_.size() - 2, 2, "VR") == 0;
+            bool mobile = ri.isMobile && !vrSite;
+
             logger_->info("Resolution change detected: {}x{} (mobile={})",
-                          ri.width, ri.height, ri.isMobile);
+                          ri.width, ri.height, mobile);
 
             // Update mobile state from the actual video resolution — faster
             // and more reliable than waiting for the next SC API response.
-            setMobile(ri.isMobile);
+            setMobile(mobile);
 
             // Generate a new output path (picks up the Mobile subfolder change)
             return generateOutputPath(config); });

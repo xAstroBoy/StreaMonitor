@@ -270,77 +270,15 @@ namespace sm
                                   statusToString(status));
 
                     // ── PUBLIC → download from this pairing ─────────────
+                    // Cross-register = PURE FAILOVER. Record from ONE site
+                    // at a time. When the stream ends (private, offline, error),
+                    // restart the cycle and check all pairings again.
                     if (status == Status::Public)
                     {
                         anyLive = true;
 
-                        // ── Mobile dual-recording ───────────────────────
-                        // If this pairing is mobile AND non-VR, check all
-                        // other non-VR pairings — if any are also PUBLIC,
-                        // download from them in parallel to capture both
-                        // camera views (mobile + desktop).
-                        bool mobileMulti = pairing.lastMobile && !isVrSlug(pairing.site);
-                        std::vector<std::unique_ptr<std::jthread>> parallelThreads;
-                        std::vector<std::unique_ptr<CancellationToken>> parallelTokens;
-                        // Track whether we started in mobile mode (for mobile→PC transition)
-                        bool startedAsMobile = pairing.lastMobile;
-
-                        if (mobileMulti)
-                        {
-                            spdlog::info("[Group:{}] {} [{}] is MOBILE — checking other pairings for dual recording",
-                                         groupName_, pairing.username, pairing.site);
-
-                            for (size_t j = 0; j < pairings_.size() && running_.load() && !quitting_.load(); j++)
-                            {
-                                if (j == i)
-                                    continue; // skip the mobile pairing itself
-                                auto &other = pairings_[j];
-                                if (isVrSlug(other.site))
-                                    continue; // VR always independent
-
-                                Status otherStatus;
-                                try
-                                {
-                                    otherStatus = other.plugin->checkStatus();
-                                }
-                                catch (...)
-                                {
-                                    continue;
-                                }
-                                other.lastStatus = otherStatus;
-                                other.lastMobile = other.plugin->isMobile();
-
-                                // Update GUI state for this pairing
-                                {
-                                    std::lock_guard lock(stateMutex_);
-                                    if (j < state_.pairings.size())
-                                    {
-                                        state_.pairings[j].lastStatus = otherStatus;
-                                        state_.pairings[j].mobile = other.lastMobile;
-                                    }
-                                }
-
-                                if (otherStatus == Status::Public)
-                                {
-                                    spdlog::info("[Group:{}] {} [{}] also PUBLIC — starting parallel download",
-                                                 groupName_, other.username, other.site);
-
-                                    auto token = std::make_unique<CancellationToken>();
-                                    auto *tokenPtr = token.get();
-                                    size_t idx = j;
-                                    parallelTokens.push_back(std::move(token));
-                                    parallelThreads.push_back(std::make_unique<std::jthread>(
-                                        [this, idx, &config, tokenPtr]()
-                                        {
-                                            downloadFromWithToken(pairings_[idx], config, *tokenPtr);
-                                        }));
-                                }
-                            }
-                        }
-
-                        spdlog::info("[Group:{}] {} [{}] is LIVE{} — downloading",
-                                     groupName_, pairing.username, pairing.site,
-                                     mobileMulti ? " (MOBILE, dual-recording)" : "");
+                        spdlog::info("[Group:{}] {} [{}] is LIVE — downloading",
+                                     groupName_, pairing.username, pairing.site);
 
                         {
                             std::lock_guard lock(stateMutex_);
@@ -358,49 +296,6 @@ namespace sm
                         }
                         if (stateCallback_)
                             stateCallback_(state_);
-
-                        // ── Mobile→PC transition ────────────────────────
-                        // After download ends, re-check mobile status. If the
-                        // stream started as mobile but is now PC (landscape),
-                        // cancel all parallel recorders — we only need the
-                        // primary. The primary stays as favorite (index 0).
-                        if (startedAsMobile && !parallelThreads.empty())
-                        {
-                            bool nowMobile = false;
-                            try
-                            {
-                                nowMobile = pairing.plugin->isMobile();
-                            }
-                            catch (...)
-                            {
-                            }
-
-                            if (!nowMobile)
-                            {
-                                spdlog::info("[Group:{}] {} [{}] switched from MOBILE to PC — "
-                                             "cancelling {} parallel recorder(s), keeping primary",
-                                             groupName_, pairing.username, pairing.site,
-                                             parallelThreads.size());
-                                for (auto &t : parallelTokens)
-                                    t->cancel();
-                                // Ensure primary stays at index 0 (already is)
-                            }
-                        }
-
-                        // If mobile multi-recording, wait for parallel downloads to finish.
-                        // If group is being stopped, cancel the parallel tokens first.
-                        if (!parallelThreads.empty())
-                        {
-                            if (!running_.load() || quitting_.load())
-                            {
-                                for (auto &t : parallelTokens)
-                                    t->cancel();
-                            }
-                            spdlog::info("[Group:{}] Waiting for {} parallel download(s) to finish",
-                                         groupName_, parallelThreads.size());
-                            parallelThreads.clear(); // join all
-                            parallelTokens.clear();
-                        }
 
                         // Brief pause after download, then continue cycling
                         sleepInterruptible(sleepAfterDownload_);
@@ -553,11 +448,13 @@ namespace sm
         // Resolution change callback — when stream resolution changes
         // (model switched mobile↔desktop), close current file and start
         // a new one in the appropriate folder.
+        // VR sites are NEVER mobile — ignore portrait detection for them.
         recorder.setResolutionChangeCallback([&](const ResolutionInfo &ri) -> std::string
                                              {
+            bool mobile = ri.isMobile && !isVrSlug(pairing.site);
             spdlog::info("[Group:{}] Resolution change: {}x{} (mobile={})",
-                         groupName_, ri.width, ri.height, ri.isMobile);
-            return generateNextPath(ri.isMobile); });
+                         groupName_, ri.width, ri.height, mobile);
+            return generateNextPath(mobile); });
 
         auto result = recorder.record(videoUrl, outputPath, token, config.userAgent);
 

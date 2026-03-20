@@ -294,6 +294,11 @@ namespace sm
         // Get base StripChat status
         Status status = StripChat::checkStatus();
 
+        // VR streams are NEVER mobile — the parent sets isMobile_ from
+        // the API, but that flag is meaningless for VR recordings.
+        isMobile_ = false;
+        setMobile(false);
+
         if (status == Status::Public)
         {
             bool vrCapable = isVrCapable();
