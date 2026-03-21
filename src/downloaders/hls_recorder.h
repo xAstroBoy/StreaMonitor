@@ -254,6 +254,10 @@ namespace sm
         void maybeDeliverPreviewFrame(AVFrame *frame);
 
         // ── FFmpeg context management ───────────────────────────────
+        struct FFmpegState;  // forward-declare for friend
+        // Friend declaration for the static helper that populates output durations
+        friend void populateOutputDurations(FFmpegState &state);
+
         struct FFmpegState
         {
             // Muxer / demuxer
@@ -310,6 +314,10 @@ namespace sm
             // from previous restart iterations, in OUTPUT timebase units.
             int64_t lastVideoOutPts = 0;
             int64_t lastAudioOutPts = 0;
+            int64_t lastVideoOutDts = -1;
+            int64_t lastAudioOutDts = -1;
+            int64_t lastVideoDuration = 0;
+            int64_t lastAudioDuration = 0;
             int64_t videoRestartOffset = 0;
             int64_t audioRestartOffset = 0;
         };

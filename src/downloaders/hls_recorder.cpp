@@ -54,6 +54,48 @@ namespace sm
         return std::string(buf);
     }
 
+    static void populateOutputDurations(HLSRecorder::FFmpegState &state)
+    {
+        if (!state.outputCtx)
+            return;
+
+        int64_t maxDurationUs = 0;
+        auto updateStreamDuration = [&](int outIdx, int64_t lastPts,
+                                        int64_t lastDts, int64_t lastDuration)
+        {
+            if (outIdx < 0 || outIdx >= static_cast<int>(state.outputCtx->nb_streams))
+                return;
+
+            AVStream *outStream = state.outputCtx->streams[outIdx];
+            if (!outStream)
+                return;
+
+            int64_t endTs = std::max(lastPts, lastDts);
+            if (endTs < 0)
+                return;
+
+            int64_t duration = lastDuration > 0 ? lastDuration : 1;
+            int64_t streamDuration = endTs + duration;
+            if (streamDuration <= 0)
+                return;
+
+            if (outStream->duration == AV_NOPTS_VALUE || outStream->duration < streamDuration)
+                outStream->duration = streamDuration;
+
+            int64_t durationUs = av_rescale_q(streamDuration, outStream->time_base,
+                                              AV_TIME_BASE_Q);
+            maxDurationUs = std::max(maxDurationUs, durationUs);
+        };
+
+        updateStreamDuration(state.outVideoIdx, state.lastVideoOutPts,
+                             state.lastVideoOutDts, state.lastVideoDuration);
+        updateStreamDuration(state.outAudioIdx, state.lastAudioOutPts,
+                             state.lastAudioOutDts, state.lastAudioDuration);
+
+        if (maxDurationUs > 0)
+            state.outputCtx->duration = maxDurationUs;
+    }
+
     // Configure proxy on an HttpClient from AppConfig (uses first proxy if pool)
     static void applyProxyConfig(HttpClient &http, const AppConfig &config)
     {
@@ -1703,6 +1745,7 @@ namespace sm
         {
             if (state.headerWritten)
             {
+                populateOutputDurations(state);
                 int ret = av_write_trailer(state.outputCtx);
                 if (ret < 0)
                     log_->warn("Error writing trailer: {}", ffError(ret));
@@ -1884,17 +1927,44 @@ namespace sm
         // Manually forcing PTS = DTS would destroy B-frame display order
         // and corrupt seeking in MKV/MP4.
 
-        // Set packet duration (helps muxer calculate total stream duration)
-        if (outStreamIdx == state.outVideoIdx && state.lastVideoOutPts > 0 && pkt->pts > state.lastVideoOutPts)
-            pkt->duration = pkt->pts - state.lastVideoOutPts;
-        else if (outStreamIdx == state.outAudioIdx && state.lastAudioOutPts > 0 && pkt->pts > state.lastAudioOutPts)
-            pkt->duration = pkt->pts - state.lastAudioOutPts;
+        // Preserve FFmpeg's rescaled packet duration when present.
+        // Recomputing duration from PTS deltas is unsafe for live streams
+        // with B-frames because display-order PTS can move backwards.
+        // That can leave packets with zero/garbled durations and cause the
+        // container to end up with no total runtime metadata.
+        if (pkt->duration <= 0)
+        {
+            if (outStreamIdx == state.outVideoIdx && state.lastVideoOutDts >= 0 &&
+                pkt->dts != AV_NOPTS_VALUE && pkt->dts > state.lastVideoOutDts)
+            {
+                pkt->duration = pkt->dts - state.lastVideoOutDts;
+            }
+            else if (outStreamIdx == state.outAudioIdx && state.lastAudioOutDts >= 0 &&
+                     pkt->dts != AV_NOPTS_VALUE && pkt->dts > state.lastAudioOutDts)
+            {
+                pkt->duration = pkt->dts - state.lastAudioOutDts;
+            }
+        }
 
         // Track last written PTS (output timebase) for restart continuity
         if (outStreamIdx == state.outVideoIdx)
-            state.lastVideoOutPts = std::max(state.lastVideoOutPts, pkt->pts);
+        {
+            if (pkt->pts != AV_NOPTS_VALUE)
+                state.lastVideoOutPts = std::max(state.lastVideoOutPts, pkt->pts);
+            if (pkt->dts != AV_NOPTS_VALUE)
+                state.lastVideoOutDts = std::max(state.lastVideoOutDts, pkt->dts);
+            if (pkt->duration > 0)
+                state.lastVideoDuration = pkt->duration;
+        }
         else if (outStreamIdx == state.outAudioIdx)
-            state.lastAudioOutPts = std::max(state.lastAudioOutPts, pkt->pts);
+        {
+            if (pkt->pts != AV_NOPTS_VALUE)
+                state.lastAudioOutPts = std::max(state.lastAudioOutPts, pkt->pts);
+            if (pkt->dts != AV_NOPTS_VALUE)
+                state.lastAudioOutDts = std::max(state.lastAudioOutDts, pkt->dts);
+            if (pkt->duration > 0)
+                state.lastAudioDuration = pkt->duration;
+        }
 
         // ── Write packet ────────────────────────────────────────────
         // IMPORTANT: Save size BEFORE write — av_interleaved_write_frame
@@ -2817,6 +2887,7 @@ namespace sm
                                             uint32_t flushPkts = 0;
                                             flushEncoder(state, flushBytes, flushPkts);
                                         }
+                                        populateOutputDurations(state);
                                         av_write_trailer(state.outputCtx);
                                     }
                                     if (state.outputCtx)
@@ -2893,6 +2964,7 @@ namespace sm
                                 {
                                     if (state.headerWritten)
                                     {
+                                        populateOutputDurations(state);
                                         int wr = av_write_trailer(state.outputCtx);
                                         if (wr < 0)
                                             log_->warn("Error writing trailer on res change: {}", ffError(wr));
@@ -2928,6 +3000,10 @@ namespace sm
                                 // Reset PTS offsets for new file
                                 state.lastVideoOutPts = 0;
                                 state.lastAudioOutPts = 0;
+                                state.lastVideoOutDts = -1;
+                                state.lastAudioOutDts = -1;
+                                state.lastVideoDuration = 0;
+                                state.lastAudioDuration = 0;
                                 state.videoRestartOffset = 0;
                                 state.audioRestartOffset = 0;
                                 state.videoTsOffset = 0;
