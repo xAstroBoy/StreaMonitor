@@ -246,7 +246,18 @@ namespace sm
                 statusLower == "p2p" || statusLower == "virtualprivate" ||
                 statusLower == "p2pvoice" || statusLower == "p2pvideo" ||
                 statusLower == "recordingprivate")
+            {
+                // Issue #8: Spy private recording support
+                // If spy mode is enabled and we have cookies, treat as recordable
+                if (config_ && config_->spyPrivateEnabled && !config_->stripchatCookies.empty())
+                {
+                    logger_->info("Model in {} — spy recording enabled, attempting to record", status);
+                    isSpyRecording_ = true;
+                    return Status::Public; // Treat as recordable
+                }
+                isSpyRecording_ = false;
                 return Status::Private;
+            }
 
             if (statusLower == "off" || statusLower == "idle")
                 return Status::Offline;
@@ -273,6 +284,18 @@ namespace sm
         {
             logger_->warn("Missing stream name");
             return "";
+        }
+
+        // Issue #8: If we're in spy mode, try to get the spy stream URL first
+        if (isSpyRecording_)
+        {
+            auto spyUrl = getSpyStreamUrl();
+            if (!spyUrl.empty())
+            {
+                logger_->info("Using spy stream URL");
+                return spyUrl;
+            }
+            logger_->warn("Failed to get spy stream URL, falling back to normal URL");
         }
 
         // Use the mouflon key system to get authenticated playlist URLs
@@ -424,6 +447,88 @@ namespace sm
             }
 
             return variantUrl;
+        }
+
+        return "";
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Spy private stream URL (Issue #8)
+    // Attempts to access the private/spy stream using Stripchat session cookies.
+    // Requires valid authentication cookies in config.
+    // ─────────────────────────────────────────────────────────────────
+    std::string StripChat::getSpyStreamUrl()
+    {
+        if (!config_ || config_->stripchatCookies.empty() || modelId_ == 0)
+            return "";
+
+        // Try to initiate/join a spy session via the Stripchat API
+        std::string spyUrl = "https://stripchat.com/api/front/v2/models/" +
+                             std::to_string(modelId_) + "/spyOn";
+
+        HttpRequest req;
+        req.url = spyUrl;
+        req.method = "POST";
+        req.body = "{}";
+        req.contentType = "application/json";
+        req.timeoutSec = 15;
+        req.userAgent = config_->userAgent;
+        req.cookieString = config_->stripchatCookies;
+        req.headers["Referer"] = "https://stripchat.com/" + username();
+        req.headers["Origin"] = "https://stripchat.com";
+
+        HttpClient authHttp;
+        auto resp = authHttp.execute(req);
+
+        if (resp.ok())
+        {
+            try
+            {
+                auto json = nlohmann::json::parse(resp.body);
+
+                // The spy response may contain stream info or a redirect URL
+                // Check for various possible response formats
+                if (json.contains("streamName"))
+                {
+                    std::string spyStreamName = json["streamName"].get<std::string>();
+                    logger_->info("Spy session started, stream: {}", spyStreamName);
+                    hlsStreamName_ = spyStreamName;
+                    return getPlaylistWithKeys();
+                }
+                if (json.contains("url"))
+                {
+                    std::string directUrl = json["url"].get<std::string>();
+                    logger_->info("Got direct spy stream URL");
+                    return directUrl;
+                }
+                if (json.contains("hlsUrl"))
+                {
+                    return json["hlsUrl"].get<std::string>();
+                }
+
+                // If the API returned success but no stream URL,
+                // the spy session may be active and the normal CDN URL
+                // now serves the private stream with cookies
+                logger_->info("Spy session confirmed, trying CDN with auth cookies");
+                return getPlaylistWithKeys();
+            }
+            catch (const std::exception &e)
+            {
+                logger_->error("Spy response parse error: {}", e.what());
+            }
+        }
+        else
+        {
+            logger_->warn("Spy API returned {}: {}",
+                          resp.statusCode,
+                          resp.body.substr(0, 200));
+
+            // If 402 (Payment Required) — not enough tokens
+            if (resp.statusCode == 402)
+                logger_->error("Spy requires tokens — insufficient balance");
+            // If 403 — spy not allowed for this show type
+            else if (resp.statusCode == 403)
+                logger_->error("Spy not available for this show type");
         }
 
         return "";

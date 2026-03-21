@@ -40,11 +40,15 @@ namespace sm
         // Returns the best variant URL with pkey/pdkey auth params, or empty
         std::string getPlaylistWithKeys();
 
+        // Spy private: attempt to get spy stream URL (Issue #8)
+        std::string getSpyStreamUrl();
+
         nlohmann::json lastInfo_;
         int64_t modelId_ = 0;
         std::string hlsStreamName_;
         bool apiMobileHint_ = false; // API-reported mobile (broadcaster device), NOT trusted for folders
         bool isVr_ = false;          // for VR subclass
+        bool isSpyRecording_ = false; // True when recording a spy/private stream
         std::string vrSuffix_;       // VR stream suffix
 
         // Lazy mouflon init — called on first use, not in constructor
