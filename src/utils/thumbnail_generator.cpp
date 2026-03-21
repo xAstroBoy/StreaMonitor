@@ -770,17 +770,21 @@ namespace sm
     namespace
     {
 #ifdef _WIN32
-        // Run a command silently (no console window flash) on Windows
-        static int silentRun(const std::string &cmd)
+        // Run exe silently (no console window flash) on Windows.
+        // exePath: full path to the executable (used as lpApplicationName)
+        // cmdLine: full command line including exe + args (used as lpCommandLine)
+        static int silentRunExe(const std::string &exePath, const std::string &cmdLine)
         {
             STARTUPINFOA si{};
             si.cb = sizeof(si);
             si.dwFlags = STARTF_USESHOWWINDOW;
             si.wShowWindow = SW_HIDE;
             PROCESS_INFORMATION pi{};
-            // CreateProcessA needs mutable buffer
-            std::string buf = cmd;
-            BOOL ok = CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE,
+            // CreateProcessA needs mutable buffer for lpCommandLine
+            std::string buf = cmdLine;
+            // Pass exePath as lpApplicationName so Windows doesn't need to parse
+            // quoted paths with spaces from the command line
+            BOOL ok = CreateProcessA(exePath.c_str(), buf.data(), nullptr, nullptr, FALSE,
                                      CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
             if (!ok)
                 return -1;
@@ -829,13 +833,16 @@ namespace sm
             mkv_exe = "mkvpropedit"; // bare command, rely on PATH
 
 #ifdef _WIN32
-        // Auto-detect: if bare command name, check common install locations
+        // Auto-detect: if bare command name, resolve full path
         if (mkv_exe == "mkvpropedit")
         {
             // First check if it's in PATH
-            char buf[MAX_PATH];
-            bool inPath = SearchPathA(nullptr, "mkvpropedit.exe", nullptr, MAX_PATH, buf, nullptr) > 0;
-            if (!inPath)
+            char pathBuf[MAX_PATH];
+            if (SearchPathA(nullptr, "mkvpropedit.exe", nullptr, MAX_PATH, pathBuf, nullptr) > 0)
+            {
+                mkv_exe = pathBuf;
+            }
+            else
             {
                 // Check common install locations
                 const char *candidates[] = {
@@ -847,29 +854,43 @@ namespace sm
                     if (GetFileAttributesA(c) != INVALID_FILE_ATTRIBUTES)
                     {
                         mkv_exe = c;
-                        log("thumbnail: found mkvpropedit at " + std::string(c));
                         break;
                     }
                 }
             }
         }
+
+        // Final check: does the resolved exe exist?
+        if (mkv_exe != "mkvpropedit" && GetFileAttributesA(mkv_exe.c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            log("thumbnail: mkvpropedit not found at " + mkv_exe);
+            return false;
+        }
+        if (mkv_exe == "mkvpropedit")
+        {
+            log("thumbnail: mkvpropedit not found (not in PATH or Program Files)");
+            return false;
+        }
+
+        log("thumbnail: using mkvpropedit: " + mkv_exe);
 #endif
 
-        // Build mkvpropedit command for in-place attachment
-        std::string cmd = "\"" + mkv_exe + "\""
-                                           " \"" +
-                          videoPath + "\""
-                                      " --attachment-name cover.jpg"
-                                      " --attachment-mime-type image/jpeg"
-                                      " --add-attachment \"" +
-                          jpegPath + "\"";
+        // Build command line for mkvpropedit
+        std::string cmdLine = "\"" + mkv_exe + "\""
+                                               " \"" +
+                              videoPath + "\""
+                                          " --attachment-name cover.jpg"
+                                          " --attachment-mime-type image/jpeg"
+                                          " --add-attachment \"" +
+                              jpegPath + "\"";
 
         int ret;
 #ifdef _WIN32
-        ret = silentRun(cmd);
+        // Pass exe path explicitly as lpApplicationName for correct resolution
+        ret = silentRunExe(mkv_exe, cmdLine);
 #else
-        cmd += " >/dev/null 2>&1";
-        ret = std::system(cmd.c_str());
+        cmdLine += " >/dev/null 2>&1";
+        ret = std::system(cmdLine.c_str());
 #endif
 
         if (ret == 0)
@@ -882,7 +903,7 @@ namespace sm
             return true;
         }
 
-        log("thumbnail: mkvpropedit not found or failed (code " +
+        log("thumbnail: mkvpropedit failed (exit code " +
             std::to_string(ret) + "), keeping external .jpg");
         return false;
     }
