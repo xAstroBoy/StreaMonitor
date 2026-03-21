@@ -107,7 +107,7 @@ namespace sm
         std::string registryName = logName + "_" +
                                    std::to_string(reinterpret_cast<uintptr_t>(this));
         logger_ = std::make_shared<spdlog::logger>(registryName, sinks.begin(), sinks.end());
-        logger_->set_level(spdlog::level::info);
+        logger_->set_level(spdlog::get_level()); // inherit global log level
         logger_->set_pattern("[%H:%M:%S] [" + logName + "] %v");
         spdlog::register_logger(logger_);
 
@@ -657,8 +657,8 @@ namespace sm
 
     // Helper: expand format tokens (except {n}) with current time and model info
     static std::string expandFormatTokens(const std::string &fmt,
-                                           const std::string &username,
-                                           const std::string &siteSlug)
+                                          const std::string &username,
+                                          const std::string &siteSlug)
     {
         auto now = std::chrono::system_clock::now();
         auto time_t_now = std::chrono::system_clock::to_time_t(now);
@@ -1085,18 +1085,30 @@ namespace sm
 
                 if (status == Status::NotExist)
                 {
-                    // Python: auto-removes, sets running=False, breaks
-                    logger_->error("User {} does not exist - auto-removing", username_);
-                    autoRemoveModel("non-existent");
+                    if (config.autoRemoveNonExistent)
+                    {
+                        logger_->error("User {} does not exist - auto-removing", username_);
+                        autoRemoveModel("non-existent");
+                    }
+                    else
+                    {
+                        logger_->warn("User {} appears non-existent — stopping bot (will retry on manual start)", username_);
+                    }
                     running_.store(false);
                     break;
                 }
 
                 if (status == Status::Deleted)
                 {
-                    // Python: auto-removes, sets running=False, breaks
-                    logger_->error("Model account {} has been DELETED - auto-removing", username_);
-                    autoRemoveModel("deleted");
+                    if (config.autoRemoveNonExistent)
+                    {
+                        logger_->error("Model account {} has been DELETED - auto-removing", username_);
+                        autoRemoveModel("deleted");
+                    }
+                    else
+                    {
+                        logger_->warn("Model {} appears deleted — stopping bot (will retry on manual start)", username_);
+                    }
                     running_.store(false);
                     break;
                 }

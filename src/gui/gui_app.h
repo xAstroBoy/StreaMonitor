@@ -57,7 +57,9 @@ namespace sm
 
         // Minimize-to-tray accessors (used by Win32 WndProc subclass)
         bool shouldMinimizeToTray() const { return config_.minimizeToTray; }
+#ifdef _WIN32
         void setMinimizedToTray(bool v) { minimizedToTray_ = v; }
+#endif
 
     private:
         // ── Initialization ──────────────────────────────────────────
@@ -239,7 +241,9 @@ namespace sm
         int editContainerFmt_ = 0; // 0=MKV, 1=MP4, 2=TS
         int editPort_ = 5000;
         char editFfmpegPath_[512] = {};
-        char editFilenameFormat_[256] = "{n}";
+        char editFilenameFormat_[256] = "{model}_{site}_{datetime}";
+        bool editAutoRemoveNonExistent_ = false;
+        int editLogLevel_ = 1; // 0=debug, 1=info, 2=warn, 3=error
         bool editDirtyFlag_ = false;
 
         // Stripchat spy private edit state

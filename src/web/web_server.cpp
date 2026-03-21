@@ -800,6 +800,8 @@ namespace sm
                               config_.container == ContainerFormat::MP4 ? "mp4" : "ts"},
                 {"wantedResolution", config_.wantedResolution},
                 {"filenameFormat", config_.filenameFormat},
+                {"autoRemoveNonExistent", config_.autoRemoveNonExistent},
+                {"logLevel", config_.logLevel},
                 {"webEnabled", config_.webEnabled},
                 {"webHost", config_.webHost},
                 {"webPort", config_.webPort},
@@ -834,6 +836,18 @@ namespace sm
                     config_.enablePreviewCapture = body["enablePreviewCapture"].get<bool>();
                 if (body.contains("filenameFormat"))
                     config_.filenameFormat = body["filenameFormat"].get<std::string>();
+                if (body.contains("autoRemoveNonExistent"))
+                    config_.autoRemoveNonExistent = body["autoRemoveNonExistent"].get<bool>();
+                if (body.contains("logLevel"))
+                {
+                    config_.logLevel = body["logLevel"].get<std::string>();
+                    spdlog::level::level_enum lvl = spdlog::level::info;
+                    if (config_.logLevel == "debug") lvl = spdlog::level::debug;
+                    else if (config_.logLevel == "warn") lvl = spdlog::level::warn;
+                    else if (config_.logLevel == "error") lvl = spdlog::level::err;
+                    spdlog::set_level(lvl);
+                    spdlog::apply_all([lvl](std::shared_ptr<spdlog::logger> l) { l->set_level(lvl); });
+                }
                 if (body.contains("spyPrivateEnabled"))
                     config_.spyPrivateEnabled = body["spyPrivateEnabled"].get<bool>();
                 if (body.contains("stripchatCookies"))

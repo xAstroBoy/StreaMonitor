@@ -615,6 +615,19 @@ namespace sm
         if (!config.ffmpegPath.empty())
             std::strncpy(editFfmpegPath_, config.ffmpegPath.string().c_str(), sizeof(editFfmpegPath_) - 1);
         std::strncpy(editFilenameFormat_, config.filenameFormat.c_str(), sizeof(editFilenameFormat_) - 1);
+        editAutoRemoveNonExistent_ = config.autoRemoveNonExistent;
+
+        // Log level init
+        if (config.logLevel == "debug")
+            editLogLevel_ = 0;
+        else if (config.logLevel == "info")
+            editLogLevel_ = 1;
+        else if (config.logLevel == "warn")
+            editLogLevel_ = 2;
+        else if (config.logLevel == "error")
+            editLogLevel_ = 3;
+        else
+            editLogLevel_ = 1;
 
         // Stripchat spy private
         editSpyPrivateEnabled_ = config.spyPrivateEnabled;
@@ -3337,6 +3350,24 @@ namespace sm
             config_.webPort = editPort_;
             config_.ffmpegPath = editFfmpegPath_;
             config_.filenameFormat = editFilenameFormat_;
+            config_.autoRemoveNonExistent = editAutoRemoveNonExistent_;
+
+            // Log level
+            {
+                const char *levelStrs[] = {"debug", "info", "warn", "error"};
+                config_.logLevel = (editLogLevel_ >= 0 && editLogLevel_ < 4) ? levelStrs[editLogLevel_] : "info";
+                spdlog::level::level_enum lvl = spdlog::level::info;
+                if (config_.logLevel == "debug")
+                    lvl = spdlog::level::debug;
+                else if (config_.logLevel == "warn")
+                    lvl = spdlog::level::warn;
+                else if (config_.logLevel == "error")
+                    lvl = spdlog::level::err;
+                spdlog::set_level(lvl);
+                // Also update all registered loggers
+                spdlog::apply_all([lvl](std::shared_ptr<spdlog::logger> l)
+                                  { l->set_level(lvl); });
+            }
 
             // Stripchat spy private
             config_.spyPrivateEnabled = editSpyPrivateEnabled_;
@@ -3549,7 +3580,19 @@ namespace sm
             editDirtyFlag_ = true;
         ImGui::TextColored(COL_TEXT_DIM, "Tokens: {n} = sequential number, {model} = username");
         ImGui::TextColored(COL_TEXT_DIM, "{site} = site slug, {date} = YYYYMMDD, {time} = HHMMSS");
-        ImGui::TextColored(COL_TEXT_DIM, "{datetime} = YYYYMMDD_HHMMSS   (default: {n})");
+        ImGui::TextColored(COL_TEXT_DIM, "{datetime} = YYYYMMDD_HHMMSS");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Model Behavior");
+        ImGui::Spacing();
+        if (ImGui::Checkbox("Auto-remove non-existent/deleted models", &editAutoRemoveNonExistent_))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "When OFF (default): models that go offline or appear deleted are");
+        ImGui::TextColored(COL_TEXT_DIM, "simply stopped — you can restart them later when they come back.");
+        ImGui::TextColored(COL_TEXT_DIM, "When ON: non-existent/deleted models are permanently removed.");
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -3989,9 +4032,11 @@ namespace sm
         ImGui::Spacing();
 
         ImGui::Text("Logging");
-        static int logLevel = 1; // 0=debug, 1=info, 2=warn, 3=error
         const char *levels[] = {"Debug", "Info", "Warning", "Error"};
-        ImGui::Combo("Log Level", &logLevel, levels, IM_ARRAYSIZE(levels));
+        if (ImGui::Combo("Log Level", &editLogLevel_, levels, IM_ARRAYSIZE(levels)))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "Controls console and per-bot log verbosity.");
+        ImGui::TextColored(COL_TEXT_DIM, "Use Warning or Error to reduce console noise.");
 
         static int maxLogEntries = 10000;
         ImGui::SliderInt("Max Log Entries", &maxLogEntries, 1000, 100000);
@@ -4029,18 +4074,15 @@ namespace sm
     void GuiApp::renderSettingsSites()
     {
         ImGui::Spacing();
-        ImGui::TextColored(COL_ACCENT, "Per-Site Configuration");
+        ImGui::TextColored(COL_ACCENT, "Registered Sites");
         ImGui::TextColored(COL_TEXT_DIM,
-                           "Enable/disable specific sites and configure site-specific settings");
+                           "All supported recording sites");
         ImGui::Spacing();
 
         auto sites = manager_.availableSites();
         for (size_t i = 0; i < sites.size(); i++)
         {
-            ImGui::PushID((int)i);
-            bool enabled = true; // TODO: persist per-site enable
-            ImGui::Checkbox(sites[i].c_str(), &enabled);
-            ImGui::PopID();
+            ImGui::BulletText("%s", sites[i].c_str());
         }
 
         ImGui::Spacing();

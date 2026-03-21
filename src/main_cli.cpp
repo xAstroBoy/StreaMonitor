@@ -257,6 +257,20 @@ int cliMain(int argc, char **argv)
         spdlog::info("Loaded app settings from {}", appConfigPath.string());
     }
 
+    // Apply configured log level globally
+    {
+        spdlog::level::level_enum lvl = spdlog::level::info;
+        if (config.logLevel == "debug")
+            lvl = spdlog::level::debug;
+        else if (config.logLevel == "warn")
+            lvl = spdlog::level::warn;
+        else if (config.logLevel == "error")
+            lvl = spdlog::level::err;
+        spdlog::set_level(lvl);
+        spdlog::apply_all([lvl](std::shared_ptr<spdlog::logger> l)
+                          { l->set_level(lvl); });
+    }
+
     sm::ModelConfigStore configStore;
     std::filesystem::path configPath = "config.json";
     // Always call load() so lastPath_ is set for subsequent save() calls,

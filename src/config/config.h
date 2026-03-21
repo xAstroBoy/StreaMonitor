@@ -30,15 +30,14 @@ namespace sm
         int segmentTimeSec = 0; // 0 = no segmenting
 
         // Output filename format — supported tokens:
-        //   {n}     = sequential number (1, 2, 3...) — legacy default
+        //   {n}     = sequential number (1, 2, 3...)
         //   {model} = model username
         //   {site}  = site slug (SC, CB, BC, etc.)
         //   {date}  = date as YYYY-MM-DD
         //   {time}  = time as HH-MM-SS
         //   {datetime} = YYYYMMDD-HHMMSS (Python SM style)
-        // Default "{n}" preserves backward compatibility.
         // Example: "{model}-{datetime}" → "username-20250710-143022.mkv"
-        std::string filenameFormat = "{n}";
+        std::string filenameFormat = "{model}_{site}_{datetime}";
 
         // Network
         std::string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0";
@@ -69,6 +68,16 @@ namespace sm
 
         // Debug
         bool debug = false;
+
+        // Logging level: "debug", "info", "warn", "error" (default: info)
+        std::string logLevel = "info";
+
+        // Model auto-removal behavior
+        // When false (default), offline/non-existent/deleted models are
+        // NOT auto-removed — they simply stop and can be restarted later.
+        // When true, non-existent or deleted models are automatically removed
+        // from the config (legacy Python SM behavior).
+        bool autoRemoveNonExistent = false;
 
         // Stripchat spy/private recording (Issue #8)
         // When enabled and model goes Private, attempt to record using

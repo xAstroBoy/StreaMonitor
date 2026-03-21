@@ -106,6 +106,20 @@ int guiMain(int argc, char **argv)
         spdlog::info("Loaded app settings from {}", appConfigPath.string());
     }
 
+    // Apply configured log level globally
+    {
+        spdlog::level::level_enum lvl = spdlog::level::info;
+        if (config.logLevel == "debug")
+            lvl = spdlog::level::debug;
+        else if (config.logLevel == "warn")
+            lvl = spdlog::level::warn;
+        else if (config.logLevel == "error")
+            lvl = spdlog::level::err;
+        spdlog::set_level(lvl);
+        spdlog::apply_all([lvl](std::shared_ptr<spdlog::logger> l)
+                          { l->set_level(lvl); });
+    }
+
     // Preview is on-demand only (CDN URL loaded when user opens bot detail panel)
 
     sm::ModelConfigStore configStore;

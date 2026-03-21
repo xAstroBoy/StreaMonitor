@@ -254,7 +254,7 @@ namespace sm
         void maybeDeliverPreviewFrame(AVFrame *frame);
 
         // ── FFmpeg context management ───────────────────────────────
-        struct FFmpegState;  // forward-declare for friend
+        struct FFmpegState; // forward-declare for friend
         // Friend declaration for the static helper that populates output durations
         friend void populateOutputDurations(FFmpegState &state);
 

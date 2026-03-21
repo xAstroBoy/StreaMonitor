@@ -377,6 +377,10 @@ namespace sm
                 autoStartOnLogin = j["auto_start_on_login"];
             if (j.contains("debug"))
                 debug = j["debug"];
+            if (j.contains("log_level"))
+                logLevel = j["log_level"].get<std::string>();
+            if (j.contains("auto_remove_non_existent"))
+                autoRemoveNonExistent = j["auto_remove_non_existent"];
             if (j.contains("spy_private_enabled"))
                 spyPrivateEnabled = j["spy_private_enabled"];
             if (j.contains("stripchat_cookies"))
@@ -506,6 +510,8 @@ namespace sm
         j["minimize_to_tray"] = minimizeToTray;
         j["auto_start_on_login"] = autoStartOnLogin;
         j["debug"] = debug;
+        j["log_level"] = logLevel;
+        j["auto_remove_non_existent"] = autoRemoveNonExistent;
         j["spy_private_enabled"] = spyPrivateEnabled;
         if (!stripchatCookies.empty())
             j["stripchat_cookies"] = stripchatCookies;

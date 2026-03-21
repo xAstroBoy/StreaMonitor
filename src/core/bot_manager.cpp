@@ -940,7 +940,7 @@ namespace sm
         }
 
         spdlog::info("Python config import: {} imported, {} skipped, {} failed",
-                      result.imported, result.skipped, result.failed);
+                     result.imported, result.skipped, result.failed);
         return result;
     }
 
