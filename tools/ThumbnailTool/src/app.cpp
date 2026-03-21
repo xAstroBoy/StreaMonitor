@@ -627,16 +627,29 @@ namespace tt
                 break; // Early exit check
 
             bool isRegen = false;
+            bool fileHasTag = false;
             {
                 std::lock_guard lock(videosMutex_);
                 isRegen = videos_[idx].regenQueued;
+                fileHasTag = videos_[idx].hasTag;
+            }
+
+            // If file is NOT tagged, treat it as needing full reprocessing:
+            // regenerate thumbnail + re-embed + tag. Having an existing cover
+            // without the THUMBNAILED tag means it was never fully processed.
+            if (!fileHasTag && !isRegen)
+            {
+                isRegen = true;
+                if (alreadyHasJpg)
+                    addLog("[INFO] Not tagged — reprocessing: " + videoStr);
             }
 
             if (isRegen)
             {
                 // Force regeneration — pretend there's no thumbnail
                 alreadyHasJpg = false;
-                addLog("[INFO] Regenerating thumbnail (user request): " + videoStr);
+                if (videos_[idx].regenQueued)
+                    addLog("[INFO] Regenerating thumbnail (user request): " + videoStr);
             }
             else if (!alreadyHasJpg)
             {
@@ -1500,12 +1513,8 @@ namespace tt
                     return 0;
                 if (processed || hasTag)
                     return 1;
-                // Pre-existing: RealMKV with cover/thumb but not explicitly processed
-                if (container == ContainerType::RealMKV && (hasCoverEmbed || hasThumb))
-                    return 2;
-                if (!hasThumb)
-                    return 3;
-                return 4; // skipped
+                // No tag = pending, regardless of existing cover/thumb
+                return 2;
             }
         };
         static thread_local std::vector<RowSnap> rows;
@@ -1518,9 +1527,9 @@ namespace tt
                 auto &v = videos_[vi];
                 // Tab-based filtering
                 bool isFailed = v.failed;
-                // Done = processed this session OR has THUMBNAILED tag OR (Real MKV with thumbnail/cover)
-                bool isDone = !v.failed && (v.processed || v.hasTag ||
-                                            (v.container == ContainerType::RealMKV && (v.hasThumb || v.hasCoverEmbed)));
+                // Done = processed this session OR has THUMBNAILED metadata tag
+                // Files with existing cover but NO tag are Pending (need full reprocessing)
+                bool isDone = !v.failed && (v.processed || v.hasTag);
                 bool isPending = !isFailed && !isDone;
 
                 switch (currentTab_)
@@ -1725,13 +1734,6 @@ namespace tt
                             DrawBadge("Remuxed", IM_COL32(100, 60, 200, 255));
                         if (r.tsFixed)
                             DrawBadge("TS Fixed", IM_COL32(60, 130, 200, 255));
-                    }
-                    else if (r.container == ContainerType::RealMKV && (r.hasCoverEmbed || r.hasThumb))
-                    {
-                        // Pre-existing cover/thumb but not tagged yet (from a previous run)
-                        DrawBadge("Existing", IM_COL32(80, 140, 80, 255));
-                        if (r.hasCoverEmbed)
-                            DrawBadge("Embedded", IM_COL32(60, 120, 180, 255));
                     }
                     else
                     {
