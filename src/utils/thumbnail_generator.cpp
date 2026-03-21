@@ -873,10 +873,12 @@ namespace sm
         // Remux a non-Matroska .mkv (e.g. MP4-in-.mkv) to a real Matroska container
         // using FFmpeg API. Stream-copy only — zero re-encoding, no quality loss.
         // Fixes timestamp jumps / discontinuities by normalising DTS/PTS per stream.
+        // progressCb receives cumulative bytes written for I/O speed tracking.
         // On success the original file is replaced in-place.
         static bool remuxToRealMKV(const std::string &path,
                                    std::function<void(const std::string &)> log,
-                                   std::function<bool()> cancelCb = nullptr)
+                                   std::function<bool()> cancelCb = nullptr,
+                                   std::function<void(int64_t)> progressCb = nullptr)
         {
             namespace fs = std::filesystem;
 
@@ -981,13 +983,15 @@ namespace sm
             AVPacket *pkt = av_packet_alloc();
             bool ok = true;
             int pktCount = 0;
+            int64_t totalBytesWritten = 0;
 
             while (av_read_frame(inCtx, pkt) >= 0)
             {
                 // Check cancel every 100 packets for responsive abort
                 if (++pktCount % 100 == 0 && cancelCb && cancelCb())
                 {
-                    if (log) log("remux: cancelled by user");
+                    if (log)
+                        log("remux: cancelled by user");
                     ok = false;
                     av_packet_unref(pkt);
                     break;
@@ -1043,6 +1047,7 @@ namespace sm
                 pkt->stream_index = streamMap[srcIdx];
                 av_packet_rescale_ts(pkt, inStream->time_base, outStream->time_base);
 
+                int pktSize = pkt->size; // save before write (unrefs pkt)
                 if (av_interleaved_write_frame(outCtx, pkt) < 0)
                 {
                     if (log)
@@ -1052,6 +1057,11 @@ namespace sm
                     break;
                 }
                 // av_interleaved_write_frame already unrefs on success
+
+                // Report progress every 100 packets for I/O speed tracking
+                totalBytesWritten += pktSize;
+                if (progressCb && pktCount % 100 == 0)
+                    progressCb(totalBytesWritten);
             }
 
             av_packet_free(&pkt);
@@ -1286,11 +1296,12 @@ namespace sm
 
     bool fixTimestamps(const std::string &videoPath,
                        std::function<void(const std::string &)> logCb,
-                       std::function<bool()> cancelCb)
+                       std::function<bool()> cancelCb,
+                       std::function<void(int64_t)> progressCb)
     {
         if (logCb)
             logCb("timestamps: remuxing to fix DTS discontinuities...");
-        return remuxToRealMKV(videoPath, logCb, cancelCb);
+        return remuxToRealMKV(videoPath, logCb, cancelCb, progressCb);
     }
 
     bool isVRFromPath(const std::string &videoPath)
@@ -1345,7 +1356,8 @@ namespace sm
     static std::string remuxToMKVIfNeeded(
         const std::string &videoPath,
         std::function<void(const std::string &)> logCb,
-        std::function<bool()> cancelCb = nullptr)
+        std::function<bool()> cancelCb = nullptr,
+        std::function<void(int64_t)> progressCb = nullptr)
     {
         namespace fs = std::filesystem;
         auto ext = fs::path(videoPath).extension().string();
@@ -1360,7 +1372,7 @@ namespace sm
             // Fake mkv — remux in-place
             if (logCb)
                 logCb("thumbnail: not a real Matroska container, remuxing in-place...");
-            if (remuxToRealMKV(videoPath, logCb, cancelCb))
+            if (remuxToRealMKV(videoPath, logCb, cancelCb, progressCb))
                 return videoPath;
             return ""; // failed
         }
@@ -1458,12 +1470,14 @@ namespace sm
             AVPacket *pkt = av_packet_alloc();
             bool ok = true;
             int pktCount = 0;
+            int64_t totalBytesWritten = 0;
             while (av_read_frame(inCtx, pkt) >= 0)
             {
                 // Check cancel every 100 packets for responsive abort
                 if (++pktCount % 100 == 0 && cancelCb && cancelCb())
                 {
-                    if (logCb) logCb("remux: cancelled by user");
+                    if (logCb)
+                        logCb("remux: cancelled by user");
                     ok = false;
                     av_packet_unref(pkt);
                     break;
@@ -1503,12 +1517,17 @@ namespace sm
                     pkt->pts += t.offset;
                 pkt->stream_index = smap[si];
                 av_packet_rescale_ts(pkt, is->time_base, os->time_base);
+                int pktSize = pkt->size;
                 if (av_interleaved_write_frame(outCtx, pkt) < 0)
                 {
                     ok = false;
                     av_packet_unref(pkt);
                     break;
                 }
+                // Progress tracking for I/O speed
+                totalBytesWritten += pktSize;
+                if (progressCb && pktCount % 100 == 0)
+                    progressCb(totalBytesWritten);
             }
             av_packet_free(&pkt);
             if (ok)
@@ -1840,9 +1859,10 @@ namespace sm
     std::string ensureRealMKV(
         const std::string &videoPath,
         std::function<void(const std::string &)> logCb,
-        std::function<bool()> cancelCb)
+        std::function<bool()> cancelCb,
+        std::function<void(int64_t)> progressCb)
     {
-        return remuxToMKVIfNeeded(videoPath, logCb, cancelCb);
+        return remuxToMKVIfNeeded(videoPath, logCb, cancelCb, progressCb);
     }
 
     // ── Processed tag via MKV metadata ───────────────────────────────
@@ -1904,7 +1924,8 @@ namespace sm
         }
 
         std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
-                              " --tags global:\"" + tagFile + "\"";
+                                                                   " --tags global:\"" +
+                              tagFile + "\"";
 
         int ret;
 #ifdef _WIN32

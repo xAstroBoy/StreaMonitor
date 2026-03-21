@@ -51,9 +51,11 @@ namespace sm
 
     // Fix timestamps by remuxing in-place (stream copy, normalises DTS/PTS).
     // Works on real Matroska files — remuxes to clean Matroska with monotonic timestamps.
+    // progressCb receives bytes written so far for I/O speed tracking.
     bool fixTimestamps(const std::string &videoPath,
                        std::function<void(const std::string &)> logCb = nullptr,
-                       std::function<bool()> cancelCb = nullptr);
+                       std::function<bool()> cancelCb = nullptr,
+                       std::function<void(int64_t)> progressCb = nullptr);
 
     // Check if a video path indicates VR content (folder contains [SCVR], [DCVR], etc.)
     bool isVRFromPath(const std::string &videoPath);
@@ -94,11 +96,13 @@ namespace sm
     // - Non-.mkv → creates .mkv alongside original, returns new path
     // All remuxing is stream-copy (zero re-encoding).
     // Fixes timestamp discontinuities during remux.
+    // progressCb receives bytes written so far for I/O speed tracking.
     // Returns empty string on failure.
     std::string ensureRealMKV(
         const std::string &videoPath,
         std::function<void(const std::string &)> logCb = nullptr,
-        std::function<bool()> cancelCb = nullptr);
+        std::function<bool()> cancelCb = nullptr,
+        std::function<void(int64_t)> progressCb = nullptr);
 
     // Check if a video file has been marked as processed by ThumbnailTool.
     // Reads MKV global tags looking for THUMBNAILED=done.

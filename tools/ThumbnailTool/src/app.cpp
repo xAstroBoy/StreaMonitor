@@ -521,6 +521,10 @@ namespace tt
             auto logCb = [this](const std::string &msg)
             { addLog("  " + msg); };
 
+            // Progress callback for I/O tracking during remux
+            auto progressCb = [this, threadIdx](int64_t bytesWritten)
+            { threadProgress_[threadIdx].bytesProcessed.store(bytesWritten); };
+
             addLog("[INFO] Processing: " + videoStr +
                    " (" + formatSize(fsize) + ")");
 
@@ -536,8 +540,9 @@ namespace tt
             if (origContainer != ContainerType::RealMKV)
             {
                 setProgress(videoStr, "Remuxing", "Converting to MKV...");
+                threadProgress_[threadIdx].bytesProcessed.store(0); // Reset for new remux
                 addLog("[INFO] Remuxing to MKV: " + videoStr);
-                std::string mkvPath = sm::ensureRealMKV(videoStr, logCb, shouldCancel);
+                std::string mkvPath = sm::ensureRealMKV(videoStr, logCb, shouldCancel, progressCb);
                 if (mkvPath.empty())
                 {
                     // Clean up orphaned temp and thumbnail files
@@ -599,9 +604,10 @@ namespace tt
                 if (sm::hasTimestampIssues(videoStr, logCb))
                 {
                     setProgress(videoStr, "Fixing TS", "Remuxing to fix timestamps...");
+                    threadProgress_[threadIdx].bytesProcessed.store(0); // Reset for new remux
                     addLog("[INFO] Timestamps broken → remuxing to fix: " +
                            videoStr);
-                    if (sm::fixTimestamps(videoStr, logCb, shouldCancel))
+                    if (sm::fixTimestamps(videoStr, logCb, shouldCancel, progressCb))
                     {
                         tsFixed = true;
                         wasRemuxed = true;
@@ -893,6 +899,31 @@ namespace tt
                 ImGui::BeginDisabled();
             if (ImGui::Button("Generate", {90, 0}))
                 startGeneration();
+            if (isWorking || isScanning)
+                ImGui::EndDisabled();
+
+            ImGui::SameLine();
+
+            // Regen All — forces regeneration of ALL thumbnails (ignores existing)
+            if (isWorking || isScanning)
+                ImGui::BeginDisabled();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.3f, 0.1f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.4f, 0.15f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.9f, 0.5f, 0.2f, 1.0f));
+            if (ImGui::Button("Regen All", {90, 0}))
+            {
+                // Mark ALL files as needing regeneration
+                {
+                    std::lock_guard lock(videosMutex_);
+                    for (auto &v : videos_)
+                        v.regenQueued = true;
+                }
+                addLog("[INFO] Queued ALL files for thumbnail regeneration");
+                startGeneration();
+            }
+            ImGui::PopStyleColor(3);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Regenerate thumbnails for ALL files (ignores existing)");
             if (isWorking || isScanning)
                 ImGui::EndDisabled();
 
@@ -1273,13 +1304,15 @@ namespace tt
                                      ImGuiTableFlags_ScrollY | ImGuiTableFlags_NoHostExtendX |
                                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX;
 
-            if (ImGui::BeginTable("##InProgressTable", 6, tFlags, ImGui::GetContentRegionAvail()))
+            if (ImGui::BeginTable("##InProgressTable", 8, tFlags, ImGui::GetContentRegionAvail()))
             {
                 ImGui::TableSetupColumn("##", ImGuiTableColumnFlags_WidthFixed, 28); // thread #
-                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 100);
-                ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthFixed, 180);
-                ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80);
-                ImGui::TableSetupColumn("Elapsed", ImGuiTableColumnFlags_WidthFixed, 70);
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 90);
+                ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthFixed, 160);
+                ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 75);
+                ImGui::TableSetupColumn("Speed", ImGuiTableColumnFlags_WidthFixed, 75);
+                ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 60);
+                ImGui::TableSetupColumn("Elapsed", ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableHeadersRow();
 
@@ -1288,6 +1321,7 @@ namespace tt
                     bool isActive = threadProgress_[t].active.load();
                     std::string filePath, action, subAction;
                     int64_t fsize = 0;
+                    int64_t bytesProcessed = 0;
                     double elapsed = 0;
 
                     {
@@ -1296,8 +1330,22 @@ namespace tt
                         action = threadProgress_[t].action;
                         subAction = threadProgress_[t].subAction;
                         fsize = threadProgress_[t].fileSize;
+                        bytesProcessed = threadProgress_[t].bytesProcessed.load();
                         if (isActive && fsize > 0)
                             elapsed = std::chrono::duration<double>(now - threadProgress_[t].startTime).count();
+                    }
+
+                    // Calculate I/O speed and ETA
+                    double speedMBps = 0.0;
+                    double etaSec = 0.0;
+                    if (elapsed > 0.5 && bytesProcessed > 0)
+                    {
+                        speedMBps = (double)bytesProcessed / (1024.0 * 1024.0) / elapsed;
+                        if (fsize > bytesProcessed && speedMBps > 0.01)
+                        {
+                            double remaining = (double)(fsize - bytesProcessed) / (1024.0 * 1024.0);
+                            etaSec = remaining / speedMBps;
+                        }
                     }
 
                     ImGui::TableNextRow();
@@ -1352,6 +1400,37 @@ namespace tt
                         ImGui::TextUnformatted(formatSize(fsize).c_str());
                     else
                         ImGui::TextColored(COL_DIM, "-");
+
+                    // Speed column (MB/s)
+                    ImGui::TableNextColumn();
+                    if (isActive && speedMBps > 0.01)
+                    {
+                        if (speedMBps >= 100)
+                            ImGui::TextColored(COL_GREEN, "%.0f MB/s", speedMBps);
+                        else if (speedMBps >= 10)
+                            ImGui::TextColored(COL_TEXT, "%.1f MB/s", speedMBps);
+                        else
+                            ImGui::TextColored(COL_YELLOW, "%.2f MB/s", speedMBps);
+                    }
+                    else
+                    {
+                        ImGui::TextColored(COL_DIM, "-");
+                    }
+
+                    // ETA column
+                    ImGui::TableNextColumn();
+                    if (isActive && etaSec > 0.5)
+                    {
+                        int es = (int)etaSec;
+                        if (es >= 60)
+                            ImGui::TextColored(COL_YELLOW, "%dm%02ds", es / 60, es % 60);
+                        else
+                            ImGui::Text("%ds", es);
+                    }
+                    else
+                    {
+                        ImGui::TextColored(COL_DIM, "-");
+                    }
 
                     // Elapsed column
                     ImGui::TableNextColumn();
@@ -1542,7 +1621,7 @@ namespace tt
                     ImGui::TableNextColumn();
                     ImGui::Selectable(r.rel.c_str(), false,
                                       ImGuiSelectableFlags_SpanAllColumns |
-                                      ImGuiSelectableFlags_AllowOverlap);
+                                          ImGuiSelectableFlags_AllowOverlap);
 
                     // Right-click context menu on the row
                     if (ImGui::BeginPopupContextItem("##RowCtx"))

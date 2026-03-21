@@ -31,6 +31,7 @@ namespace tt
         std::string action;                              // "Remuxing", "Generating", "Embedding", "VR Metadata", etc.
         std::string subAction;                           // more detail like frame count, percentage
         int64_t fileSize = 0;                            // size of current file being processed
+        std::atomic<int64_t> bytesProcessed{0};          // bytes processed so far (for I/O speed)
         std::chrono::steady_clock::time_point startTime; // when this file started
         std::mutex mtx;
     };
