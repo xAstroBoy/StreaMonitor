@@ -1301,19 +1301,21 @@ namespace tt
             auto now = std::chrono::steady_clock::now();
 
             ImGuiTableFlags tFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                     ImGuiTableFlags_ScrollY | ImGuiTableFlags_NoHostExtendX |
-                                     ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX;
+                                     ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
+                                     ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
 
             if (ImGui::BeginTable("##InProgressTable", 8, tFlags, ImGui::GetContentRegionAvail()))
             {
-                ImGui::TableSetupColumn("##", ImGuiTableColumnFlags_WidthFixed, 28); // thread #
-                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 90);
-                ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthFixed, 160);
-                ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 75);
-                ImGui::TableSetupColumn("Speed", ImGuiTableColumnFlags_WidthFixed, 75);
-                ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 60);
-                ImGui::TableSetupColumn("Elapsed", ImGuiTableColumnFlags_WidthFixed, 60);
-                ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_WidthStretch);
+                // Dynamic layout: fixed columns for compact data, stretch columns for text
+                ImGui::TableSetupColumn("##",      ImGuiTableColumnFlags_WidthFixed, 30.0f);
+                ImGui::TableSetupColumn("Action",  ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn("Detail",  ImGuiTableColumnFlags_WidthStretch, 2.0f);
+                ImGui::TableSetupColumn("Size",    ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("Speed",   ImGuiTableColumnFlags_WidthFixed, 110.0f);
+                ImGui::TableSetupColumn("ETA",     ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("Elapsed", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("File",    ImGuiTableColumnFlags_WidthStretch, 3.0f);
+                ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableHeadersRow();
 
                 for (int t = 0; t < numThreads && t < kMaxThreads; t++)
@@ -1447,12 +1449,18 @@ namespace tt
                         ImGui::TextColored(COL_DIM, "-");
                     }
 
-                    // File column — just the filename, tooltip for full path
+                    // File column — relative path for meaningful context
                     ImGui::TableNextColumn();
                     if (isActive && !filePath.empty())
                     {
-                        auto fname = fs::path(filePath).filename().string();
-                        ImGui::TextUnformatted(fname.c_str());
+                        // Show relative path from root dir (same as Done/All tabs)
+                        std::string display;
+                        try {
+                            display = fs::relative(fs::path(filePath), fs::path(rootDir_)).string();
+                        } catch (...) {
+                            display = fs::path(filePath).filename().string();
+                        }
+                        ImGui::TextUnformatted(display.c_str());
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("%s", filePath.c_str());
                     }
@@ -1492,9 +1500,12 @@ namespace tt
                     return 0;
                 if (processed || hasTag)
                     return 1;
-                if (!hasThumb)
+                // Pre-existing: RealMKV with cover/thumb but not explicitly processed
+                if (container == ContainerType::RealMKV && (hasCoverEmbed || hasThumb))
                     return 2;
-                return 3; // skipped
+                if (!hasThumb)
+                    return 3;
+                return 4; // skipped
             }
         };
         static thread_local std::vector<RowSnap> rows;
@@ -1562,11 +1573,11 @@ namespace tt
 
         if (ImGui::BeginTable("##Videos", 5, flags, ImGui::GetContentRegionAvail()))
         {
-            ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_DefaultSort, 4.0f);
-            ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_PreferSortDescending, 0.7f);
-            ImGui::TableSetupColumn("Container", ImGuiTableColumnFlags_PreferSortDescending, 0.8f);
-            ImGui::TableSetupColumn("Thumbnail", ImGuiTableColumnFlags_PreferSortDescending, 0.8f);
-            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_PreferSortDescending, 1.2f);
+            ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_DefaultSort, 5.0f);
+            ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_PreferSortDescending, 0.6f);
+            ImGui::TableSetupColumn("Container", ImGuiTableColumnFlags_PreferSortDescending, 0.6f);
+            ImGui::TableSetupColumn("Thumbnail", ImGuiTableColumnFlags_PreferSortDescending, 0.7f);
+            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_PreferSortDescending, 1.8f);
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableHeadersRow();
 
@@ -1702,7 +1713,9 @@ namespace tt
                     // Status column
                     ImGui::TableNextColumn();
                     if (r.failed)
+                    {
                         DrawBadge("Failed", COL_BADGE_ERR);
+                    }
                     else if (r.processed || r.hasTag)
                     {
                         DrawBadge("Done", COL_BADGE_OK);
@@ -1713,8 +1726,17 @@ namespace tt
                         if (r.tsFixed)
                             DrawBadge("TS Fixed", IM_COL32(60, 130, 200, 255));
                     }
+                    else if (r.container == ContainerType::RealMKV && (r.hasCoverEmbed || r.hasThumb))
+                    {
+                        // Pre-existing cover/thumb but not tagged yet (from a previous run)
+                        DrawBadge("Existing", IM_COL32(80, 140, 80, 255));
+                        if (r.hasCoverEmbed)
+                            DrawBadge("Embedded", IM_COL32(60, 120, 180, 255));
+                    }
                     else
+                    {
                         DrawBadge("Pending", COL_BADGE_PEND);
+                    }
 
                     ImGui::PopID();
                 }
