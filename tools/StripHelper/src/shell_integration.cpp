@@ -51,7 +51,7 @@ namespace sh
             return false;
 
         // Set display text
-        const char *menuText = "Process with StripHelper";
+        const char *menuText = "Process with StripHelper (Symlinks)";
         RegSetValueExA(hKey, nullptr, 0, REG_SZ,
                        (const BYTE *)menuText, (DWORD)(strlen(menuText) + 1));
 
@@ -67,8 +67,8 @@ namespace sh
         if (result != ERROR_SUCCESS)
             return false;
 
-        // Command: "C:\path\to\StripHelper.exe" "%1"
-        std::string command = "\"" + exePath + "\" \"%1\"";
+        // Command: "C:\path\to\StripHelper.exe" --symlinks "%1"
+        std::string command = "\"" + exePath + "\" --symlinks \"%1\"";
         RegSetValueExA(hKey, nullptr, 0, REG_SZ,
                        (const BYTE *)command.c_str(), (DWORD)(command.size() + 1));
 
@@ -85,12 +85,41 @@ namespace sh
         return result == ERROR_SUCCESS;
     }
 
+    bool isLegacyMenuInstalled()
+    {
+        HKEY hKey = nullptr;
+        // Old Python script registered under HKCR\Directory\Background\shell\MergeAllFilesSymlink
+        LONG result = RegOpenKeyExA(HKEY_CLASSES_ROOT,
+            "Directory\\Background\\shell\\MergeAllFilesSymlink", 0, KEY_READ, &hKey);
+        if (result == ERROR_SUCCESS) { RegCloseKey(hKey); return true; }
+        // Also check under Directory\shell\MergeAllFilesSymlink
+        result = RegOpenKeyExA(HKEY_CLASSES_ROOT,
+            "Directory\\shell\\MergeAllFilesSymlink", 0, KEY_READ, &hKey);
+        if (result == ERROR_SUCCESS) { RegCloseKey(hKey); return true; }
+        return false;
+    }
+
+    bool uninstallLegacyMenu()
+    {
+        bool ok = false;
+        // Remove old Python script entries (HKCR — may need admin)
+        RegDeleteKeyA(HKEY_CLASSES_ROOT, "Directory\\Background\\shell\\MergeAllFilesSymlink\\command");
+        if (RegDeleteKeyA(HKEY_CLASSES_ROOT, "Directory\\Background\\shell\\MergeAllFilesSymlink") == ERROR_SUCCESS)
+            ok = true;
+        RegDeleteKeyA(HKEY_CLASSES_ROOT, "Directory\\shell\\MergeAllFilesSymlink\\command");
+        if (RegDeleteKeyA(HKEY_CLASSES_ROOT, "Directory\\shell\\MergeAllFilesSymlink") == ERROR_SUCCESS)
+            ok = true;
+        return ok;
+    }
+
 #else
     // Non-Windows stubs
     std::string getExePath() { return ""; }
     bool isShellMenuInstalled() { return false; }
     bool installShellMenu() { return false; }
     bool uninstallShellMenu() { return false; }
+    bool isLegacyMenuInstalled() { return false; }
+    bool uninstallLegacyMenu() { return false; }
 #endif
 
 } // namespace sh

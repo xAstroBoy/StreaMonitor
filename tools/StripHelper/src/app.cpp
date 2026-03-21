@@ -282,7 +282,7 @@ namespace sh
         ImGui::Spacing();
 
         // ── Path input (stretches to fill) ──────────────────────────
-        float rightW = 550.0f; // space for right-side controls
+        float rightW = 620.0f; // space for right-side controls (incl. Settings)
         ImGui::SetNextItemWidth(std::max(200.0f, ImGui::GetContentRegionAvail().x - rightW));
         ImGui::InputTextWithHint("##path", "Folder to process...", pathBuf_, sizeof(pathBuf_));
 
@@ -332,8 +332,11 @@ namespace sh
 
         // ── Settings (accent button) ────────────────────────────────
         ImGui::SameLine(0, 8);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.18f, 0.18f, 0.22f, 1.0f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
         if (ImGui::Button(" Settings ", ImVec2(0, 0)))
             showSettings_ = true;
+        ImGui::PopStyleColor(2);
 
         ImGui::PopStyleVar(2);
     }
@@ -739,14 +742,15 @@ namespace sh
     void App::renderSettingsShellIntegration()
     {
         ImGui::Spacing();
-        ImGui::TextWrapped("Add a \"Process with StripHelper\" option to the right-click context menu for folders in Windows Explorer.");
+        ImGui::TextWrapped("Add a \"Process with StripHelper (Symlinks)\" option to the right-click context menu for folders in Windows Explorer.");
+        ImGui::TextWrapped("Right-clicking a folder will launch StripHelper with --symlinks mode enabled.");
         ImGui::Spacing();
 
         bool installed = sh::isShellMenuInstalled();
 
         if (installed)
         {
-            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "Status: Installed");
+            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "Context Menu: Installed");
             ImGui::Spacing();
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.15f, 0.15f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.65f, 0.20f, 0.20f, 1.0f));
@@ -759,20 +763,41 @@ namespace sh
         }
         else
         {
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Status: Not installed");
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Context Menu: Not installed");
             ImGui::Spacing();
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.55f, 0.20f, 1.0f));
             if (ImGui::Button("Install Context Menu", ImVec2(-1, 34)))
             {
                 sh::installShellMenu();
-                addLog("Context menu installed.");
+                addLog("Context menu installed (with --symlinks).");
             }
             ImGui::PopStyleColor(2);
         }
 
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Uses per-user registry (HKCU) — no admin required.");
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Uses per-user registry (HKCU) \xe2\x80\x94 no admin required.");
+
+        // ── Legacy cleanup ──────────────────────────────────────
+        bool hasLegacy = sh::isLegacyMenuInstalled();
+        if (hasLegacy)
+        {
+            ImGui::Spacing();
+            ImGui::SeparatorText("Legacy Cleanup");
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                "Old \"MergeAllFilesSymlink\" entry found (from Python installer)");
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.35f, 0.10f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.65f, 0.45f, 0.15f, 1.0f));
+            if (ImGui::Button("Remove Legacy Entry", ImVec2(-1, 34)))
+            {
+                if (sh::uninstallLegacyMenu())
+                    addLog("Legacy MergeAllFilesSymlink entry removed.");
+                else
+                    addLog("WARNING: Could not remove legacy entry (may need admin).");
+            }
+            ImGui::PopStyleColor(2);
+        }
     }
 
     void App::renderSettingsImport()

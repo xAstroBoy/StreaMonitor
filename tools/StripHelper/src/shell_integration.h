@@ -20,6 +20,12 @@ namespace sh
     // Uninstall: removes the context menu entry.
     bool uninstallShellMenu();
 
+    // Check if old Python-based MergeAllFilesSymlink entry exists
+    bool isLegacyMenuInstalled();
+
+    // Remove old Python-based MergeAllFilesSymlink entries (HKCR)
+    bool uninstallLegacyMenu();
+
     // Get the path to the running executable
     std::string getExePath();
 
