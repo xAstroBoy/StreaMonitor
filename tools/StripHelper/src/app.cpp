@@ -125,6 +125,19 @@ namespace sh
 
     // ── Settings persistence ────────────────────────────────────────────────────
 
+    void App::syncSettingsToGlobals()
+    {
+        // Push App member variables → config.h inline globals
+        // so pipeline.cpp (which reads globals directly) uses the saved values.
+        DEFAULT_TARGET_FPS = targetFps_;
+        TARGET_AUDIO_SR = audioSampleRate_;
+        TARGET_AUDIO_CH = audioChannels_;
+        CAP_MAX_WIDTH = capMaxW_;
+        CAP_MAX_HEIGHT = capMaxH_;
+        DELETE_TS_AFTER_REMUX = deleteTs_;
+        FAILED_TS_DELETE_MAX_BYTES = static_cast<int64_t>(failedTsMaxMB_) * 1024 * 1024;
+    }
+
     void App::loadSettings()
     {
         try
@@ -189,6 +202,9 @@ namespace sh
             // Clamp
             threads_ = std::clamp(threads_, 1, 32);
             failedTsMaxMB_ = std::clamp(failedTsMaxMB_, 0, 10000);
+
+            // Push loaded values into config.h globals so pipeline.cpp sees them
+            syncSettingsToGlobals();
         }
         catch (...)
         {
@@ -222,6 +238,9 @@ namespace sh
             std::ofstream f(SETTINGS_PATH);
             f << j.dump(2);
             addLog("Settings saved.");
+
+            // Push saved values into config.h globals so pipeline.cpp sees them
+            syncSettingsToGlobals();
         }
         catch (const std::exception &e)
         {

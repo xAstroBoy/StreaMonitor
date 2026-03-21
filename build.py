@@ -404,7 +404,7 @@ def package(args):
 def deploy(args):
     """Kill running processes, copy builds to runtime dirs, and launch SM."""
     dist = Path(args.dist_dir) if args.dist_dir else DIST_DIR
-    runtime_dir = ROOT.parent  # C:\Users\xAstroBoy\Desktop\StreaMonitor
+    runtime_dir = ROOT.parent.parent  # C:\Users\xAstroBoy\Desktop\StreaMonitor
 
     exe_ext = ".exe" if IS_WINDOWS else ""
     sm_exe = f"StreaMonitor{exe_ext}"

@@ -600,6 +600,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
         app.setAutoStart(true);
     }
 
+    // Push final settings (from JSON + CLI overrides) → config.h globals
+    app.syncSettingsToGlobals();
+
     // Main loop
     const float clearColor[4] = {0.06f, 0.06f, 0.08f, 1.00f};
     bool running = true;

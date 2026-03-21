@@ -69,6 +69,9 @@ namespace sh
         void setThumbnailColumns(int v) { thumbnailColumns_ = std::clamp(v, 1, 10); }
         void setThumbnailRows(int v) { thumbnailRows_ = std::clamp(v, 1, 10); }
 
+        // Push member settings → config.h runtime globals (call after CLI overrides)
+        void syncSettingsToGlobals();
+
     private:
         // GUI sections
         void renderTopBar();

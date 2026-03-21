@@ -44,16 +44,16 @@ namespace sh
     // Smart detection: only probe PTS on .ts files larger than this (small files are fast to just remux)
     constexpr int64_t PTS_CHECK_MIN_BYTES = 5 * 1024 * 1024; // 5 MiB — skip PTS scan for tiny clips
 
-    // ── Audio / Video defaults ──────────────────────────────────────────────────
-    constexpr int TARGET_AUDIO_SR = 48000;
-    constexpr int TARGET_AUDIO_CH = 2;
-    constexpr int DEFAULT_TARGET_FPS = 30;
-    constexpr int CAP_MAX_WIDTH = 3840;
-    constexpr int CAP_MAX_HEIGHT = 2160;
+    // ── Audio / Video defaults (mutable at runtime via settings / CLI) ─────────
+    inline int TARGET_AUDIO_SR = 48000;
+    inline int TARGET_AUDIO_CH = 2;
+    inline int DEFAULT_TARGET_FPS = 30;
+    inline int CAP_MAX_WIDTH = 3840;
+    inline int CAP_MAX_HEIGHT = 2160;
 
-    // ── Behavior ────────────────────────────────────────────────────────────────
-    constexpr bool DELETE_TS_AFTER_REMUX = true;
-    constexpr int64_t FAILED_TS_DELETE_MAX_BYTES = 100 * 1024 * 1024; // 100 MiB — auto-delete failed .ts below this
+    // ── Behavior (mutable at runtime via settings / CLI) ────────────────────────
+    inline bool DELETE_TS_AFTER_REMUX = true;
+    inline int64_t FAILED_TS_DELETE_MAX_BYTES = 100 * 1024 * 1024; // 100 MiB — auto-delete failed .ts below this
 
     // ── Paths (defaults — overridden at runtime by initPaths + settings.json) ────
     inline fs::path CONFIG_PATH = R"(F:\config.json)";
