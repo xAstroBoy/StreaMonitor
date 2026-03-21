@@ -78,6 +78,14 @@ namespace sm
         std::function<void(const std::string &)> logCb = nullptr,
         const std::string &mkvpropeditPath = "");
 
+    // Fix existing cover art attachment to have proper description for DLNA compatibility.
+    // Uses mkvpropedit to update attachment metadata (name + description).
+    // Idempotent — safe to call on files that already have correct metadata.
+    bool fixCoverAttachmentMetadata(
+        const std::string &mkvPath,
+        std::function<void(const std::string &)> logCb = nullptr,
+        const std::string &mkvpropeditPath = "");
+
     // Ensure a video file is in a real Matroska (.mkv) container.
     // - .mkv with EBML header → returns same path (already good)
     // - .mkv without EBML → remuxes in-place, returns same path

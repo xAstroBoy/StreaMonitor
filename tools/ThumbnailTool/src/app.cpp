@@ -588,6 +588,11 @@ namespace tt
                         wasEmbedded = true;
                     }
                 }
+                else if (wasEmbedded)
+                {
+                    // Fix existing cover attachment metadata for DLNA compatibility
+                    sm::fixCoverAttachmentMetadata(videoStr, logCb);
+                }
                 // Cover art is inside the MKV — remove the external .jpg
                 if (wasEmbedded && fs::exists(thumbStr))
                 {
@@ -808,8 +813,12 @@ namespace tt
                 }
 
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Cancel"))
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                if (ImGui::Button("STOP", {60, 0}))
                     cancelWork_.store(true);
+                ImGui::PopStyleColor(3);
             }
 
             ImGui::SameLine(w - 250);

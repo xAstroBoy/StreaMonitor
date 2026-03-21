@@ -1753,6 +1753,62 @@ namespace sm
         return ok;
     }
 
+    bool fixCoverAttachmentMetadata(
+        const std::string &mkvPath,
+        std::function<void(const std::string &)> logCb,
+        const std::string &mkvpropeditPath)
+    {
+        namespace fs = std::filesystem;
+        auto log = [&](const std::string &msg)
+        {
+            if (logCb)
+                logCb(msg);
+        };
+
+        // Only process real MKV files
+        if (!isRealMatroska(mkvPath))
+            return false;
+
+        // Must have cover art to fix
+        if (!hasCoverArt(mkvPath))
+            return false;
+
+        std::string mkv_exe = resolveMkvpropedit(mkvpropeditPath, logCb);
+        if (mkv_exe.empty())
+            return false;
+
+        // Use mkvpropedit to update attachment 1 (typically the cover)
+        // Set name to "cover.jpg" and description to "cover" for DLNA compatibility
+        std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
+                              " --attachment-name cover.jpg"
+                              " --attachment-description cover"
+                              " --update-attachment 1";
+
+        log("fix-cover: updating attachment metadata in " + fs::path(mkvPath).filename().string());
+
+        int ret;
+#ifdef _WIN32
+        std::string errMsg;
+        ret = silentRunExe(mkv_exe, cmdLine, &errMsg);
+#else
+        cmdLine += " 2>&1";
+        ret = std::system(cmdLine.c_str());
+        std::string errMsg;
+#endif
+
+        if (ret == 0)
+        {
+            log("fix-cover: updated attachment metadata");
+            return true;
+        }
+        else
+        {
+            // Not a fatal error — attachment may already have correct metadata
+            // or file may have multiple attachments (mkvpropedit will fail gracefully)
+            return false;
+        }
+    }
+
     std::string ensureRealMKV(
         const std::string &videoPath,
         std::function<void(const std::string &)> logCb)
