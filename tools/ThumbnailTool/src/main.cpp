@@ -1,5 +1,5 @@
 // ThumbnailTool — GLFW + OpenGL 3 + Dear ImGui entry point
-// Same windowing style as StreaMonitor (external popups, dark theme)
+// Polished dark theme matching StreaMonitor exactly.
 #include "app.h"
 
 #include <imgui.h>
@@ -18,45 +18,90 @@
 #endif
 
 #include <cstdio>
+#include <cmath>
 #include <string>
+#include <filesystem>
+#include <algorithm>
 
-// ── Custom dark theme (matches StreaMonitor) ────────────────────────────────
+// ── Custom dark theme (matches StreaMonitor exactly) ────────────────────────
 
 static void SetupStyle()
 {
-    ImGui::StyleColorsDark();
     ImGuiStyle &s = ImGui::GetStyle();
-    s.WindowRounding = 0.0f;
-    s.FrameRounding = 4.0f;
-    s.GrabRounding = 3.0f;
-    s.ScrollbarRounding = 6.0f;
-    s.TabRounding = 4.0f;
-    s.WindowPadding = ImVec2(10, 10);
-    s.FramePadding = ImVec2(6, 4);
-    s.ItemSpacing = ImVec2(8, 5);
-    s.ScrollbarSize = 14.0f;
+    ImVec4 *c = s.Colors;
 
-    auto &c = s.Colors;
-    c[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
-    c[ImGuiCol_Header] = ImVec4(0.18f, 0.22f, 0.30f, 1.00f);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.25f, 0.32f, 0.45f, 1.00f);
-    c[ImGuiCol_HeaderActive] = ImVec4(0.30f, 0.40f, 0.55f, 1.00f);
-    c[ImGuiCol_Button] = ImVec4(0.18f, 0.25f, 0.38f, 1.00f);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.35f, 0.52f, 1.00f);
-    c[ImGuiCol_ButtonActive] = ImVec4(0.30f, 0.42f, 0.60f, 1.00f);
-    c[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.22f, 0.22f, 0.28f, 1.00f);
-    c[ImGuiCol_TableHeaderBg] = ImVec4(0.14f, 0.16f, 0.22f, 1.00f);
-    c[ImGuiCol_TableBorderStrong] = ImVec4(0.20f, 0.22f, 0.28f, 1.00f);
-    c[ImGuiCol_TableBorderLight] = ImVec4(0.14f, 0.16f, 0.20f, 1.00f);
-    c[ImGuiCol_TitleBg] = ImVec4(0.06f, 0.06f, 0.08f, 1.00f);
-    c[ImGuiCol_TitleBgActive] = ImVec4(0.12f, 0.14f, 0.20f, 1.00f);
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0.06f, 0.06f, 0.08f, 1.00f);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.22f, 0.24f, 0.30f, 1.00f);
-    c[ImGuiCol_CheckMark] = ImVec4(0.40f, 0.70f, 1.00f, 1.00f);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.40f, 0.70f, 1.00f, 1.00f);
-    c[ImGuiCol_PlotHistogram] = ImVec4(0.25f, 0.55f, 0.85f, 1.00f);
+    // Background
+    c[ImGuiCol_WindowBg] = {0.06f, 0.06f, 0.08f, 1.0f};
+    c[ImGuiCol_ChildBg] = {0.10f, 0.10f, 0.12f, 1.0f};
+    c[ImGuiCol_PopupBg] = {0.08f, 0.08f, 0.10f, 0.96f};
+    c[ImGuiCol_Border] = {0.18f, 0.18f, 0.20f, 0.50f};
+
+    // Frame (inputs, checkboxes)
+    c[ImGuiCol_FrameBg] = {0.14f, 0.14f, 0.16f, 1.0f};
+    c[ImGuiCol_FrameBgHovered] = {0.20f, 0.20f, 0.24f, 1.0f};
+    c[ImGuiCol_FrameBgActive] = {0.26f, 0.26f, 0.30f, 1.0f};
+
+    // Title bar
+    c[ImGuiCol_TitleBg] = {0.08f, 0.08f, 0.10f, 1.0f};
+    c[ImGuiCol_TitleBgActive] = {0.12f, 0.12f, 0.14f, 1.0f};
+    c[ImGuiCol_MenuBarBg] = {0.08f, 0.08f, 0.10f, 1.0f};
+
+    // Headers
+    c[ImGuiCol_Header] = {0.18f, 0.18f, 0.22f, 1.0f};
+    c[ImGuiCol_HeaderHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_HeaderActive] = {0.45f, 0.65f, 1.00f, 1.0f};
+
+    // Buttons (blue accent)
+    c[ImGuiCol_Button] = {0.18f, 0.18f, 0.22f, 1.0f};
+    c[ImGuiCol_ButtonHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_ButtonActive] = {0.45f, 0.65f, 1.00f, 1.0f};
+
+    // Tabs
+    c[ImGuiCol_Tab] = {0.12f, 0.12f, 0.14f, 1.0f};
+    c[ImGuiCol_TabHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_TabSelected] = {0.22f, 0.35f, 0.60f, 1.0f};
+
+    // Scrollbar
+    c[ImGuiCol_ScrollbarBg] = {0.06f, 0.06f, 0.08f, 0.5f};
+    c[ImGuiCol_ScrollbarGrab] = {0.28f, 0.28f, 0.32f, 1.0f};
+
+    // Table
+    c[ImGuiCol_TableHeaderBg] = {0.12f, 0.12f, 0.14f, 1.0f};
+    c[ImGuiCol_TableBorderStrong] = {0.18f, 0.18f, 0.20f, 1.0f};
+    c[ImGuiCol_TableBorderLight] = {0.14f, 0.14f, 0.16f, 1.0f};
+    c[ImGuiCol_TableRowBg] = {0.00f, 0.00f, 0.00f, 0.00f};
+    c[ImGuiCol_TableRowBgAlt] = {0.08f, 0.08f, 0.10f, 0.40f};
+
+    // Text
+    c[ImGuiCol_Text] = {0.92f, 0.92f, 0.94f, 1.0f};
+    c[ImGuiCol_TextDisabled] = {0.50f, 0.50f, 0.55f, 1.0f};
+
+    // Misc
+    c[ImGuiCol_CheckMark] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_SliderGrab] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_PlotHistogram] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_SeparatorHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_SeparatorActive] = {0.45f, 0.65f, 1.00f, 1.0f};
+    c[ImGuiCol_ResizeGrip] = {0.20f, 0.20f, 0.24f, 0.5f};
+    c[ImGuiCol_ResizeGripHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_ResizeGripActive] = {0.45f, 0.65f, 1.00f, 1.0f};
+
+    // Geometry — rounded, spacious, modern
+    s.WindowRounding = 6.0f;
+    s.FrameRounding = 4.0f;
+    s.GrabRounding = 4.0f;
+    s.TabRounding = 4.0f;
+    s.ScrollbarRounding = 4.0f;
+    s.ChildRounding = 4.0f;
+    s.PopupRounding = 4.0f;
+    s.WindowPadding = {10, 10};
+    s.FramePadding = {8, 5};
+    s.ItemSpacing = {8, 6};
+    s.ScrollbarSize = 14.0f;
+    s.GrabMinSize = 12.0f;
+    s.WindowBorderSize = 1.0f;
+    s.ChildBorderSize = 0.0f;
+    s.TabBorderSize = 0.0f;
 }
 
 static void glfw_error_callback(int error, const char *description)
@@ -72,6 +117,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 int main(int, char **)
 #endif
 {
+#ifdef _WIN32
+    // Declare per-monitor DPI awareness
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+#endif
+
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit())
         return 1;
@@ -82,7 +132,7 @@ int main(int, char **)
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE); // start hidden, show after first frame
 
-    GLFWwindow *window = glfwCreateWindow(1200, 800,
+    GLFWwindow *window = glfwCreateWindow(1400, 900,
                                           "ThumbnailTool \xe2\x80\x94 Batch Video Thumbnail Generator",
                                           nullptr, nullptr);
     if (!window)
@@ -95,12 +145,28 @@ int main(int, char **)
     glfwSwapInterval(1); // VSync
 
 #ifdef _WIN32
-    // Dark title bar on Windows 10/11
+    // Dark title bar + custom colors on Windows 10/11
     {
         HWND hwnd = glfwGetWin32Window(window);
         BOOL dark = TRUE;
-        DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */,
-                              &dark, sizeof(dark));
+        DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+        COLORREF borderColor = RGB(25, 25, 35);
+        DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */, &borderColor, sizeof(borderColor));
+        COLORREF captionColor = RGB(15, 15, 20);
+        DwmSetWindowAttribute(hwnd, 35 /* DWMWA_CAPTION_COLOR */, &captionColor, sizeof(captionColor));
+        COLORREF textColor = RGB(180, 180, 200);
+        DwmSetWindowAttribute(hwnd, 36 /* DWMWA_TEXT_COLOR */, &textColor, sizeof(textColor));
+    }
+
+    // Set window icon from embedded resource
+    {
+        HWND hwnd = glfwGetWin32Window(window);
+        HICON icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101));
+        if (icon)
+        {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)icon);
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)icon);
+        }
     }
 #endif
 
@@ -111,20 +177,48 @@ int main(int, char **)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename = nullptr; // no imgui.ini
 
-    // Try to load system font
+    // DPI-aware font loading
+    float dpiScale = 1.0f;
+    {
+        float xscale = 1.0f, yscale = 1.0f;
+        GLFWmonitor *monitor = glfwGetPrimaryMonitor();
+        if (monitor)
+            glfwGetMonitorContentScale(monitor, &xscale, &yscale);
+        dpiScale = std::max(xscale, yscale);
+        if (dpiScale < 1.0f)
+            dpiScale = 1.0f;
+        // Fallback for high-res monitors
+        if (dpiScale <= 1.05f && monitor)
+        {
+            const GLFWvidmode *mode = glfwGetVideoMode(monitor);
+            if (mode && mode->width >= 2560)
+                dpiScale = std::max(dpiScale, (float)mode->width / 1920.0f);
+        }
+    }
+    float fontSize = 16.0f * dpiScale;
+
 #ifdef _WIN32
     {
         char windir[MAX_PATH];
         GetWindowsDirectoryA(windir, MAX_PATH);
         std::string fontPath = std::string(windir) + "\\Fonts\\segoeui.ttf";
-        FILE *f = fopen(fontPath.c_str(), "rb");
-        if (f)
+        if (std::filesystem::exists(fontPath))
+            io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontSize);
+        else
         {
-            fclose(f);
-            io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 16.0f);
+            ImFontConfig fc;
+            fc.SizePixels = fontSize;
+            io.Fonts->AddFontDefault(&fc);
         }
     }
+#else
+    {
+        ImFontConfig fc;
+        fc.SizePixels = fontSize;
+        io.Fonts->AddFontDefault(&fc);
+    }
 #endif
+    io.FontGlobalScale = 1.0f;
 
     SetupStyle();
 

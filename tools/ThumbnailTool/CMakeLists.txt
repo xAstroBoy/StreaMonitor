@@ -50,10 +50,13 @@ add_executable(ThumbnailTool WIN32
     src/app.cpp
     # Shared thumbnail generator from parent
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/utils/thumbnail_generator.cpp
+    # Windows application icon
+    res/thumbnailtool.rc
 )
 
 target_include_directories(ThumbnailTool PRIVATE
     src
+    res
     ${TT_FFMPEG_INCLUDES}
     # Access parent's thumbnail_generator.h via "utils/" prefix
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src

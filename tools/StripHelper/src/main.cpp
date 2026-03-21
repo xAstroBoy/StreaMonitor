@@ -220,6 +220,9 @@ static void SetupStyle()
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
 {
+    // Declare per-monitor DPI awareness so Windows reports true scale
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
     // Allow UTF-8 console output
     SetConsoleOutputCP(CP_UTF8);
 
@@ -530,18 +533,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename = nullptr; // disable imgui.ini
 
-    // Font: load system Segoe UI or fallback
+    // Font: load system Segoe UI or fallback (DPI-scaled)
+    float dpiScale = 1.0f;
+    {
+        UINT dpi = GetDpiForWindow(hwnd);
+        dpiScale = (float)dpi / 96.0f;
+        if (dpiScale < 1.0f)
+            dpiScale = 1.0f;
+    }
+    float fontSize = 16.0f * dpiScale;
     {
         char windir[MAX_PATH];
         GetWindowsDirectoryA(windir, MAX_PATH);
         std::string fontPath = std::string(windir) + "\\Fonts\\segoeui.ttf";
         if (GetFileAttributesA(fontPath.c_str()) != INVALID_FILE_ATTRIBUTES)
         {
-            io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 16.0f);
+            io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontSize);
         }
         else
         {
-            io.Fonts->AddFontDefault();
+            ImFontConfig fc;
+            fc.SizePixels = fontSize;
+            io.Fonts->AddFontDefault(&fc);
         }
     }
 

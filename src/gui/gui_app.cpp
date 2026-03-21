@@ -799,6 +799,12 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     bool GuiApp::initWindow()
     {
+#ifdef _WIN32
+        // Declare per-monitor DPI awareness so Windows reports true scale
+        // and doesn't bitmap-stretch our framebuffer.
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+#endif
+
         if (!glfwInit())
         {
             spdlog::error("Failed to initialize GLFW");

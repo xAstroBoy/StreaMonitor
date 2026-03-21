@@ -1,12 +1,14 @@
 #pragma once
 // ThumbnailTool — Batch thumbnail generator for video files
-// Recursively scans a directory, finds videos without thumbnails, generates them.
+// Recursively scans a directory, finds videos without thumbnails,
+// generates high-res contact sheets and embeds them as MKV cover art.
 
 #include <string>
 #include <vector>
 #include <atomic>
 #include <thread>
 #include <mutex>
+#include <deque>
 #include <filesystem>
 
 namespace tt
@@ -31,47 +33,60 @@ namespace tt
         // Called every frame from the main loop
         void render();
 
-        // Settings
-        int thumbnailWidth = 640;
+        // Settings (public for CLI overrides)
+        int thumbnailWidth = 3840;
         int thumbnailColumns = 4;
-        int thumbnailRows = 6;
+        int thumbnailRows = 4;
+        bool embedInVideo = true;
+        int threadCount = 4;
 
     private:
-        void renderMainPanel();
-        void renderProgressPopup();
+        // Render sections
+        void renderTable();
+        void renderLogPanel();
         void renderSettingsPopup();
 
+        // Actions
         void startScan();
         void startGeneration();
         void workerFunc();
+        void addLog(const std::string &line);
 
         // Root directory to scan
-        char rootDir_[1024] = "F:\\StripChat";
+        char rootDir_[1024] = {};
 
         // Discovered video files
         std::vector<VideoEntry> videos_;
         mutable std::mutex videosMutex_;
 
+        // Log
+        std::deque<std::string> log_;
+        std::mutex logMtx_;
+        bool autoScroll_ = true;
+
         // State
         bool scanned_ = false;
         bool showSettings_ = false;
-        bool showProgress_ = false;
+        bool showLog_ = true;
+        float splitRatio_ = 0.65f;
 
-        // Worker thread for generation
-        std::unique_ptr<std::jthread> worker_;
+        // Worker threads (parallel processing)
+        std::vector<std::jthread> workers_;
         std::atomic<bool> working_{false};
         std::atomic<bool> cancelWork_{false};
         std::atomic<int> processedCount_{0};
         std::atomic<int> totalToProcess_{0};
+        std::atomic<int> nextIdx_{0};
+        std::atomic<int> generated_{0};
+        std::atomic<int> errors_{0};
+
         std::string currentFile_;
         std::mutex currentFileMutex_;
 
-        // Stats
+        // Stats (from scan)
         int totalVideos_ = 0;
         int withThumb_ = 0;
         int withoutThumb_ = 0;
-        int generated_ = 0;
-        int errors_ = 0;
 
     public:
         // Video extensions to look for

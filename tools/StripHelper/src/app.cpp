@@ -1330,6 +1330,14 @@ namespace sh
                                                  [this](const std::string &msg)
                                                  { addLog("[thumb] " + msg); });
 
+                        // Embed thumbnail as cover art inside the MKV (in-place, no copy)
+                        if (fs::exists(thumbPath))
+                        {
+                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(),
+                                                    [this](const std::string &msg)
+                                                    { addLog("[thumb] " + msg); });
+                        }
+
                         if (fs::exists(thumbPath))
                             noteCb("thumbnail saved: " + thumbPath.filename().string());
                     }

@@ -13,6 +13,11 @@
 #include <sstream>
 #include <iomanip>
 #include <fstream>
+#include <cstdlib>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 extern "C"
 {
@@ -469,7 +474,7 @@ namespace sm
             SwsCtx sws;
             sws.ctx = sws_getContext(width, height, AV_PIX_FMT_RGB24,
                                      width, height, AV_PIX_FMT_YUVJ420P,
-                                     SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                     SWS_BICUBIC, nullptr, nullptr, nullptr);
             if (!sws.ctx)
                 return false;
 
@@ -559,7 +564,7 @@ namespace sm
         CodecCtx decCtx;
         decCtx.ctx = avcodec_alloc_context3(decoder);
         avcodec_parameters_to_context(decCtx.ctx, codecpar);
-        decCtx.ctx->thread_count = 2;
+        decCtx.ctx->thread_count = 4;
 
         if (avcodec_open2(decCtx.ctx, decoder, nullptr) < 0)
         {
@@ -575,17 +580,25 @@ namespace sm
             return false;
         }
 
-        // ── 4. Calculate layout ──────────────────────────────────────────
+        // ── 4. Calculate layout (adaptive high-res) ─────────────────────
+        int effectiveWidth = cfg.width;
+        if (cfg.adaptiveWidth)
+            effectiveWidth = std::max(cfg.width, srcW); // never downscale below source
+
         int totalFrames = cfg.totalFrames();
-        int thumbW = (cfg.width - (cfg.columns + 1) * cfg.spacing) / cfg.columns;
+        int thumbW = (effectiveWidth - (cfg.columns + 1) * cfg.spacing) / cfg.columns;
         double aspectRatio = (double)srcW / (double)srcH;
         int thumbH = (int)(thumbW / aspectRatio);
         if (thumbH <= 0)
             thumbH = 1;
 
+        // Scale font + header proportionally to image width
+        int fontScale = std::clamp(effectiveWidth / 1280, 2, 5);
+        int headerH = std::max(cfg.headerHeight, fontScale * 24);
+
         int gridH = cfg.rows * thumbH + (cfg.rows + 1) * cfg.spacing;
-        int totalH = cfg.headerHeight + gridH;
-        int totalW = cfg.width;
+        int totalH = headerH + gridH;
+        int totalW = effectiveWidth;
 
         // ── 5. Allocate composite image (RGB24) ─────────────────────────
         int stride = totalW * 3;
@@ -593,13 +606,13 @@ namespace sm
 
         // Dark-grey header background
         fillRect(image.data(), stride, totalW, totalH,
-                 0, 0, totalW, cfg.headerHeight, 30, 30, 35);
+                 0, 0, totalW, headerH, 30, 30, 35);
 
-        // ── 6. Set up scaler ─────────────────────────────────────────────
+        // ── 6. Set up scaler (bicubic for best quality) ─────────────────
         SwsCtx thumbSws;
         thumbSws.ctx = sws_getContext(srcW, srcH, decCtx.ctx->pix_fmt,
                                       thumbW, thumbH, AV_PIX_FMT_RGB24,
-                                      SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                      SWS_BICUBIC, nullptr, nullptr, nullptr);
         if (!thumbSws.ctx)
         {
             log("thumbnail: failed to create scaler");
@@ -645,7 +658,7 @@ namespace sm
                 int col = i % cfg.columns;
                 int row = i / cfg.columns;
                 int x = cfg.spacing + col * (thumbW + cfg.spacing);
-                int y = cfg.headerHeight + cfg.spacing + row * (thumbH + cfg.spacing);
+                int y = headerH + cfg.spacing + row * (thumbH + cfg.spacing);
                 fillRect(image.data(), stride, totalW, totalH,
                          x, y, thumbW, thumbH, 40, 40, 45);
                 continue;
@@ -662,7 +675,7 @@ namespace sm
             int col = i % cfg.columns;
             int row = i / cfg.columns;
             int dstX = cfg.spacing + col * (thumbW + cfg.spacing);
-            int dstY = cfg.headerHeight + cfg.spacing + row * (thumbH + cfg.spacing);
+            int dstY = headerH + cfg.spacing + row * (thumbH + cfg.spacing);
 
             for (int line = 0; line < thumbH; ++line)
             {
@@ -678,12 +691,13 @@ namespace sm
 
             // Draw timestamp overlay at bottom of thumbnail
             std::string ts_str = formatTime(seekTime);
-            int overlayH = 18;
+            int tsScale = std::max(1, fontScale / 2);
+            int overlayH = tsScale * 8 * 2 + tsScale * 4;
             darkenRect(image.data(), stride, totalW, totalH,
                        dstX, dstY + thumbH - overlayH, thumbW, overlayH, 0.55f);
             drawText(image.data(), stride, totalW, totalH,
-                     dstX + 3, dstY + thumbH - overlayH + 2, ts_str,
-                     255, 255, 255, 1);
+                     dstX + tsScale * 2, dstY + thumbH - overlayH + tsScale * 2, ts_str,
+                     255, 255, 255, tsScale);
 
             av_frame_unref(decFrame.f);
             framesExtracted++;
@@ -726,14 +740,14 @@ namespace sm
             header += "  |  " + sizeStr;
 
         // Truncate header if too long for the image
-        int charW = 5 * 2 + 2; // scale=2: 5px * 2 + 2 gap = 12px per char
+        int charW = 5 * fontScale + fontScale; // glyph width * scale + gap
         int maxChars = (totalW - 16) / charW;
         if ((int)header.size() > maxChars && maxChars > 5)
             header = header.substr(0, maxChars - 3) + "...";
 
         drawText(image.data(), stride, totalW, totalH,
-                 8, (cfg.headerHeight - 16) / 2, header,
-                 220, 220, 220, 2);
+                 fontScale * 4, (headerH - fontScale * 8) / 2, header,
+                 220, 220, 220, fontScale);
 
         // ── 10. Encode as JPEG ───────────────────────────────────────────
         if (!encodeJpeg(image.data(), totalW, totalH, stride, outputPath, cfg.quality))
@@ -746,6 +760,98 @@ namespace sm
             " (" + std::to_string(framesExtracted) + "/" + std::to_string(totalFrames) +
             " frames, " + std::to_string(totalW) + "x" + std::to_string(totalH) + ")");
         return true;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Embed thumbnail as cover art attachment inside MKV (in-place)
+    // Uses mkvpropedit from MKVToolNix — zero video copying.
+    // ─────────────────────────────────────────────────────────────────
+
+    namespace
+    {
+#ifdef _WIN32
+        // Run a command silently (no console window flash) on Windows
+        static int silentRun(const std::string &cmd)
+        {
+            STARTUPINFOA si{};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_HIDE;
+            PROCESS_INFORMATION pi{};
+            // CreateProcessA needs mutable buffer
+            std::string buf = cmd;
+            BOOL ok = CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE,
+                                     CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+            if (!ok)
+                return -1;
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            DWORD code = 1;
+            GetExitCodeProcess(pi.hProcess, &code);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return (int)code;
+        }
+#endif
+    } // anonymous namespace
+
+    bool embedThumbnailInMKV(
+        const std::string &videoPath,
+        const std::string &jpegPath,
+        std::function<void(const std::string &)> logCb)
+    {
+        namespace fs = std::filesystem;
+        auto log = [&](const std::string &msg)
+        {
+            if (logCb)
+                logCb(msg);
+        };
+
+        // Only works for MKV containers
+        auto ext = fs::path(videoPath).extension().string();
+        for (auto &ch : ext)
+            ch = (char)std::tolower((unsigned char)ch);
+        if (ext != ".mkv")
+        {
+            log("thumbnail: embed skipped (not MKV: " + ext + ")");
+            return false;
+        }
+
+        if (!fs::exists(jpegPath))
+        {
+            log("thumbnail: embed skipped (jpg not found)");
+            return false;
+        }
+
+        // Build mkvpropedit command for in-place attachment
+        std::string cmd = "mkvpropedit"
+                          " \"" +
+                          videoPath + "\""
+                                      " --attachment-name cover.jpg"
+                                      " --attachment-mime-type image/jpeg"
+                                      " --add-attachment \"" +
+                          jpegPath + "\"";
+
+        int ret;
+#ifdef _WIN32
+        ret = silentRun(cmd);
+#else
+        cmd += " >/dev/null 2>&1";
+        ret = std::system(cmd.c_str());
+#endif
+
+        if (ret == 0)
+        {
+            // Embedded successfully — remove external .jpg
+            std::error_code ec;
+            fs::remove(jpegPath, ec);
+            log("thumbnail: embedded cover art in " +
+                fs::path(videoPath).filename().string());
+            return true;
+        }
+
+        log("thumbnail: mkvpropedit not found or failed (code " +
+            std::to_string(ret) + "), keeping external .jpg");
+        return false;
     }
 
 } // namespace sm

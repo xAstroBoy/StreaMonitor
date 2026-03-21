@@ -1000,6 +1000,8 @@ namespace sm
                         if (sm::generateContactSheet(videoFile, thumbPath.string(), tcfg, logCb))
                         {
                             logger_->info("Contact sheet saved: {}", thumbPath.filename().string());
+                            // Embed as cover art inside the MKV (in-place)
+                            sm::embedThumbnailInMKV(videoFile, thumbPath.string(), logCb);
                         }
                     }
                 }

@@ -402,52 +402,59 @@ def package(args):
 
 
 def deploy(args):
-    """Kill running StreaMonitor, copy new build to runtime dir, and launch it."""
+    """Kill running processes, copy builds to runtime dirs, and launch SM."""
     dist = Path(args.dist_dir) if args.dist_dir else DIST_DIR
     runtime_dir = ROOT.parent  # C:\Users\xAstroBoy\Desktop\StreaMonitor
 
-    exe_name = "StreaMonitor.exe" if IS_WINDOWS else "StreaMonitor"
-    src_exe = dist / exe_name
+    exe_ext = ".exe" if IS_WINDOWS else ""
+    sm_exe = f"StreaMonitor{exe_ext}"
+    src_exe = dist / sm_exe
 
     if not src_exe.exists():
         print(f"[X] Built exe not found: {src_exe}")
         sys.exit(1)
 
     print(f"\n{'='*60}")
-    print(f"  DEPLOYING to {runtime_dir}")
+    print(f"  DEPLOYING")
+    print(f"  StreaMonitor  → {runtime_dir}")
+    if IS_WINDOWS:
+        print(f"  Tools         → C:\\AstroTools\\StripHelperCpp\\")
     print(f"{'='*60}")
 
-    # ── Step 1: Kill any running StreaMonitor process ──
-    print("\n[1/3] Killing running StreaMonitor...")
+    # ── Step 1: Kill running processes ──
+    print("\n[1/4] Killing running processes...")
+    procs_to_kill = [sm_exe, f"StripHelper{exe_ext}", f"ThumbnailTool{exe_ext}"]
     if IS_WINDOWS:
-        subprocess.run(
-            ["taskkill", "/F", "/IM", exe_name],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        for proc in procs_to_kill:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", proc],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
     else:
-        subprocess.run(
-            ["pkill", "-f", exe_name],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        for proc in procs_to_kill:
+            subprocess.run(
+                ["pkill", "-f", proc],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
     # Give the OS a moment to release file locks
     time.sleep(1.5)
 
-    # ── Step 2: Copy exe + web/ to runtime directory ──
-    print("[2/3] Copying files to runtime directory...")
-    dest_exe = runtime_dir / exe_name
+    # ── Step 2: Copy StreaMonitor to runtime directory ──
+    print("[2/4] Copying StreaMonitor to runtime directory...")
+    dest_exe = runtime_dir / sm_exe
     try:
         shutil.copy2(src_exe, dest_exe)
-        print(f"  [OK] {exe_name}")
+        print(f"  [OK] {sm_exe}")
     except PermissionError:
         # Still locked — wait longer and retry once
-        print(f"  [!] {exe_name} is still locked, waiting...")
+        print(f"  [!] {sm_exe} is still locked, waiting...")
         time.sleep(3)
         try:
             shutil.copy2(src_exe, dest_exe)
-            print(f"  [OK] {exe_name} (retry succeeded)")
+            print(f"  [OK] {sm_exe} (retry succeeded)")
         except Exception as e:
-            print(f"  [X] Could not copy {exe_name}: {e}")
+            print(f"  [X] Could not copy {sm_exe}: {e}")
             print(f"      You may need to close StreaMonitor manually.")
             sys.exit(1)
 
@@ -458,8 +465,33 @@ def deploy(args):
         shutil.copytree(web_src, web_dst, dirs_exist_ok=True)
         print(f"  [OK] web/ dashboard")
 
-    # ── Step 3: Launch the new version ──
-    print("[3/3] Launching new StreaMonitor...")
+    # ── Step 3: Copy tools to AstroTools directory ──
+    if IS_WINDOWS:
+        print("[3/4] Copying tools to AstroTools directory...")
+        tools_dir = Path(r"C:\AstroTools\StripHelperCpp")
+        tools_dir.mkdir(parents=True, exist_ok=True)
+
+        tool_names = [f"StripHelper{exe_ext}", f"ThumbnailTool{exe_ext}"]
+        for tool_name in tool_names:
+            tool_src = dist / tool_name
+            if tool_src.exists():
+                try:
+                    shutil.copy2(tool_src, tools_dir / tool_name)
+                    print(f"  [OK] {tool_name} -> {tools_dir}")
+                except PermissionError:
+                    time.sleep(2)
+                    try:
+                        shutil.copy2(tool_src, tools_dir / tool_name)
+                        print(f"  [OK] {tool_name} -> {tools_dir} (retry)")
+                    except Exception as e:
+                        print(f"  [!] {tool_name}: {e}")
+            else:
+                print(f"  [~] {tool_name} not found in dist, skipping")
+    else:
+        print("[3/4] Tool deployment skipped (non-Windows)")
+
+    # ── Step 4: Launch the new version ──
+    print("[4/4] Launching new StreaMonitor...")
     if IS_WINDOWS:
         # Use START to detach the process from this console
         subprocess.Popen(
@@ -478,6 +510,103 @@ def deploy(args):
         )
 
     print(f"\n[OK] StreaMonitor deployed and launched from {runtime_dir}")
+    if IS_WINDOWS:
+        print(f"[OK] Tools deployed to C:\\AstroTools\\StripHelperCpp\\")
+
+
+def install_context_menu():
+    """Register shell context menu entries for StripHelper and ThumbnailTool (HKCU, no admin)."""
+    if not IS_WINDOWS:
+        print("[!] Context menu install is Windows-only")
+        return
+
+    import winreg
+
+    tools_dir = Path(r"C:\AstroTools\StripHelperCpp")
+
+    entries = [
+        {
+            "name": "StripHelper",
+            "display": "Process with StripHelper",
+            "exe": str(tools_dir / "StripHelper.exe"),
+        },
+        {
+            "name": "ThumbnailTool",
+            "display": "Generate Thumbnails",
+            "exe": str(tools_dir / "ThumbnailTool.exe"),
+        },
+    ]
+
+    print(f"\n{'='*60}")
+    print(f"  INSTALLING context menu entries")
+    print(f"{'='*60}")
+
+    for entry in entries:
+        exe_path = entry["exe"]
+        # Register for both "right-click on folder" and "right-click on folder background"
+        key_paths = [
+            (rf"Software\Classes\Directory\shell\{entry['name']}", "%1"),
+            (rf"Software\Classes\Directory\Background\shell\{entry['name']}", "%V"),
+        ]
+
+        for key_path, arg in key_paths:
+            try:
+                key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0,
+                                         winreg.KEY_SET_VALUE)
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, entry["display"])
+                winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, exe_path)
+                winreg.CloseKey(key)
+
+                cmd_key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path + r"\command", 0,
+                                             winreg.KEY_SET_VALUE)
+                winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ,
+                                  f'"{exe_path}" "{arg}"')
+                winreg.CloseKey(cmd_key)
+
+                print(f"  [OK] {entry['name']}: {key_path}")
+            except Exception as e:
+                print(f"  [X] {entry['name']}: {e}")
+
+    print(f"\n[OK] Context menu entries installed (HKCU, no admin required)")
+    print(f"     Right-click any folder or folder background to see the entries.")
+
+
+def uninstall_context_menu():
+    """Remove shell context menu entries for StripHelper and ThumbnailTool."""
+    if not IS_WINDOWS:
+        print("[!] Context menu uninstall is Windows-only")
+        return
+
+    import winreg
+
+    print(f"\n{'='*60}")
+    print(f"  UNINSTALLING context menu entries")
+    print(f"{'='*60}")
+
+    keys_to_remove = [
+        r"Software\Classes\Directory\shell\StripHelper",
+        r"Software\Classes\Directory\Background\shell\StripHelper",
+        r"Software\Classes\Directory\shell\ThumbnailTool",
+        r"Software\Classes\Directory\Background\shell\ThumbnailTool",
+    ]
+
+    for key_path in keys_to_remove:
+        # Delete command subkey first, then the main key
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path + r"\command")
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+            print(f"  [OK] Removed: {key_path}")
+        except FileNotFoundError:
+            print(f"  [~] Not found: {key_path}")
+        except Exception as e:
+            print(f"  [X] {key_path}: {e}")
+
+    print(f"\n[OK] Context menu entries removed")
 
 
 # ──────────────────────────────────────────────
@@ -504,9 +633,21 @@ def main():
                         help="Don't auto-increment version before building")
     parser.add_argument("--no-deploy", action="store_true",
                         help="Don't deploy to runtime directory after build")
+    parser.add_argument("--install", action="store_true",
+                        help="Install context menu entries for StripHelper + ThumbnailTool (HKCU)")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="Uninstall context menu entries for StripHelper + ThumbnailTool")
     args = parser.parse_args()
 
     print(f"Platform: {SYSTEM} ({platform.machine()})")
+
+    # Install/uninstall context menu (standalone commands)
+    if args.install:
+        install_context_menu()
+        return
+    if args.uninstall:
+        uninstall_context_menu()
+        return
 
     # Package-only mode: just package what's already built
     if args.package_only:
