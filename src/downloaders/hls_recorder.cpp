@@ -54,7 +54,7 @@ namespace sm
         return std::string(buf);
     }
 
-    static void populateOutputDurations(HLSRecorder::FFmpegState &state)
+    void populateOutputDurations(HLSRecorder::FFmpegState &state)
     {
         if (!state.outputCtx)
             return;

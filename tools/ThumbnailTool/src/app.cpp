@@ -342,21 +342,35 @@ namespace tt
         etaRollingBps_ = 0;
 
         // Count ALL unprocessed videos and calculate total bytes
+        // Skip files that are already done (processed this run, OR already a Real MKV with cover art)
         int count = 0;
         int64_t totalB = 0;
+        int skipped = 0;
         {
             std::lock_guard lock(videosMutex_);
             for (auto &v : videos_)
             {
-                if (!v.processed)
+                // Skip if already processed this run
+                if (v.processed)
+                    continue;
+                // Skip if already fully done from a previous run
+                // (Real MKV with embedded cover art = already went through the full pipeline)
+                if (v.container == ContainerType::RealMKV && v.hasCoverEmbed)
                 {
-                    count++;
-                    totalB += v.fileSize;
+                    v.processed = true; // mark so UI shows as Done
+                    skipped++;
+                    continue;
                 }
+                count++;
+                totalB += v.fileSize;
             }
         }
         totalToProcess_.store(count);
         totalBytes_.store(totalB);
+
+        if (skipped > 0)
+            addLog("[INFO] Skipped " + std::to_string(skipped) +
+                   " already-processed files (Real MKV with embedded cover)");
 
         if (count == 0)
         {
@@ -380,6 +394,7 @@ namespace tt
             threadProgress_[i].filePath.clear();
             threadProgress_[i].action.clear();
             threadProgress_[i].subAction.clear();
+            threadProgress_[i].fileSize = 0;
         }
 
         // Launch worker threads with their thread index
@@ -402,8 +417,13 @@ namespace tt
             std::lock_guard lock(videosMutex_);
             for (size_t i = 0; i < videos_.size(); i++)
             {
-                if (!videos_[i].processed)
-                    sizeIdx.push_back({videos_[i].fileSize, i});
+                auto &v = videos_[i];
+                // Skip already processed or already-done files
+                if (v.processed)
+                    continue;
+                if (v.container == ContainerType::RealMKV && v.hasCoverEmbed)
+                    continue;
+                sizeIdx.push_back({v.fileSize, i});
             }
         }
         std::sort(sizeIdx.begin(), sizeIdx.end()); // ascending by file size
@@ -414,12 +434,17 @@ namespace tt
             indices.push_back(idx);
 
         // Helper to update thread progress
-        auto setProgress = [this, threadIdx](const std::string &file, const std::string &action, const std::string &sub = "")
+        auto setProgress = [this, threadIdx](const std::string &file, const std::string &action, const std::string &sub = "", int64_t fsize = 0)
         {
             std::lock_guard lock(threadProgress_[threadIdx].mtx);
             threadProgress_[threadIdx].filePath = file;
             threadProgress_[threadIdx].action = action;
             threadProgress_[threadIdx].subAction = sub;
+            if (fsize > 0)
+            {
+                threadProgress_[threadIdx].fileSize = fsize;
+                threadProgress_[threadIdx].startTime = std::chrono::steady_clock::now();
+            }
         };
 
         // Mark thread as active
@@ -481,7 +506,7 @@ namespace tt
             origVideoStr = videoStr; // keep original path for VR folder detection
 
             // Update thread progress
-            setProgress(videoStr, "Starting", formatSize(fsize));
+            setProgress(videoStr, "Starting", formatSize(fsize), fsize);
 
             {
                 std::lock_guard lock(currentFileMutex_);
@@ -704,6 +729,7 @@ namespace tt
             threadProgress_[threadIdx].filePath.clear();
             threadProgress_[threadIdx].action.clear();
             threadProgress_[threadIdx].subAction.clear();
+            threadProgress_[threadIdx].fileSize = 0;
         }
 
         // Last worker to exit handles completion/cleanup
@@ -1201,50 +1227,71 @@ namespace tt
         if (currentTab_ == StatusTab::InProgress)
         {
             int numThreads = threadCount.load();
-            
-            ImGuiTableFlags tFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                     ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+            auto now = std::chrono::steady_clock::now();
 
-            if (ImGui::BeginTable("##InProgressTable", 4, tFlags, ImGui::GetContentRegionAvail()))
+            ImGuiTableFlags tFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                     ImGuiTableFlags_ScrollY | ImGuiTableFlags_NoHostExtendX |
+                                     ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX;
+
+            if (ImGui::BeginTable("##InProgressTable", 6, tFlags, ImGui::GetContentRegionAvail()))
             {
-                ImGui::TableSetupColumn("Thread", ImGuiTableColumnFlags_WidthFixed, 60);
-                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 120);
-                ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 180);
-                ImGui::TableSetupColumn("File (Full Path)", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("##",        ImGuiTableColumnFlags_WidthFixed, 28);      // thread #
+                ImGui::TableSetupColumn("Action",    ImGuiTableColumnFlags_WidthFixed, 100);
+                ImGui::TableSetupColumn("Detail",    ImGuiTableColumnFlags_WidthFixed, 180);
+                ImGui::TableSetupColumn("Size",      ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Elapsed",   ImGuiTableColumnFlags_WidthFixed, 70);
+                ImGui::TableSetupColumn("File",      ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableHeadersRow();
 
                 for (int t = 0; t < numThreads && t < kMaxThreads; t++)
                 {
                     bool isActive = threadProgress_[t].active.load();
                     std::string filePath, action, subAction;
-                    
+                    int64_t fsize = 0;
+                    double elapsed = 0;
+
                     {
                         std::lock_guard lock(threadProgress_[t].mtx);
                         filePath = threadProgress_[t].filePath;
                         action = threadProgress_[t].action;
                         subAction = threadProgress_[t].subAction;
+                        fsize = threadProgress_[t].fileSize;
+                        if (isActive && fsize > 0)
+                            elapsed = std::chrono::duration<double>(now - threadProgress_[t].startTime).count();
                     }
 
                     ImGui::TableNextRow();
-                    
-                    // Thread column
+
+                    // Thread # column — compact colored indicator
                     ImGui::TableNextColumn();
                     if (isActive)
-                        ImGui::TextColored(COL_GREEN, "Thread %d", t + 1);
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, COL_GREEN);
+                        ImGui::Text(" %d", t + 1);
+                        ImGui::PopStyleColor();
+                    }
                     else
-                        ImGui::TextColored(COL_DIM, "Thread %d", t + 1);
+                    {
+                        ImGui::TextColored(COL_DIM, " %d", t + 1);
+                    }
 
-                    // Action column
+                    // Action column — color-coded
                     ImGui::TableNextColumn();
                     if (isActive && !action.empty())
                     {
                         ImVec4 actionColor = COL_TEXT;
-                        if (action == "Remuxing") actionColor = COL_YELLOW;
-                        else if (action == "Generating") actionColor = COL_ACCENT;
-                        else if (action == "Embedding") actionColor = COL_GREEN;
-                        else if (action == "VR Meta") actionColor = ImVec4(0.7f, 0.5f, 1.0f, 1.0f);
-                        else if (action == "Probing") actionColor = COL_DIM;
-                        else if (action == "Done") actionColor = COL_GREEN;
+                        if (action == "Remuxing" || action == "Fixing TS")
+                            actionColor = COL_YELLOW;
+                        else if (action == "Generating")
+                            actionColor = COL_ACCENT;
+                        else if (action == "Embedding" || action == "Fix Meta")
+                            actionColor = COL_GREEN;
+                        else if (action == "VR Meta")
+                            actionColor = ImVec4(0.7f, 0.5f, 1.0f, 1.0f);
+                        else if (action == "Probing" || action == "Checking" || action == "Starting")
+                            actionColor = COL_DIM;
+                        else if (action == "Done")
+                            actionColor = COL_GREEN;
                         ImGui::TextColored(actionColor, "%s", action.c_str());
                     }
                     else
@@ -1252,18 +1299,43 @@ namespace tt
                         ImGui::TextColored(COL_DIM, "Idle");
                     }
 
-                    // Status column
+                    // Detail column
                     ImGui::TableNextColumn();
                     if (isActive && !subAction.empty())
                         ImGui::TextUnformatted(subAction.c_str());
                     else
                         ImGui::TextColored(COL_DIM, "-");
 
-                    // File column - FULL PATH
+                    // Size column
+                    ImGui::TableNextColumn();
+                    if (isActive && fsize > 0)
+                        ImGui::TextUnformatted(formatSize(fsize).c_str());
+                    else
+                        ImGui::TextColored(COL_DIM, "-");
+
+                    // Elapsed column
+                    ImGui::TableNextColumn();
+                    if (isActive && elapsed > 0)
+                    {
+                        int es = (int)elapsed;
+                        if (es >= 60)
+                            ImGui::TextColored(COL_YELLOW, "%dm%02ds", es / 60, es % 60);
+                        else
+                            ImGui::Text("%ds", es);
+                    }
+                    else
+                    {
+                        ImGui::TextColored(COL_DIM, "-");
+                    }
+
+                    // File column — just the filename, tooltip for full path
                     ImGui::TableNextColumn();
                     if (isActive && !filePath.empty())
                     {
-                        ImGui::TextUnformatted(filePath.c_str());
+                        auto fname = fs::path(filePath).filename().string();
+                        ImGui::TextUnformatted(fname.c_str());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", filePath.c_str());
                     }
                     else
                     {
@@ -1483,35 +1555,165 @@ namespace tt
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.04f, 0.04f, 0.06f, 1.0f));
         ImGui::BeginChild("##Log", ImGui::GetContentRegionAvail(), false);
 
-        std::lock_guard lock(logMtx_);
-        ImGuiListClipper clipper;
-        clipper.Begin((int)log_.size());
-        while (clipper.Step())
+        // ── Log toolbar (filter + level buttons + copy) ─────────────
         {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
-            {
-                const auto &line = log_[i];
-                ImVec4 col = COL_TEXT;
-                if (line.find("[ERROR]") != std::string::npos)
-                    col = COL_RED;
-                else if (line.find("[WARNING]") != std::string::npos)
-                    col = COL_YELLOW;
-                else if (line.find("[OK]") != std::string::npos)
-                    col = COL_GREEN;
-                else if (line.find("[INFO]") != std::string::npos)
-                    col = COL_DIM;
+            float w = ImGui::GetContentRegionAvail().x;
+            ImGui::SetCursorPos({6, 4});
 
-                // Wrap text to avoid horizontal scrolling issues
-                ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-                ImGui::TextColored(col, "%s", line.c_str());
-                ImGui::PopTextWrapPos();
+            // Level filter buttons
+            auto levelBtn = [this](const char *label, int level, ImVec4 col)
+            {
+                bool active = (logLevelFilter_ == level);
+                if (active)
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(col.x * 0.5f, col.y * 0.5f, col.z * 0.5f, 0.8f));
+                else
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {6, 2});
+                if (ImGui::SmallButton(label))
+                    logLevelFilter_ = level;
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor();
+                ImGui::SameLine(0, 4);
+            };
+
+            levelBtn("All",  0, COL_TEXT);
+            levelBtn("Info", 1, COL_DIM);
+            levelBtn("Warn", 2, COL_YELLOW);
+            levelBtn("Err",  3, COL_RED);
+
+            ImGui::SameLine(0, 12);
+            ImGui::SetNextItemWidth(std::min(w * 0.4f, 300.0f));
+            ImGui::InputTextWithHint("##LogFilter", "Filter logs...", logFilter_, sizeof(logFilter_));
+
+            ImGui::SameLine(0, 8);
+
+            // Copy visible logs button
+            if (ImGui::SmallButton("Copy"))
+            {
+                std::string allText;
+                std::lock_guard lock(logMtx_);
+                std::string filterStr(logFilter_);
+                for (auto &c : filterStr)
+                    c = (char)std::tolower((unsigned char)c);
+
+                for (auto &line : log_)
+                {
+                    // Level filter
+                    if (logLevelFilter_ == 1 && line.find("[INFO]") == std::string::npos &&
+                        line.find("[OK]") == std::string::npos &&
+                        line.find("[WARNING]") == std::string::npos &&
+                        line.find("[ERROR]") == std::string::npos)
+                        continue;
+                    if (logLevelFilter_ == 2 && line.find("[WARNING]") == std::string::npos &&
+                        line.find("[ERROR]") == std::string::npos)
+                        continue;
+                    if (logLevelFilter_ == 3 && line.find("[ERROR]") == std::string::npos)
+                        continue;
+
+                    // Text filter
+                    if (!filterStr.empty())
+                    {
+                        std::string lower = line;
+                        for (auto &c : lower)
+                            c = (char)std::tolower((unsigned char)c);
+                        if (lower.find(filterStr) == std::string::npos)
+                            continue;
+                    }
+                    allText += line;
+                    allText += '\n';
+                }
+                if (!allText.empty())
+                    ImGui::SetClipboardText(allText.c_str());
             }
+
+            ImGui::SameLine(0, 8);
+            if (ImGui::SmallButton("Clear"))
+            {
+                std::lock_guard lock(logMtx_);
+                log_.clear();
+            }
+
+            ImGui::SameLine(0, 8);
+            ImGui::Checkbox("Auto-scroll", &autoScroll_);
         }
 
-        // Auto-scroll to bottom when new entries are added
-        // Always scroll to bottom when autoScroll_ is enabled
-        if (autoScroll_)
-            ImGui::SetScrollHereY(1.0f);
+        ImGui::Spacing();
+
+        // ── Log content ─────────────────────────────────────────────
+        ImGui::BeginChild("##LogContent", ImGui::GetContentRegionAvail(), false);
+        {
+            std::lock_guard lock(logMtx_);
+
+            // Build filtered view
+            std::string filterStr(logFilter_);
+            for (auto &c : filterStr)
+                c = (char)std::tolower((unsigned char)c);
+
+            // We need to collect filtered indices for the clipper
+            static thread_local std::vector<int> filteredIdx;
+            filteredIdx.clear();
+            filteredIdx.reserve(log_.size());
+
+            for (int i = 0; i < (int)log_.size(); i++)
+            {
+                auto &line = log_[i];
+
+                // Level filter
+                if (logLevelFilter_ == 1 && line.find("[INFO]") == std::string::npos &&
+                    line.find("[OK]") == std::string::npos &&
+                    line.find("[WARNING]") == std::string::npos &&
+                    line.find("[ERROR]") == std::string::npos)
+                    continue;
+                if (logLevelFilter_ == 2 && line.find("[WARNING]") == std::string::npos &&
+                    line.find("[ERROR]") == std::string::npos)
+                    continue;
+                if (logLevelFilter_ == 3 && line.find("[ERROR]") == std::string::npos)
+                    continue;
+
+                // Text filter
+                if (!filterStr.empty())
+                {
+                    std::string lower = line;
+                    for (auto &c : lower)
+                        c = (char)std::tolower((unsigned char)c);
+                    if (lower.find(filterStr) == std::string::npos)
+                        continue;
+                }
+
+                filteredIdx.push_back(i);
+            }
+
+            ImGuiListClipper clipper;
+            clipper.Begin((int)filteredIdx.size());
+            while (clipper.Step())
+            {
+                for (int fi = clipper.DisplayStart; fi < clipper.DisplayEnd; fi++)
+                {
+                    auto &line = log_[filteredIdx[fi]];
+                    ImVec4 col = COL_TEXT;
+                    if (line.find("[ERROR]") != std::string::npos)
+                        col = COL_RED;
+                    else if (line.find("[WARNING]") != std::string::npos)
+                        col = COL_YELLOW;
+                    else if (line.find("[OK]") != std::string::npos)
+                        col = COL_GREEN;
+                    else if (line.find("[INFO]") != std::string::npos)
+                        col = COL_DIM;
+
+                    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+                    ImGui::TextColored(col, "%s", line.c_str());
+                    ImGui::PopTextWrapPos();
+
+                    // Right-click to copy individual line
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+                        ImGui::SetClipboardText(line.c_str());
+                }
+            }
+
+            if (autoScroll_)
+                ImGui::SetScrollHereY(1.0f);
+        }
+        ImGui::EndChild();
 
         ImGui::EndChild();
         ImGui::PopStyleColor();
@@ -1563,7 +1765,7 @@ namespace tt
             if (ImGui::SliderInt("##Threads", &threads, 1, kMaxThreads))
             {
                 int oldCount = threadCount.exchange(threads);
-                
+
                 // If increasing threads while working, spawn new workers immediately
                 if (working_.load() && threads > oldCount)
                 {
@@ -1574,7 +1776,8 @@ namespace tt
                         if (!threadProgress_[t].active.load())
                         {
                             activeWorkers_.fetch_add(1);
-                            workers_.emplace_back([this, t]() { workerFunc(t); });
+                            workers_.emplace_back([this, t]()
+                                                  { workerFunc(t); });
                             addLog("[INFO] Spawned new worker thread " + std::to_string(t + 1));
                         }
                     }
