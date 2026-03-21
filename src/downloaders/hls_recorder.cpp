@@ -188,7 +188,7 @@ namespace sm
             const int32_t *matrix = nullptr;
             size_t matrixSize = 0;
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 8, 100)
-            // FFmpeg 7+: side_data moved to codecpar->coded_side_data
+            // FFmpeg 7+: side_data moved to codecpar->coded_side_data with new API
             if (stream->codecpar)
             {
                 const AVPacketSideData *sd = av_packet_side_data_get(
@@ -201,8 +201,24 @@ namespace sm
                     matrixSize = sd->size;
                 }
             }
-#elif LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 0, 0)
-            // FFmpeg 5-6: side_data on AVStream directly
+#elif LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(60, 31, 0)
+            // FFmpeg 6.1+: side_data moved to codecpar but with different API
+            // codecpar->coded_side_data exists but av_packet_side_data_get doesn't
+            // We need to iterate manually
+            if (stream->codecpar && stream->codecpar->nb_coded_side_data > 0)
+            {
+                for (int i = 0; i < stream->codecpar->nb_coded_side_data; i++)
+                {
+                    if (stream->codecpar->coded_side_data[i].type == AV_PKT_DATA_DISPLAYMATRIX)
+                    {
+                        matrix = reinterpret_cast<const int32_t *>(stream->codecpar->coded_side_data[i].data);
+                        matrixSize = stream->codecpar->coded_side_data[i].size;
+                        break;
+                    }
+                }
+            }
+#elif LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 0, 0) && LIBAVCODEC_VERSION_INT < AV_VERSION_INT(60, 31, 0)
+            // FFmpeg 5.x - 6.0: side_data on AVStream directly
             for (int i = 0; i < stream->nb_side_data; i++)
             {
                 if (stream->side_data[i].type == AV_PKT_DATA_DISPLAYMATRIX)

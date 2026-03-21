@@ -11,6 +11,7 @@
 #include <deque>
 #include <filesystem>
 #include <chrono>
+#include <array>
 
 namespace tt
 {
@@ -22,10 +23,24 @@ namespace tt
         Other = 2,   // .mp4 / .ts / etc — needs remux to MKV
     };
 
+    // Per-thread progress tracking
+    struct ThreadProgress
+    {
+        std::atomic<bool> active{false};
+        std::string filePath;
+        std::string action;    // "Remuxing", "Generating", "Embedding", "VR Metadata", etc.
+        std::string subAction; // more detail like frame count, percentage
+        std::mutex mtx;
+    };
+
+    // Max threads for progress tracking
+    constexpr int kMaxThreads = 32;
+
     // Tab filter for the status pages
     enum class StatusTab : int
     {
         All = 0,
+        InProgress, // NEW: shows what each thread is currently processing
         Pending,
         Done,
         Failed,
@@ -74,7 +89,7 @@ namespace tt
         void startScan();  // launches scanWorker on background thread
         void scanWorker(); // actual scan logic (runs off GUI thread)
         void startGeneration();
-        void workerFunc();
+        void workerFunc(int threadIdx);
         void addLog(const std::string &line);
 
         // Config persistence
@@ -122,10 +137,15 @@ namespace tt
         std::atomic<int> activeWorkers_{0};
         std::atomic<int64_t> bytesProcessed_{0}; // bytes of completed files (for ETA)
         std::atomic<int64_t> totalBytes_{0};     // total bytes to process
+        std::atomic<int> lastThreadCount_{0};    // track thread count changes
+        std::mutex workerMutex_;                 // protect worker spawning
 
         std::string currentFile_;
         std::mutex currentFileMutex_;
         std::chrono::steady_clock::time_point startTime_;
+
+        // Per-thread progress tracking (array for lock-free access by thread index)
+        std::array<ThreadProgress, kMaxThreads> threadProgress_;
 
         // ETA rolling window (accessed only from render thread)
         int64_t etaLastBytes_ = 0;

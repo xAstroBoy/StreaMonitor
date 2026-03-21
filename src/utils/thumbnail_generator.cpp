@@ -1099,7 +1099,7 @@ namespace sm
             }
 
             if (log)
-                log("remux: converted to real Matroska: " + fs::path(path).filename().string());
+                log("remux: converted to real Matroska: " + path);
             return true;
         }
 
@@ -1538,7 +1538,7 @@ namespace sm
             }
 
             if (logCb)
-                logCb("remux: created " + mkvPath.filename().string() + " (stream copy)");
+                logCb("remux: created " + mkvStr + " (stream copy)");
             return mkvStr;
         }
     }
@@ -1711,7 +1711,7 @@ namespace sm
                                                                            " --add-attachment \"" +
                                       jpegPath + "\"";
 
-                log("thumbnail: embedding in " + fs::path(mkvPath).filename().string() + "...");
+                log("thumbnail: embedding in " + mkvPath + "...");
 
                 int ret;
 #ifdef _WIN32
@@ -1726,7 +1726,7 @@ namespace sm
                 if (ret == 0)
                 {
                     log("thumbnail: embedded cover art in " +
-                        fs::path(mkvPath).filename().string());
+                        mkvPath);
                 }
                 else
                 {
@@ -1780,11 +1780,11 @@ namespace sm
         // Use mkvpropedit to update attachment 1 (typically the cover)
         // Set name to "cover.jpg" and description to "cover" for DLNA compatibility
         std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
-                              " --attachment-name cover.jpg"
-                              " --attachment-description cover"
-                              " --update-attachment 1";
+                                                                   " --attachment-name cover.jpg"
+                                                                   " --attachment-description cover"
+                                                                   " --update-attachment 1";
 
-        log("fix-cover: updating attachment metadata in " + fs::path(mkvPath).filename().string());
+        log("fix-cover: updating attachment metadata in " + mkvPath);
 
         int ret;
 #ifdef _WIN32

@@ -255,13 +255,6 @@ namespace tt
             ve.relDisplay = fs::relative(entry.path(), root).string();
             ve.hasThumb = fs::exists(ve.thumbPath);
 
-            // TWO-PHASE SCAN: Do NOT call hasCoverArt() here!
-            // Phase 1 (scan) = fast filesystem walk only: check .jpg existence + EBML magic.
-            // Phase 2 (worker) = hasCoverArt() is called lazily before thumbnail generation.
-            // This keeps scan nearly instant even for 2000+ files.
-            ve.hasCoverEmbed = false;
-            ve.coverProbed = false;
-
             // Verify actual container type — don't trust the extension!
             auto ext = entry.path().extension().string();
             for (auto &c : ext)
@@ -277,6 +270,19 @@ namespace tt
                 ve.container = ContainerType::Other;
             }
 
+            // For Real MKV files, check if cover art is already embedded
+            // This is fast (metadata only) and needed to detect already-processed files
+            if (ve.container == ContainerType::RealMKV)
+            {
+                ve.hasCoverEmbed = sm::hasCoverArt(entry.path().string());
+                ve.coverProbed = true;
+            }
+            else
+            {
+                ve.hasCoverEmbed = false;
+                ve.coverProbed = false;
+            }
+
             // Collect file size (fast — cached in directory entry on Windows)
             try
             {
@@ -288,7 +294,8 @@ namespace tt
             }
 
             count++;
-            if (ve.hasThumb)
+            // Count as "with thumbnail" if sidecar .jpg exists OR cover is embedded in MKV
+            if (ve.hasThumb || ve.hasCoverEmbed)
                 wThumb++;
             else
                 woThumb++;
@@ -357,7 +364,7 @@ namespace tt
             return;
         }
 
-        int numThreads = std::clamp(threadCount.load(), 1, 64);
+        int numThreads = std::clamp(threadCount.load(), 1, kMaxThreads);
         addLog("[INFO] Processing " + std::to_string(count) +
                " videos with " + std::to_string(numThreads) + " threads...");
 
@@ -365,15 +372,29 @@ namespace tt
         startTime_ = std::chrono::steady_clock::now();
         etaLastTime_ = startTime_;
 
-        // Launch worker threads
+        // Clear thread progress
+        for (int i = 0; i < kMaxThreads; i++)
+        {
+            threadProgress_[i].active.store(false);
+            std::lock_guard lock(threadProgress_[i].mtx);
+            threadProgress_[i].filePath.clear();
+            threadProgress_[i].action.clear();
+            threadProgress_[i].subAction.clear();
+        }
+
+        // Launch worker threads with their thread index
         activeWorkers_.store(numThreads);
-        workers_.clear();
-        for (int t = 0; t < numThreads; t++)
-            workers_.emplace_back([this]()
-                                  { workerFunc(); });
+        lastThreadCount_.store(numThreads);
+        {
+            std::lock_guard lock(workerMutex_);
+            workers_.clear();
+            for (int t = 0; t < numThreads; t++)
+                workers_.emplace_back([this, t]()
+                                      { workerFunc(t); });
+        }
     }
 
-    void App::workerFunc()
+    void App::workerFunc(int threadIdx)
     {
         // Build sorted work queue: ALL unprocessed, sorted by file size ascending (smallest first)
         std::vector<std::pair<int64_t, size_t>> sizeIdx;
@@ -392,6 +413,18 @@ namespace tt
         for (auto &[sz, idx] : sizeIdx)
             indices.push_back(idx);
 
+        // Helper to update thread progress
+        auto setProgress = [this, threadIdx](const std::string &file, const std::string &action, const std::string &sub = "")
+        {
+            std::lock_guard lock(threadProgress_[threadIdx].mtx);
+            threadProgress_[threadIdx].filePath = file;
+            threadProgress_[threadIdx].action = action;
+            threadProgress_[threadIdx].subAction = sub;
+        };
+
+        // Mark thread as active
+        threadProgress_[threadIdx].active.store(true);
+
         // ═══════════════════════════════════════════════════════════════
         // PIPELINE PER VIDEO:
         //   1. Not MKV? → Remux to .mkv  (stream copy, fixes ALL playback)
@@ -401,8 +434,26 @@ namespace tt
         //   4. Embed cover art in MKV (if not already embedded)
         //   5. Is VR? → Has fisheye 180° SBS metadata? → No → Inject it!
         // ═══════════════════════════════════════════════════════════════
-        while (!cancelWork_.load())
+
+        // Helper to check cancel and exit early
+        auto shouldCancel = [this]()
+        { return cancelWork_.load(); };
+
+        // Helper to check if this thread should exit (thread count reduced)
+        auto shouldExitThread = [this, threadIdx]()
         {
+            return threadIdx >= threadCount.load();
+        };
+
+        while (!shouldCancel())
+        {
+            // Check if thread count was reduced - if so, exit gracefully BETWEEN files
+            if (shouldExitThread())
+            {
+                addLog("[INFO] Thread " + std::to_string(threadIdx + 1) + " exiting (thread count reduced)");
+                break;
+            }
+
             int myIdx = nextIdx_.fetch_add(1);
             if (myIdx >= (int)indices.size())
                 break;
@@ -429,15 +480,18 @@ namespace tt
             }
             origVideoStr = videoStr; // keep original path for VR folder detection
 
+            // Update thread progress
+            setProgress(videoStr, "Starting", formatSize(fsize));
+
             {
                 std::lock_guard lock(currentFileMutex_);
-                currentFile_ = fs::path(videoStr).filename().string();
+                currentFile_ = videoStr;
             }
 
             auto logCb = [this](const std::string &msg)
             { addLog("  " + msg); };
 
-            addLog("[INFO] Processing: " + fs::path(videoStr).filename().string() +
+            addLog("[INFO] Processing: " + videoStr +
                    " (" + formatSize(fsize) + ")");
 
             bool tsFixed = false;
@@ -447,9 +501,12 @@ namespace tt
             // Not MKV? → Remux automatically to .mkv (stream copy, fixes ALL playback)
             // Fake MKV (MP4 inside)? → Remux in-place (stream copy, fixes ALL playback)
             // Real MKV? → Already good, continue to timestamp check
+            if (shouldCancel())
+                break; // Early exit check
             if (origContainer != ContainerType::RealMKV)
             {
-                addLog("[INFO] Remuxing to MKV: " + fs::path(videoStr).filename().string());
+                setProgress(videoStr, "Remuxing", "Converting to MKV...");
+                addLog("[INFO] Remuxing to MKV: " + videoStr);
                 std::string mkvPath = sm::ensureRealMKV(videoStr, logCb);
                 if (mkvPath.empty())
                 {
@@ -471,7 +528,7 @@ namespace tt
                         videos_[idx].errorMsg = "Remux failed";
                     }
                     errors_.fetch_add(1);
-                    addLog("[ERROR] " + fs::path(videoStr).filename().string() +
+                    addLog("[ERROR] " + videoStr +
                            " — remux failed, cleaned up temp files");
                     processedCount_.fetch_add(1);
                     bytesProcessed_.fetch_add(fsize);
@@ -480,6 +537,7 @@ namespace tt
                 wasRemuxed = true;
                 tsFixed = true; // remux inherently fixes timestamps (DTS/PTS normalised)
                 remuxedCount_.fetch_add(1);
+                setProgress(videoStr, "Remuxed", "Done");
 
                 // Update paths if extension changed (e.g. .mp4 → .mkv)
                 if (mkvPath != videoStr)
@@ -503,12 +561,16 @@ namespace tt
 
             // ── STEP 2: Is MKV → Timestamps/frames broken? → Remux ─────
             // Only check if we didn't just remux (fresh remux = already fixed)
+            if (shouldCancel())
+                break; // Early exit check
             if (!wasRemuxed)
             {
+                setProgress(videoStr, "Checking", "Analyzing timestamps...");
                 if (sm::hasTimestampIssues(videoStr, logCb))
                 {
+                    setProgress(videoStr, "Fixing TS", "Remuxing to fix timestamps...");
                     addLog("[INFO] Timestamps broken → remuxing to fix: " +
-                           fs::path(videoStr).filename().string());
+                           videoStr);
                     if (sm::fixTimestamps(videoStr, logCb))
                     {
                         tsFixed = true;
@@ -517,15 +579,18 @@ namespace tt
                     }
                     else
                     {
-                        addLog("[WARNING] TS fix failed: " + fs::path(videoStr).filename().string());
+                        addLog("[WARNING] TS fix failed: " + videoStr);
                     }
                 }
             }
 
             // ── STEP 3: Has thumbnail? → No → Generate it! ─────────────
             // Check embedded cover art first (deferred probe)
+            if (shouldCancel())
+                break; // Early exit check
             if (!alreadyHasJpg)
             {
+                setProgress(videoStr, "Probing", "Checking for cover art...");
                 bool probed = false;
                 {
                     std::lock_guard lock(videosMutex_);
@@ -542,7 +607,7 @@ namespace tt
                         videos_[idx].hasThumb = true;
                         alreadyHasJpg = true;
                         addLog("[INFO] Already has cover art: " +
-                               fs::path(videoStr).filename().string());
+                               videoStr);
                     }
                 }
             }
@@ -551,7 +616,8 @@ namespace tt
             bool genOk = alreadyHasJpg;
             if (!alreadyHasJpg)
             {
-                addLog("[INFO] Generating thumbnail: " + fs::path(videoStr).filename().string());
+                setProgress(videoStr, "Generating", "Creating contact sheet...");
+                addLog("[INFO] Generating thumbnail: " + videoStr);
                 genOk = sm::generateContactSheet(videoStr, thumbStr, tc, logCb);
             }
 
@@ -571,17 +637,21 @@ namespace tt
                     videos_[idx].errorMsg = "Thumbnail generation failed";
                     errors_.fetch_add(1);
                     anyError = true;
-                    addLog("[ERROR] Thumbnail failed: " + fs::path(videoStr).filename().string());
+                    addLog("[ERROR] Thumbnail failed: " + videoStr);
                 }
             }
 
             // ── STEP 4: Embed cover art + clean up external .jpg ────────
+            if (shouldCancel())
+                break; // Early exit check
             if (genOk && doEmbed && !anyError)
             {
+                setProgress(videoStr, "Embedding", "Checking cover art...");
                 bool wasEmbedded = sm::hasCoverArt(videoStr);
                 if (!wasEmbedded && fs::exists(thumbStr))
                 {
-                    addLog("[INFO] Embedding cover art: " + fs::path(videoStr).filename().string());
+                    setProgress(videoStr, "Embedding", "Adding cover to MKV...");
+                    addLog("[INFO] Embedding cover art: " + videoStr);
                     if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb))
                     {
                         embeddedCount_.fetch_add(1);
@@ -590,6 +660,7 @@ namespace tt
                 }
                 else if (wasEmbedded)
                 {
+                    setProgress(videoStr, "Fix Meta", "Updating DLNA metadata...");
                     // Fix existing cover attachment metadata for DLNA compatibility
                     sm::fixCoverAttachmentMetadata(videoStr, logCb);
                 }
@@ -604,15 +675,19 @@ namespace tt
             }
 
             // ── STEP 5: Is VR? → Has 180° SBS metadata? → Set it! ──────
+            if (shouldCancel())
+                break; // Early exit check
             if (sm::isVRFromPath(origVideoStr))
             {
+                setProgress(videoStr, "VR Meta", "Injecting spatial metadata...");
                 addLog("[INFO] VR content → ensuring fisheye 180° SBS metadata: " +
-                       fs::path(videoStr).filename().string());
+                       videoStr);
                 if (sm::injectVRSpatialMetadata(videoStr, logCb))
                     vrCount_.fetch_add(1);
             }
 
             // Mark processed
+            setProgress(videoStr, "Done", "");
             {
                 std::lock_guard lock(videosMutex_);
                 videos_[idx].processed = true;
@@ -620,6 +695,15 @@ namespace tt
 
             processedCount_.fetch_add(1);
             bytesProcessed_.fetch_add(fsize);
+        }
+
+        // Mark this thread as inactive
+        threadProgress_[threadIdx].active.store(false);
+        {
+            std::lock_guard lock(threadProgress_[threadIdx].mtx);
+            threadProgress_[threadIdx].filePath.clear();
+            threadProgress_[threadIdx].action.clear();
+            threadProgress_[threadIdx].subAction.clear();
         }
 
         // Last worker to exit handles completion/cleanup
@@ -753,15 +837,35 @@ namespace tt
                 ImGui::TextColored(COL_YELLOW, "Scanning... %d files found", scanProgress_.load());
             }
 
+            // Right-aligned controls: STOP (when working), Hide Done, Settings
+            // Calculate right side width dynamically
+            float rightControlsWidth = 0;
+            float stopBtnW = 70;
+            float hideDoneW = ImGui::CalcTextSize("Hide Done").x + 30; // checkbox + padding
+            float settingsBtnW = 90;
+            float spacing = 12;
+
+            if (isWorking)
+                rightControlsWidth = stopBtnW + spacing + hideDoneW + spacing + settingsBtnW + 24;
+            else
+                rightControlsWidth = hideDoneW + spacing + settingsBtnW + 24;
+
+            // Progress info (left side, after scan status)
             if (isWorking)
             {
                 ImGui::SameLine();
                 int done = processedCount_.load();
                 int total = totalToProcess_.load();
                 float frac = total > 0 ? (float)done / total : 0.0f;
-                ImGui::SetNextItemWidth(120);
-                ImGui::ProgressBar(frac, {120, 0}, "");
-                ImGui::SameLine();
+
+                // Compact progress display
+                float availForProgress = w - ImGui::GetCursorPosX() - rightControlsWidth - 20;
+                if (availForProgress > 300)
+                {
+                    ImGui::SetNextItemWidth(100);
+                    ImGui::ProgressBar(frac, {100, 0}, "");
+                    ImGui::SameLine();
+                }
                 ImGui::TextColored(COL_YELLOW, "%d/%d", done, total);
 
                 // ETA calculation (rolling window for stable estimates)
@@ -800,32 +904,41 @@ namespace tt
                             ImGui::TextColored(COL_DIM, "ETA %dm%02ds", etaM, etaS);
                         else
                             ImGui::TextColored(COL_DIM, "ETA %ds", etaS);
-                        ImGui::SameLine();
-                        ImGui::TextColored(COL_DIM, "(%s/%s @ %s/s)",
-                                           formatSize(doneBytes).c_str(),
-                                           formatSize(totalB).c_str(),
-                                           formatSize((int64_t)bps).c_str());
+
+                        // Only show size info if there's enough space
+                        if (availForProgress > 500)
+                        {
+                            ImGui::SameLine();
+                            ImGui::TextColored(COL_DIM, "(%s/%s)",
+                                               formatSize(doneBytes).c_str(),
+                                               formatSize(totalB).c_str());
+                        }
                     }
                     else
                     {
                         ImGui::TextColored(COL_DIM, "ETA ...");
                     }
                 }
+            }
 
-                ImGui::SameLine();
+            // Right-aligned section
+            ImGui::SameLine(w - rightControlsWidth);
+
+            if (isWorking)
+            {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
-                if (ImGui::Button("STOP", {60, 0}))
+                if (ImGui::Button("STOP", {stopBtnW, 0}))
                     cancelWork_.store(true);
                 ImGui::PopStyleColor(3);
+                ImGui::SameLine(0, spacing);
             }
 
-            ImGui::SameLine(w - 250);
             ImGui::Checkbox("Hide Done", &hideFinished_);
+            ImGui::SameLine(0, spacing);
 
-            ImGui::SameLine(w - 100);
-            if (ImGui::Button("Settings", {90, 0}))
+            if (ImGui::Button("Settings", {settingsBtnW, 0}))
                 showSettings_ = !showSettings_;
 
             ImGui::EndChild();
@@ -1028,6 +1141,7 @@ namespace tt
         {
             // Count items per category for badge display
             int countAll = 0, countPending = 0, countDone = 0, countFailed = 0;
+            int countInProgress = activeWorkers_.load();
             {
                 std::lock_guard lock(videosMutex_);
                 for (auto &v : videos_)
@@ -1048,6 +1162,14 @@ namespace tt
             if (ImGui::BeginTabItem(tabLabel))
             {
                 currentTab_ = StatusTab::All;
+                ImGui::EndTabItem();
+            }
+
+            // In Progress tab - show what workers are doing
+            snprintf(tabLabel, sizeof(tabLabel), " In Progress (%d) ###TabInProgress", countInProgress);
+            if (ImGui::BeginTabItem(tabLabel))
+            {
+                currentTab_ = StatusTab::InProgress;
                 ImGui::EndTabItem();
             }
 
@@ -1073,6 +1195,85 @@ namespace tt
             }
 
             ImGui::EndTabBar();
+        }
+
+        // ── "In Progress" tab shows thread activity ─────────────────
+        if (currentTab_ == StatusTab::InProgress)
+        {
+            int numThreads = threadCount.load();
+            
+            ImGuiTableFlags tFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                     ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+
+            if (ImGui::BeginTable("##InProgressTable", 4, tFlags, ImGui::GetContentRegionAvail()))
+            {
+                ImGui::TableSetupColumn("Thread", ImGuiTableColumnFlags_WidthFixed, 60);
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 120);
+                ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 180);
+                ImGui::TableSetupColumn("File (Full Path)", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+
+                for (int t = 0; t < numThreads && t < kMaxThreads; t++)
+                {
+                    bool isActive = threadProgress_[t].active.load();
+                    std::string filePath, action, subAction;
+                    
+                    {
+                        std::lock_guard lock(threadProgress_[t].mtx);
+                        filePath = threadProgress_[t].filePath;
+                        action = threadProgress_[t].action;
+                        subAction = threadProgress_[t].subAction;
+                    }
+
+                    ImGui::TableNextRow();
+                    
+                    // Thread column
+                    ImGui::TableNextColumn();
+                    if (isActive)
+                        ImGui::TextColored(COL_GREEN, "Thread %d", t + 1);
+                    else
+                        ImGui::TextColored(COL_DIM, "Thread %d", t + 1);
+
+                    // Action column
+                    ImGui::TableNextColumn();
+                    if (isActive && !action.empty())
+                    {
+                        ImVec4 actionColor = COL_TEXT;
+                        if (action == "Remuxing") actionColor = COL_YELLOW;
+                        else if (action == "Generating") actionColor = COL_ACCENT;
+                        else if (action == "Embedding") actionColor = COL_GREEN;
+                        else if (action == "VR Meta") actionColor = ImVec4(0.7f, 0.5f, 1.0f, 1.0f);
+                        else if (action == "Probing") actionColor = COL_DIM;
+                        else if (action == "Done") actionColor = COL_GREEN;
+                        ImGui::TextColored(actionColor, "%s", action.c_str());
+                    }
+                    else
+                    {
+                        ImGui::TextColored(COL_DIM, "Idle");
+                    }
+
+                    // Status column
+                    ImGui::TableNextColumn();
+                    if (isActive && !subAction.empty())
+                        ImGui::TextUnformatted(subAction.c_str());
+                    else
+                        ImGui::TextColored(COL_DIM, "-");
+
+                    // File column - FULL PATH
+                    ImGui::TableNextColumn();
+                    if (isActive && !filePath.empty())
+                    {
+                        ImGui::TextUnformatted(filePath.c_str());
+                    }
+                    else
+                    {
+                        ImGui::TextColored(COL_DIM, "Waiting for work...");
+                    }
+                }
+
+                ImGui::EndTable();
+            }
+            return; // Don't render main file table for In Progress tab
         }
 
         // Snapshot under lock — COPY strings to avoid dangling pointers
@@ -1112,8 +1313,9 @@ namespace tt
             {
                 // Tab-based filtering
                 bool isFailed = v.failed;
+                // Done = processed this session OR (Real MKV with thumbnail/cover embedded)
                 bool isDone = !v.failed && (v.processed ||
-                                            (v.hasThumb && v.container == ContainerType::RealMKV));
+                                            (v.container == ContainerType::RealMKV && (v.hasThumb || v.hasCoverEmbed)));
                 bool isPending = !isFailed && !isDone;
 
                 switch (currentTab_)
@@ -1264,8 +1466,8 @@ namespace tt
                         if (r.tsFixed)
                             DrawBadge("TS Fixed", IM_COL32(60, 130, 200, 255));
                     }
-                    else if (r.hasThumb && r.container == ContainerType::RealMKV)
-                        DrawBadge("Skipped", COL_BADGE_SKIP);
+                    else if (r.container == ContainerType::RealMKV && (r.hasThumb || r.hasCoverEmbed))
+                        DrawBadge("Done", COL_BADGE_OK); // Already has thumbnail - done from previous run
                     else
                         DrawBadge("Pending", COL_BADGE_PEND);
                 }
@@ -1299,11 +1501,16 @@ namespace tt
                 else if (line.find("[INFO]") != std::string::npos)
                     col = COL_DIM;
 
+                // Wrap text to avoid horizontal scrolling issues
+                ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
                 ImGui::TextColored(col, "%s", line.c_str());
+                ImGui::PopTextWrapPos();
             }
         }
 
-        if (autoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20)
+        // Auto-scroll to bottom when new entries are added
+        // Always scroll to bottom when autoScroll_ is enabled
+        if (autoScroll_)
             ImGui::SetScrollHereY(1.0f);
 
         ImGui::EndChild();
@@ -1353,14 +1560,34 @@ namespace tt
 
             ImGui::Text("Worker Threads");
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::SliderInt("##Threads", &threads, 1, 64))
-                threadCount.store(threads);
+            if (ImGui::SliderInt("##Threads", &threads, 1, kMaxThreads))
+            {
+                int oldCount = threadCount.exchange(threads);
+                
+                // If increasing threads while working, spawn new workers immediately
+                if (working_.load() && threads > oldCount)
+                {
+                    std::lock_guard lock(workerMutex_);
+                    for (int t = oldCount; t < threads && t < kMaxThreads; t++)
+                    {
+                        // Only spawn if this slot isn't already active
+                        if (!threadProgress_[t].active.load())
+                        {
+                            activeWorkers_.fetch_add(1);
+                            workers_.emplace_back([this, t]() { workerFunc(t); });
+                            addLog("[INFO] Spawned new worker thread " + std::to_string(t + 1));
+                        }
+                    }
+                }
+            }
 
             // Show note that changes apply immediately
             if (working_.load())
             {
                 ImGui::Spacing();
-                ImGui::TextColored(COL_GREEN, "Settings apply IMMEDIATELY to pending files!");
+                ImGui::TextColored(COL_GREEN, "Thread changes apply IMMEDIATELY!");
+                ImGui::TextColored(COL_DIM, "Increase: new workers spawn instantly");
+                ImGui::TextColored(COL_DIM, "Decrease: workers finish current file then exit");
             }
 
             ImGui::Spacing();
