@@ -617,6 +617,11 @@ namespace sm
         std::strncpy(editFilenameFormat_, config.filenameFormat.c_str(), sizeof(editFilenameFormat_) - 1);
         editAutoRemoveNonExistent_ = config.autoRemoveNonExistent;
 
+        // Recording mode
+        editRecordingMode_ = config.recordingMode;
+        editChunkSizeMB_ = config.chunkSizeMB;
+        editChunkDurationMin_ = config.chunkDurationMin;
+
         // Log level init
         if (config.logLevel == "debug")
             editLogLevel_ = 0;
@@ -678,6 +683,23 @@ namespace sm
                 editProxyType_ = 0;
                 break;
             }
+        }
+
+        // Build batch proxy text from all proxies
+        {
+            std::string batchText;
+            const char *typeNames[] = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"};
+            for (const auto &p : config.proxies)
+            {
+                int ti = static_cast<int>(p.type);
+                if (ti < 0 || ti > 5)
+                    ti = 0;
+                batchText += typeNames[ti];
+                batchText += "://";
+                batchText += p.url;
+                batchText += "\n";
+            }
+            std::strncpy(editProxyBatch_, batchText.c_str(), sizeof(editProxyBatch_) - 1);
         }
 
         // Initialize encoding config edit state from config
@@ -750,6 +772,10 @@ namespace sm
         // System tray / behavior settings
         editMinimizeToTray_ = config.minimizeToTray;
         editEnablePreviewCapture_ = config.enablePreviewCapture;
+        editThumbnailEnabled_ = config.thumbnailEnabled;
+        editThumbnailWidth_ = config.thumbnailWidth;
+        editThumbnailColumns_ = config.thumbnailColumns;
+        editThumbnailRows_ = config.thumbnailRows;
 #ifdef _WIN32
         editAutoStart_ = SystemTray::isAutoStartEnabled();
 #endif
@@ -3352,6 +3378,11 @@ namespace sm
             config_.filenameFormat = editFilenameFormat_;
             config_.autoRemoveNonExistent = editAutoRemoveNonExistent_;
 
+            // Recording mode & chunking
+            config_.recordingMode = editRecordingMode_;
+            config_.chunkSizeMB = editChunkSizeMB_;
+            config_.chunkDurationMin = editChunkDurationMin_;
+
             // Log level
             {
                 const char *levelStrs[] = {"debug", "info", "warn", "error"};
@@ -3386,35 +3417,56 @@ namespace sm
                 break;
             }
 
-            // Proxy settings
+            // Proxy settings — parse batch proxy text
             config_.proxyEnabled = editProxyEnabled_;
-
-            // Map proxy type index to ProxyType enum
-            const ProxyType types[] = {ProxyType::HTTP, ProxyType::HTTPS, ProxyType::SOCKS4,
-                                       ProxyType::SOCKS4A, ProxyType::SOCKS5, ProxyType::SOCKS5H};
-            ProxyType selectedType = (editProxyType_ >= 0 && editProxyType_ < 6)
-                                         ? types[editProxyType_]
-                                         : ProxyType::None;
-
-            // Update or create proxy entry
-            std::string proxyUrlStr(editProxyUrl_);
-            if (!proxyUrlStr.empty())
             {
-                if (config_.proxies.empty())
+                config_.proxies.clear();
+                std::istringstream ss(editProxyBatch_);
+                std::string line;
+                while (std::getline(ss, line))
                 {
-                    // Create new proxy entry
+                    // Trim whitespace
+                    while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
+                        line.erase(line.begin());
+                    while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r'))
+                        line.pop_back();
+                    if (line.empty() || line[0] == '#')
+                        continue; // skip empty and comment lines
+
                     ProxyEntry entry;
-                    entry.url = proxyUrlStr;
-                    entry.type = selectedType;
                     entry.enabled = true;
                     entry.rolling = false;
-                    config_.proxies.push_back(entry);
-                }
-                else
-                {
-                    // Update first proxy entry
-                    config_.proxies[0].url = proxyUrlStr;
-                    config_.proxies[0].type = selectedType;
+                    entry.type = ProxyType::HTTP; // default
+
+                    // Detect scheme prefix
+                    auto schemeEnd = line.find("://");
+                    if (schemeEnd != std::string::npos)
+                    {
+                        std::string scheme = line.substr(0, schemeEnd);
+                        // lowercase
+                        for (auto &c : scheme)
+                            c = static_cast<char>(std::tolower(c));
+                        if (scheme == "https")
+                            entry.type = ProxyType::HTTPS;
+                        else if (scheme == "socks4")
+                            entry.type = ProxyType::SOCKS4;
+                        else if (scheme == "socks4a")
+                            entry.type = ProxyType::SOCKS4A;
+                        else if (scheme == "socks5")
+                            entry.type = ProxyType::SOCKS5;
+                        else if (scheme == "socks5h")
+                            entry.type = ProxyType::SOCKS5H;
+                        else
+                            entry.type = ProxyType::HTTP;
+                        entry.url = line.substr(schemeEnd + 3);
+                    }
+                    else
+                    {
+                        entry.url = line;
+                    }
+
+                    if (!entry.url.empty())
+                        config_.proxies.push_back(entry);
                 }
             }
 
@@ -3463,6 +3515,10 @@ namespace sm
             config_.minimizeToTray = editMinimizeToTray_;
             config_.autoStartOnLogin = editAutoStart_;
             config_.enablePreviewCapture = editEnablePreviewCapture_;
+            config_.thumbnailEnabled = editThumbnailEnabled_;
+            config_.thumbnailWidth = editThumbnailWidth_;
+            config_.thumbnailColumns = editThumbnailColumns_;
+            config_.thumbnailRows = editThumbnailRows_;
 #ifdef _WIN32
             SystemTray::setAutoStart(editAutoStart_);
 #endif
@@ -3581,6 +3637,41 @@ namespace sm
         ImGui::TextColored(COL_TEXT_DIM, "Tokens: {n} = sequential number, {model} = username");
         ImGui::TextColored(COL_TEXT_DIM, "{site} = site slug, {date} = YYYYMMDD, {time} = HHMMSS");
         ImGui::TextColored(COL_TEXT_DIM, "{datetime} = YYYYMMDD_HHMMSS");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // ── Recording Mode ─────────────────────────────────────────
+        ImGui::TextColored(COL_ACCENT, "Recording Mode");
+        ImGui::Spacing();
+        const char *recordModes[] = {"Continuous (single file)", "Chunked by File Size", "Chunked by Duration"};
+        if (ImGui::Combo("##RecordingMode", &editRecordingMode_, recordModes, IM_ARRAYSIZE(recordModes)))
+            editDirtyFlag_ = true;
+
+        if (editRecordingMode_ == 1)
+        {
+            // Chunked by size
+            ImGui::Spacing();
+            ImGui::Text("Max File Size (MB)");
+            if (ImGui::SliderInt("##ChunkSizeMB", &editChunkSizeMB_, 50, 10000, "%d MB"))
+                editDirtyFlag_ = true;
+            ImGui::TextColored(COL_TEXT_DIM, "Each recording file will be split at ~%d MB", editChunkSizeMB_);
+        }
+        else if (editRecordingMode_ == 2)
+        {
+            // Chunked by duration
+            ImGui::Spacing();
+            ImGui::Text("Max File Duration (minutes)");
+            if (ImGui::SliderInt("##ChunkDurationMin", &editChunkDurationMin_, 1, 1440, "%d min"))
+                editDirtyFlag_ = true;
+            int hrs = editChunkDurationMin_ / 60;
+            int mins = editChunkDurationMin_ % 60;
+            if (hrs > 0)
+                ImGui::TextColored(COL_TEXT_DIM, "Each file will be ~%dh %dmin long", hrs, mins);
+            else
+                ImGui::TextColored(COL_TEXT_DIM, "Each file will be ~%d min long", mins);
+        }
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -3848,16 +3939,33 @@ namespace sm
 
         if (editProxyEnabled_)
         {
-            ImGui::Text("Proxy Type");
-            const char *proxyTypes[] = {"HTTP", "HTTPS", "SOCKS4", "SOCKS4A", "SOCKS5", "SOCKS5H (remote DNS)"};
-            if (ImGui::Combo("##ProxyType", &editProxyType_, proxyTypes, IM_ARRAYSIZE(proxyTypes)))
+            ImGui::Spacing();
+            ImGui::Text("Proxy List (one per line)");
+            ImGui::TextColored(COL_TEXT_DIM, "Format: type://host:port  or  type://user:pass@host:port");
+            ImGui::TextColored(COL_TEXT_DIM, "Supported types: http, https, socks4, socks4a, socks5, socks5h");
+            ImGui::TextColored(COL_TEXT_DIM, "Lines starting with # are comments. Plain host:port defaults to HTTP.");
+            ImGui::Spacing();
+            if (ImGui::InputTextMultiline("##ProxyBatch", editProxyBatch_,
+                                          sizeof(editProxyBatch_),
+                                          ImVec2(-1, 120 * dpiScale_)))
                 editDirtyFlag_ = true;
 
-            ImGui::Text("Proxy URL");
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputText("##ProxyUrl", editProxyUrl_, sizeof(editProxyUrl_)))
-                editDirtyFlag_ = true;
-            ImGui::TextColored(COL_TEXT_DIM, "Format: host:port  or  user:pass@host:port");
+            // Show parsed proxy count
+            {
+                int count = 0;
+                std::istringstream ss(editProxyBatch_);
+                std::string line;
+                while (std::getline(ss, line))
+                {
+                    while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
+                        line.erase(line.begin());
+                    while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r'))
+                        line.pop_back();
+                    if (!line.empty() && line[0] != '#')
+                        ++count;
+                }
+                ImGui::TextColored(COL_TEXT_DIM, "%d proxy/proxies will be used (round-robin)", count);
+            }
             ImGui::TextColored(COL_TEXT_DIM, "Environment: STRMNTR_PROXY (e.g. socks5://127.0.0.1:9050)");
         }
     }
@@ -4031,6 +4139,36 @@ namespace sm
         ImGui::Separator();
         ImGui::Spacing();
 
+        ImGui::TextColored(COL_ACCENT, "Thumbnail Contact Sheet");
+        ImGui::Spacing();
+
+        if (ImGui::Checkbox("Generate thumbnail after recording", &editThumbnailEnabled_))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "Creates a JPEG contact sheet with a grid of video frames.");
+        ImGui::TextColored(COL_TEXT_DIM, "Saved next to the recording (e.g., video.thumb.jpg).");
+
+        if (editThumbnailEnabled_)
+        {
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::InputInt("Image Width (px)", &editThumbnailWidth_, 0, 0))
+                editDirtyFlag_ = true;
+            editThumbnailWidth_ = std::clamp(editThumbnailWidth_, 640, 3840);
+
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::InputInt("Columns", &editThumbnailColumns_, 0, 0))
+                editDirtyFlag_ = true;
+            editThumbnailColumns_ = std::clamp(editThumbnailColumns_, 2, 10);
+
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::InputInt("Rows", &editThumbnailRows_, 0, 0))
+                editDirtyFlag_ = true;
+            editThumbnailRows_ = std::clamp(editThumbnailRows_, 2, 10);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
         ImGui::Text("Logging");
         const char *levels[] = {"Debug", "Info", "Warning", "Error"};
         if (ImGui::Combo("Log Level", &editLogLevel_, levels, IM_ARRAYSIZE(levels)))
@@ -4074,15 +4212,50 @@ namespace sm
     void GuiApp::renderSettingsSites()
     {
         ImGui::Spacing();
-        ImGui::TextColored(COL_ACCENT, "Registered Sites");
+
+        // ── Per-Site Options ────────────────────────────────────────
+        ImGui::TextColored(COL_ACCENT, "Site Options");
         ImGui::TextColored(COL_TEXT_DIM,
-                           "All supported recording sites");
+                           "Configure each recording site individually");
         ImGui::Spacing();
 
         auto sites = manager_.availableSites();
         for (size_t i = 0; i < sites.size(); i++)
         {
-            ImGui::BulletText("%s", sites[i].c_str());
+            ImGui::PushID(static_cast<int>(i));
+            const auto &slug = sites[i];
+
+            // Ensure we have an entry for this site
+            auto &opts = config_.siteOptions[slug];
+
+            if (ImGui::CollapsingHeader(slug.c_str()))
+            {
+                ImGui::Indent(12.0f * dpiScale_);
+
+                if (ImGui::Checkbox("Enabled", &opts.enabled))
+                    editDirtyFlag_ = true;
+                ImGui::SameLine();
+                ImGui::TextColored(COL_TEXT_DIM, "(uncheck to stop all bots on this site)");
+
+                ImGui::Text("Quality Override");
+                if (ImGui::SliderInt("##Quality", &opts.quality, 0, 99999, opts.quality == 0 ? "Global" : "%d"))
+                    editDirtyFlag_ = true;
+                ImGui::TextColored(COL_TEXT_DIM, "0 = use global resolution, otherwise per-site override");
+
+                ImGui::Unindent(12.0f * dpiScale_);
+                ImGui::Spacing();
+            }
+
+            ImGui::PopID();
+        }
+
+        // Collapsible: show the registered sites bullet list
+        if (ImGui::CollapsingHeader("Registered Sites (all supported)"))
+        {
+            for (size_t i = 0; i < sites.size(); i++)
+            {
+                ImGui::BulletText("%s", sites[i].c_str());
+            }
         }
 
         ImGui::Spacing();

@@ -246,6 +246,7 @@ namespace sm
         std::atomic<bool> quitting_{false};
         std::atomic<bool> resyncPending_{false}; // Force immediate status check
         std::atomic<bool> streamMobile_{false};  // Stream-detected portrait (h > w)
+        std::atomic<bool> chunkReached_{false};  // Chunk boundary hit — restart recording
         CancellationToken cancelToken_;
         std::string lastMasterUrl_; // Master playlist URL for feeder monitoring
         mutable std::mutex masterUrlMutex_;

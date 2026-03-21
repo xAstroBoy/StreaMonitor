@@ -11,6 +11,7 @@
 #include "core/site_plugin.h"
 #include "core/bot_manager.h"
 #include "gui/imgui_log_sink.h"
+#include "utils/thumbnail_generator.h"
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <filesystem>
 #include <algorithm>
@@ -967,6 +968,48 @@ namespace sm
             logger_->warn("Error in post-download cleanup: {}", e.what());
         }
 
+        // Generate thumbnail contact sheet if enabled and download succeeded
+        if (ok && config_)
+        {
+            try
+            {
+                if (config_->thumbnailEnabled)
+                {
+                    // Find the actual output file
+                    std::string videoFile = finalPath;
+                    auto stem = fs::path(finalPath).parent_path() / fs::path(finalPath).stem();
+                    std::string tmpTsFile = stem.string() + ".tmp.ts";
+                    if (!fs::exists(videoFile) && fs::exists(tmpTsFile))
+                        videoFile = tmpTsFile;
+
+                    if (fs::exists(videoFile) && fs::file_size(videoFile) > 0)
+                    {
+                        auto thumbPath = fs::path(videoFile);
+                        thumbPath.replace_extension(".thumb.jpg");
+
+                        sm::ThumbnailConfig tcfg;
+                        tcfg.width = config_->thumbnailWidth;
+                        tcfg.columns = config_->thumbnailColumns;
+                        tcfg.rows = config_->thumbnailRows;
+
+                        auto logCb = [this](const std::string &msg)
+                        {
+                            logger_->info("{}", msg);
+                        };
+
+                        if (sm::generateContactSheet(videoFile, thumbPath.string(), tcfg, logCb))
+                        {
+                            logger_->info("Contact sheet saved: {}", thumbPath.filename().string());
+                        }
+                    }
+                }
+            }
+            catch (const std::exception &e)
+            {
+                logger_->debug("Thumbnail generation failed: {}", e.what());
+            }
+        }
+
         return ok;
     }
 
@@ -1255,10 +1298,20 @@ namespace sm
             }
 
             // Attempt download
+            chunkReached_.store(false);
             bool success = downloadOnce(config);
 
             if (!running_.load() || quitting_.load())
                 break;
+
+            // If a chunk boundary was hit, immediately start the next file
+            // without sleeping or re-checking status — the model is still live.
+            if (chunkReached_.load())
+            {
+                chunkReached_.store(false);
+                logger_->info("Chunk boundary reached — starting next file");
+                continue; // go straight to next downloadOnce
+            }
 
             if (!success)
             {
@@ -1354,17 +1407,6 @@ namespace sm
             if (audioDataCb_)
                 audioDataCb_(samples, frameCount); });
 
-        recorder.setProgressCallback([this](const RecordingProgress &prog)
-                                     {
-            // Update stats silently — do NOT fire stateCallback here.
-            // The GUI refreshes bot states every 2s, which is fast enough
-            // to show updated size/speed. Firing stateCallback on every
-            // progress update (every 100 packets) would call
-            // glfwPostEmptyEvent, keeping the GUI pinned at 30fps.
-            std::lock_guard lock(stateMutex_);
-            state_.recordingStats.bytesWritten = prog.bytesWritten;
-            state_.recordingStats.currentSpeed = prog.speed; });
-
         // Set pause/resume callback — when the stream ends (model goes
         // private/offline), keep the output file open and poll for the
         // model to come back. Avoids creating a new file each time.
@@ -1441,8 +1483,43 @@ namespace sm
                                         { return checkStatus(); });
 
         cancelToken_.reset();
+        chunkReached_.store(false);
 
-        // Set resolution change callback — when the stream's resolution
+        // ── Chunk-limit tracking ────────────────────────────────────
+        // For chunked recording modes, we monitor progress and cancel
+        // the token when the size/duration limit is reached.
+        auto chunkStartTime = std::chrono::steady_clock::now();
+        recorder.setProgressCallback([this, &config, chunkStartTime](const RecordingProgress &prog)
+                                     {
+            // Update stats silently (same as before)
+            {
+                std::lock_guard lock(stateMutex_);
+                state_.recordingStats.bytesWritten = prog.bytesWritten;
+                state_.recordingStats.currentSpeed = prog.speed;
+            }
+
+            // Check chunk limits
+            if (config.recordingMode == 1)
+            {
+                // Chunked by file size
+                uint64_t limitBytes = static_cast<uint64_t>(config.chunkSizeMB) * 1024ULL * 1024ULL;
+                if (prog.bytesWritten >= limitBytes)
+                {
+                    chunkReached_.store(true);
+                    cancelToken_.cancel();
+                }
+            }
+            else if (config.recordingMode == 2)
+            {
+                // Chunked by duration
+                auto elapsed = std::chrono::steady_clock::now() - chunkStartTime;
+                auto elapsedMin = std::chrono::duration_cast<std::chrono::minutes>(elapsed).count();
+                if (elapsedMin >= config.chunkDurationMin)
+                {
+                    chunkReached_.store(true);
+                    cancelToken_.cancel();
+                }
+            } });
         // changes (e.g. model switches mobile↔desktop), close the current
         // file and start a new one in the appropriate subfolder.
         // Mobile detection is ALWAYS from the actual stream resolution

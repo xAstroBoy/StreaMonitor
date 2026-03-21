@@ -286,27 +286,47 @@ def package(args):
         exe_ext = ""
         lib_ext = ".so"
 
-    # Copy executables
+    # Copy executables (StreaMonitor + tools)
     copied = []
-    for search_dir in [src, BUILD_DIR]:
-        for exe in search_dir.glob(f"StreaMonitor*{exe_ext}"):
-            if exe.is_file() and exe.name not in [c for c in copied]:
+
+    # All executables we want to package
+    exe_names = [
+        f"StreaMonitor{exe_ext}",
+        f"StripHelper{exe_ext}",
+        f"ThumbnailTool{exe_ext}",
+    ]
+
+    # Search locations: build/Release (MSVC), build/ (Ninja), tool subdirs
+    search_dirs = [
+        src,
+        BUILD_DIR,
+        BUILD_DIR / "tools" / "StripHelper" / "Release",
+        BUILD_DIR / "tools" / "StripHelper",
+        BUILD_DIR / "tools" / "ThumbnailTool" / "Release",
+        BUILD_DIR / "tools" / "ThumbnailTool",
+    ]
+
+    for exe_name in exe_names:
+        for search_dir in search_dirs:
+            exe_path = search_dir / exe_name
+            if exe_path.is_file() and exe_name not in copied:
                 try:
-                    shutil.copy2(exe, dist / exe.name)
-                    copied.append(exe.name)
-                    print(f"  [OK] {exe.name}")
+                    shutil.copy2(exe_path, dist / exe_name)
+                    copied.append(exe_name)
+                    print(f"  [OK] {exe_name}")
                 except PermissionError:
-                    print(f"  [!] {exe.name} is locked (running?), trying copy via temp...")
+                    print(f"  [!] {exe_name} is locked (running?), trying copy via temp...")
                     try:
-                        tmp = dist / f"{exe.stem}_new{exe.suffix}"
-                        shutil.copy2(exe, tmp)
-                        tmp.rename(dist / exe.name)
-                        copied.append(exe.name)
-                        print(f"  [OK] {exe.name} (via temp)")
+                        stem = Path(exe_name).stem
+                        suffix = Path(exe_name).suffix
+                        tmp = dist / f"{stem}_new{suffix}"
+                        shutil.copy2(exe_path, tmp)
+                        tmp.rename(dist / exe_name)
+                        copied.append(exe_name)
+                        print(f"  [OK] {exe_name} (via temp)")
                     except Exception as e:
-                        print(f"  [X] Failed to copy {exe.name}: {e}")
-        if copied:
-            break
+                        print(f"  [X] Failed to copy {exe_name}: {e}")
+                break  # found this exe, move to next
 
     if not copied:
         print("[X] No executables found in build output")
@@ -363,7 +383,7 @@ def package(args):
                 if f.is_file():
                     info = tf.gettarinfo(str(f), f.relative_to(dist).as_posix())
                     # Make executables actually executable
-                    if f.suffix == "" and f.stem.startswith("StreaMonitor"):
+                    if f.suffix == "" and f.stem in ("StreaMonitor", "StripHelper", "ThumbnailTool"):
                         info.mode = 0o755
                     with open(f, 'rb') as fh:
                         tf.addfile(info, fh)

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(StreaMonitor VERSION 2.1.45 LANGUAGES CXX C)
+project(StreaMonitor VERSION 2.1.57 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -184,6 +184,8 @@ file(GLOB_RECURSE ENGINE_SOURCES
     src/config/*.h
     src/web/*.cpp
     src/web/*.h
+    src/utils/*.cpp
+    src/utils/*.h
 )
 
 add_library(sm_engine STATIC ${ENGINE_SOURCES})
@@ -306,3 +308,17 @@ endif()
 # ──────────────────────────────────────────────
 install(TARGETS StreaMonitor
     RUNTIME DESTINATION bin)
+
+# ──────────────────────────────────────────────
+# StripHelper tool (Windows only)
+# ──────────────────────────────────────────────
+if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/tools/StripHelper/CMakeLists.txt")
+    add_subdirectory(tools/StripHelper)
+endif()
+
+# ──────────────────────────────────────────────
+# ThumbnailTool (cross-platform, GLFW+OpenGL)
+# ──────────────────────────────────────────────
+if(EXISTS "${CMAKE_SOURCE_DIR}/tools/ThumbnailTool/CMakeLists.txt")
+    add_subdirectory(tools/ThumbnailTool)
+endif()

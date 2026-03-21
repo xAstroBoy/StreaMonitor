@@ -39,6 +39,12 @@ namespace sm
         // Example: "{model}-{datetime}" → "username-20250710-143022.mkv"
         std::string filenameFormat = "{model}_{site}_{datetime}";
 
+        // Recording mode: Continuous (single file), ChunkedBySize, ChunkedByDuration
+        // 0 = Continuous (default), 1 = Chunked by file size, 2 = Chunked by duration
+        int recordingMode = 0;
+        int chunkSizeMB = 500;     // max MB per file (ChunkedBySize mode)
+        int chunkDurationMin = 60; // max minutes per file (ChunkedByDuration mode)
+
         // Network
         std::string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0";
         bool verifySsl = true;
@@ -87,6 +93,20 @@ namespace sm
 
         // Preview capture (decoded video frames for GUI + web preview)
         bool enablePreviewCapture = true;
+
+        // Thumbnail contact sheet generation (after each recording)
+        bool thumbnailEnabled = true;
+        int thumbnailWidth = 1280;
+        int thumbnailColumns = 4;
+        int thumbnailRows = 4;
+
+        // Per-site options (site slug → options)
+        struct SiteOptions
+        {
+            bool enabled = true; // whether this site is active
+            int quality = 0;     // 0 = use global resolution, >0 = override
+        };
+        std::map<std::string, SiteOptions> siteOptions;
 
         // Per-site VR defaults (site slug → VRConfig)
         // Models on VR sites automatically get these unless overridden

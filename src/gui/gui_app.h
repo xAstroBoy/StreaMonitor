@@ -246,6 +246,11 @@ namespace sm
         int editLogLevel_ = 1; // 0=debug, 1=info, 2=warn, 3=error
         bool editDirtyFlag_ = false;
 
+        // Recording mode edit state
+        int editRecordingMode_ = 0; // 0=Continuous, 1=ChunkedBySize, 2=ChunkedByDuration
+        int editChunkSizeMB_ = 500;
+        int editChunkDurationMin_ = 60;
+
         // Stripchat spy private edit state
         bool editSpyPrivateEnabled_ = false;
         char editStripchatCookies_[2048] = {};
@@ -283,10 +288,14 @@ namespace sm
         char editFfmpegProbeSize_[32] = "4M";
         char editFfmpegAnalyzeDuration_[32] = "10000000";
 
-        // Proxy edit state
+        // Proxy edit state (batch mode)
         bool editProxyEnabled_ = false;
-        int editProxyType_ = 0; // 0=HTTP, 1=HTTPS, 2=SOCKS4, 3=SOCKS4A, 4=SOCKS5, 5=SOCKS5H
-        char editProxyUrl_[512] = {};
+        int editProxyType_ = 0;          // 0=HTTP, 1=HTTPS, 2=SOCKS4, 3=SOCKS4A, 4=SOCKS5, 5=SOCKS5H
+        char editProxyUrl_[512] = {};    // single proxy (legacy, kept for first-proxy display)
+        char editProxyBatch_[8192] = {}; // multiline batch: one proxy per line
+
+        // Per-site options edit state (synced from config_.siteOptions)
+        // Built dynamically from available sites in renderSettingsSites()
 
         // System tray (Windows)
 #ifdef _WIN32
@@ -296,6 +305,10 @@ namespace sm
         bool editMinimizeToTray_ = true;
         bool editAutoStart_ = false;
         bool editEnablePreviewCapture_ = true;
+        bool editThumbnailEnabled_ = true;
+        int editThumbnailWidth_ = 1280;
+        int editThumbnailColumns_ = 4;
+        int editThumbnailRows_ = 4;
 
         // Web server reference (owned by main, nullable)
         WebServer *webServer_ = nullptr;

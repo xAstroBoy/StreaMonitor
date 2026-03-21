@@ -1,0 +1,5 @@
+// StripHelper Windows resource file — embeds the application icon
+#include <winresrc.h>
+#include "resource.h"
+
+IDI_ICON1  ICON  "striphelper.ico"

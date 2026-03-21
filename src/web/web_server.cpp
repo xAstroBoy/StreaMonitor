@@ -807,12 +807,62 @@ namespace sm
                 {"webPort", config_.webPort},
                 {"debug", config_.debug},
                 {"enablePreviewCapture", config_.enablePreviewCapture},
+                {"thumbnailEnabled", config_.thumbnailEnabled},
+                {"thumbnailWidth", config_.thumbnailWidth},
+                {"thumbnailColumns", config_.thumbnailColumns},
+                {"thumbnailRows", config_.thumbnailRows},
                 {"minFreeDiskPercent", config_.minFreeDiskPercent},
                 {"httpTimeoutSec", config_.httpTimeoutSec},
                 {"userAgent", config_.userAgent},
+                {"verifySsl", config_.verifySsl},
                 {"spyPrivateEnabled", config_.spyPrivateEnabled},
-                {"stripchatCookiesSet", !config_.stripchatCookies.empty()}
+                {"stripchatCookiesSet", !config_.stripchatCookies.empty()},
+                {"recordingMode", config_.recordingMode},
+                {"chunkSizeMB", config_.chunkSizeMB},
+                {"chunkDurationMin", config_.chunkDurationMin},
+                {"ffmpegPath", config_.ffmpegPath},
+                // Proxy settings
+                {"proxyEnabled", config_.proxyEnabled},
+                {"proxyMaxFailures", config_.proxyMaxFailures},
+                {"proxyDisableSec", config_.proxyDisableSec},
+                {"proxyAutoDisable", config_.proxyAutoDisable},
+                {"proxyCount", (int)config_.proxies.size()},
+                // Encoding settings
+                {"encoding", {
+                    {"encoder", static_cast<int>(config_.encoding.encoder)},
+                    {"enableCuda", config_.encoding.enableCuda},
+                    {"crf", config_.encoding.crf},
+                    {"preset", config_.encoding.preset},
+                    {"audioBitrate", config_.encoding.audioBitrate},
+                    {"copyAudio", config_.encoding.copyAudio},
+                    {"maxWidth", config_.encoding.maxWidth},
+                    {"maxHeight", config_.encoding.maxHeight},
+                    {"threads", config_.encoding.threads}
+                }},
+                // FFmpeg tuning
+                {"ffmpegTuning", {
+                    {"rwTimeoutSec", config_.ffmpeg.rwTimeoutSec},
+                    {"socketTimeoutSec", config_.ffmpeg.socketTimeoutSec},
+                    {"reconnectDelayMax", config_.ffmpeg.reconnectDelayMax},
+                    {"maxRestarts", config_.ffmpeg.maxRestarts},
+                    {"gracefulQuitTimeoutSec", config_.ffmpeg.gracefulQuitTimeoutSec},
+                    {"startupGraceSec", config_.ffmpeg.startupGraceSec}
+                }}
             };
+            // Add proxies list
+            {
+                json pl = json::array();
+                for (const auto &p : config_.proxies)
+                    pl.push_back({{"url", p.url}, {"enabled", p.enabled}, {"rolling", p.rolling}, {"name", p.name}});
+                j["proxies"] = pl;
+            }
+            // Add site options
+            {
+                json so = json::object();
+                for (const auto &[slug, opts] : config_.siteOptions)
+                    so[slug] = {{"enabled", opts.enabled}, {"quality", opts.quality}};
+                j["siteOptions"] = so;
+            }
             jsonResponse(res, j); });
 
         // ── PUT /api/config ───────────────────────────────────────
@@ -834,6 +884,14 @@ namespace sm
                     config_.minFreeDiskPercent = body["minFreeDiskPercent"].get<float>();
                 if (body.contains("enablePreviewCapture"))
                     config_.enablePreviewCapture = body["enablePreviewCapture"].get<bool>();
+                if (body.contains("thumbnailEnabled"))
+                    config_.thumbnailEnabled = body["thumbnailEnabled"].get<bool>();
+                if (body.contains("thumbnailWidth"))
+                    config_.thumbnailWidth = body["thumbnailWidth"].get<int>();
+                if (body.contains("thumbnailColumns"))
+                    config_.thumbnailColumns = body["thumbnailColumns"].get<int>();
+                if (body.contains("thumbnailRows"))
+                    config_.thumbnailRows = body["thumbnailRows"].get<int>();
                 if (body.contains("filenameFormat"))
                     config_.filenameFormat = body["filenameFormat"].get<std::string>();
                 if (body.contains("autoRemoveNonExistent"))
@@ -852,6 +910,93 @@ namespace sm
                     config_.spyPrivateEnabled = body["spyPrivateEnabled"].get<bool>();
                 if (body.contains("stripchatCookies"))
                     config_.stripchatCookies = body["stripchatCookies"].get<std::string>();
+
+                // Recording mode & chunking
+                if (body.contains("recordingMode"))
+                    config_.recordingMode = std::clamp(body["recordingMode"].get<int>(), 0, 2);
+                if (body.contains("chunkSizeMB"))
+                    config_.chunkSizeMB = std::clamp(body["chunkSizeMB"].get<int>(), 50, 10000);
+                if (body.contains("chunkDurationMin"))
+                    config_.chunkDurationMin = std::clamp(body["chunkDurationMin"].get<int>(), 1, 1440);
+
+                // Per-site options
+                if (body.contains("siteOptions") && body["siteOptions"].is_object())
+                {
+                    for (auto &[slug, val] : body["siteOptions"].items())
+                    {
+                        auto &opts = config_.siteOptions[slug];
+                        if (val.contains("enabled"))
+                            opts.enabled = val["enabled"].get<bool>();
+                        if (val.contains("quality"))
+                            opts.quality = val["quality"].get<int>();
+                    }
+                }
+
+                // Proxy settings
+                if (body.contains("proxyEnabled"))
+                    config_.proxyEnabled = body["proxyEnabled"].get<bool>();
+                if (body.contains("proxyMaxFailures"))
+                    config_.proxyMaxFailures = body["proxyMaxFailures"].get<int>();
+                if (body.contains("proxyDisableSec"))
+                    config_.proxyDisableSec = body["proxyDisableSec"].get<int>();
+                if (body.contains("proxyAutoDisable"))
+                    config_.proxyAutoDisable = body["proxyAutoDisable"].get<bool>();
+                if (body.contains("proxies") && body["proxies"].is_array())
+                {
+                    config_.proxies.clear();
+                    for (const auto &p : body["proxies"])
+                    {
+                        if (p.is_string())
+                            config_.proxies.push_back(sm::ProxyEntry{p.get<std::string>()});
+                        else if (p.is_object() && p.contains("url"))
+                        {
+                            sm::ProxyEntry pe{p["url"].get<std::string>()};
+                            if (p.contains("enabled")) pe.enabled = p["enabled"].get<bool>();
+                            if (p.contains("rolling")) pe.rolling = p["rolling"].get<bool>();
+                            if (p.contains("name")) pe.name = p["name"].get<std::string>();
+                            config_.proxies.push_back(std::move(pe));
+                        }
+                    }
+                }
+
+                // FFmpeg path
+                if (body.contains("ffmpegPath"))
+                    config_.ffmpegPath = body["ffmpegPath"].get<std::string>();
+                if (body.contains("verifySsl"))
+                    config_.verifySsl = body["verifySsl"].get<bool>();
+                if (body.contains("httpTimeoutSec"))
+                    config_.httpTimeoutSec = body["httpTimeoutSec"].get<int>();
+
+                // Encoding settings
+                if (body.contains("encoding") && body["encoding"].is_object())
+                {
+                    auto &enc = body["encoding"];
+                    if (enc.contains("encoder"))     config_.encoding.encoder = static_cast<sm::EncoderType>(enc["encoder"].get<int>());
+                    if (enc.contains("enableCuda"))  config_.encoding.enableCuda = enc["enableCuda"].get<bool>();
+                    if (enc.contains("crf"))         config_.encoding.crf = enc["crf"].get<int>();
+                    if (enc.contains("preset"))      config_.encoding.preset = enc["preset"].get<std::string>();
+                    if (enc.contains("audioBitrate")) config_.encoding.audioBitrate = enc["audioBitrate"].get<int>();
+                    if (enc.contains("copyAudio"))   config_.encoding.copyAudio = enc["copyAudio"].get<bool>();
+                    if (enc.contains("maxWidth"))    config_.encoding.maxWidth = enc["maxWidth"].get<int>();
+                    if (enc.contains("maxHeight"))   config_.encoding.maxHeight = enc["maxHeight"].get<int>();
+                    if (enc.contains("threads"))     config_.encoding.threads = enc["threads"].get<int>();
+                }
+
+                // FFmpeg tuning
+                if (body.contains("ffmpegTuning") && body["ffmpegTuning"].is_object())
+                {
+                    auto &ft = body["ffmpegTuning"];
+                    if (ft.contains("rwTimeoutSec"))          config_.ffmpeg.rwTimeoutSec = ft["rwTimeoutSec"].get<int>();
+                    if (ft.contains("socketTimeoutSec"))      config_.ffmpeg.socketTimeoutSec = ft["socketTimeoutSec"].get<int>();
+                    if (ft.contains("reconnectDelayMax"))     config_.ffmpeg.reconnectDelayMax = ft["reconnectDelayMax"].get<int>();
+                    if (ft.contains("maxRestarts"))           config_.ffmpeg.maxRestarts = ft["maxRestarts"].get<int>();
+                    if (ft.contains("gracefulQuitTimeoutSec")) config_.ffmpeg.gracefulQuitTimeoutSec = ft["gracefulQuitTimeoutSec"].get<int>();
+                    if (ft.contains("startupGraceSec"))       config_.ffmpeg.startupGraceSec = ft["startupGraceSec"].get<int>();
+                }
+
+                // Save config after applying changes
+                config_.saveToFile("app_config.json");
+                manager_.saveConfig();
 
                 jsonResponse(res, {{"success", true}, {"message", "Config updated"}});
             } catch (const std::exception &e) {

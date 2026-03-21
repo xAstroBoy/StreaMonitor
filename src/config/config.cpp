@@ -389,6 +389,12 @@ namespace sm
                 segmentTimeSec = j["segment_time"];
             if (j.contains("filename_format"))
                 filenameFormat = j["filename_format"].get<std::string>();
+            if (j.contains("recording_mode"))
+                recordingMode = std::clamp(j["recording_mode"].get<int>(), 0, 2);
+            if (j.contains("chunk_size_mb"))
+                chunkSizeMB = std::clamp(j["chunk_size_mb"].get<int>(), 50, 10000);
+            if (j.contains("chunk_duration_min"))
+                chunkDurationMin = std::clamp(j["chunk_duration_min"].get<int>(), 1, 1440);
             if (j.contains("web_host"))
                 webHost = j["web_host"];
             if (j.contains("web_port"))
@@ -403,6 +409,26 @@ namespace sm
                 webStaticDir = j["web_static_dir"].get<std::string>();
             if (j.contains("enable_preview_capture"))
                 enablePreviewCapture = j["enable_preview_capture"];
+            if (j.contains("thumbnail_enabled"))
+                thumbnailEnabled = j["thumbnail_enabled"];
+            if (j.contains("thumbnail_width"))
+                thumbnailWidth = j["thumbnail_width"];
+            if (j.contains("thumbnail_columns"))
+                thumbnailColumns = j["thumbnail_columns"];
+            if (j.contains("thumbnail_rows"))
+                thumbnailRows = j["thumbnail_rows"];
+
+            // Per-site options
+            if (j.contains("site_options") && j["site_options"].is_object())
+            {
+                for (auto &[slug, soj] : j["site_options"].items())
+                {
+                    SiteOptions so;
+                    so.enabled = soj.value("enabled", true);
+                    so.quality = soj.value("quality", 0);
+                    siteOptions[slug] = so;
+                }
+            }
 
             // Proxy config — new array format with backward compatibility
             if (j.contains("proxy_enabled"))
@@ -517,6 +543,9 @@ namespace sm
             j["stripchat_cookies"] = stripchatCookies;
         j["segment_time"] = segmentTimeSec;
         j["filename_format"] = filenameFormat;
+        j["recording_mode"] = recordingMode;
+        j["chunk_size_mb"] = chunkSizeMB;
+        j["chunk_duration_min"] = chunkDurationMin;
         j["web_host"] = webHost;
         j["web_port"] = webPort;
         j["web_username"] = webUsername;
@@ -524,6 +553,20 @@ namespace sm
         j["web_enabled"] = webEnabled;
         j["web_static_dir"] = webStaticDir;
         j["enable_preview_capture"] = enablePreviewCapture;
+        j["thumbnail_enabled"] = thumbnailEnabled;
+        j["thumbnail_width"] = thumbnailWidth;
+        j["thumbnail_columns"] = thumbnailColumns;
+        j["thumbnail_rows"] = thumbnailRows;
+
+        // Per-site options
+        nlohmann::json soJson;
+        for (const auto &[slug, so] : siteOptions)
+        {
+            soJson[slug] = {
+                {"enabled", so.enabled},
+                {"quality", so.quality}};
+        }
+        j["site_options"] = soJson;
 
         // Proxy config — new array format
         j["proxy_enabled"] = proxyEnabled;

@@ -225,6 +225,8 @@ static void printHelp()
               << "  " << ansi::bold << "sites" << ansi::reset << "                    - List available sites\n"
               << "  " << ansi::bold << "save" << ansi::reset << "                     - Save config\n"
               << "  " << ansi::bold << "import" << ansi::reset << " <path>             - Import Python SM config.json\n"
+              << "  " << ansi::bold << "config" << ansi::reset << "                   - Show current config\n"
+              << "  " << ansi::bold << "set" << ansi::reset << " <key> <value>        - Change a setting (e.g. set container mkv)\n"
               << "  " << ansi::bold << "web" << ansi::reset << "                      - Toggle web dashboard / show URL\n"
               << "  " << ansi::bold << "cls" << ansi::reset << "                      - Clear screen\n"
               << "  " << ansi::bold << "quit" << ansi::reset << "                     - Stop all and exit\n"
@@ -685,6 +687,285 @@ int cliMain(int argc, char **argv)
                         std::cout << ansi::yellow << "  - " << err << "\n"
                                   << ansi::reset;
                     }
+                }
+            }
+        }
+        else if (cmd == "config" || cmd == "cfg")
+        {
+            // Print current configuration
+            std::cout << ansi::bold << ansi::cyan << "\nCurrent Configuration:\n"
+                      << ansi::reset;
+            std::cout << ansi::gray << "─────────────────────────────────────\n"
+                      << ansi::reset;
+            std::cout << "  downloadsDir:        " << config.downloadsDir << "\n";
+            std::cout << "  container:           " << sm::getFormatInfo(config.container).extension << "\n";
+            std::cout << "  wantedResolution:    " << config.wantedResolution << "\n";
+            std::cout << "  filenameFormat:      " << config.filenameFormat << "\n";
+            std::cout << "  recordingMode:       " << config.recordingMode << "\n";
+            std::cout << "  chunkSizeMB:         " << config.chunkSizeMB << "\n";
+            std::cout << "  chunkDurationMin:    " << config.chunkDurationMin << "\n";
+            std::cout << "  ffmpegPath:          " << config.ffmpegPath << "\n";
+            std::cout << "  logLevel:            " << config.logLevel << "\n";
+            std::cout << "  minFreeDiskPercent:  " << config.minFreeDiskPercent << "\n";
+            std::cout << "  thumbnailEnabled:    " << (config.thumbnailEnabled ? "true" : "false") << "\n";
+            std::cout << "  thumbnailWidth:      " << config.thumbnailWidth << "\n";
+            std::cout << "  thumbnailColumns:    " << config.thumbnailColumns << "\n";
+            std::cout << "  thumbnailRows:       " << config.thumbnailRows << "\n";
+            std::cout << "  autoRemoveNonExist:  " << (config.autoRemoveNonExistent ? "true" : "false") << "\n";
+            std::cout << "  proxyEnabled:        " << (config.proxyEnabled ? "true" : "false") << "\n";
+            std::cout << "  proxies:             " << config.proxies.size() << " configured\n";
+            std::cout << "  webEnabled:          " << (config.webEnabled ? "true" : "false") << "\n";
+            std::cout << "  webHost:             " << config.webHost << "\n";
+            std::cout << "  webPort:             " << config.webPort << "\n";
+            std::cout << "  encoding.encoder:    " << static_cast<int>(config.encoding.encoder) << " (0=Copy,1=x265,2=x264,3=NVENC-HEVC,4=NVENC-H264)\n";
+            std::cout << "  encoding.crf:        " << config.encoding.crf << "\n";
+            std::cout << "  encoding.preset:     " << config.encoding.preset << "\n";
+            std::cout << "  encoding.maxWidth:   " << config.encoding.maxWidth << "\n";
+            std::cout << "  encoding.maxHeight:  " << config.encoding.maxHeight << "\n";
+            std::cout << "  spyPrivateEnabled:   " << (config.spyPrivateEnabled ? "true" : "false") << "\n";
+            std::cout << "  enablePreviewCapture:" << (config.enablePreviewCapture ? "true" : "false") << "\n";
+            std::cout << ansi::gray << "─────────────────────────────────────\n"
+                      << ansi::reset;
+            std::cout << ansi::gray << "Use 'set <key> <value>' to change a setting\n"
+                      << ansi::reset;
+        }
+        else if (cmd == "set")
+        {
+            if (tokens.size() < 3)
+            {
+                std::cout << ansi::red << "Usage: set <key> <value>\n"
+                          << ansi::reset
+                          << "Keys: container, wantedResolution, downloadsDir, ffmpegPath,\n"
+                          << "  filenameFormat, recordingMode, chunkSizeMB, chunkDurationMin,\n"
+                          << "  logLevel, minFreeDiskPercent, thumbnailEnabled, thumbnailWidth,\n"
+                          << "  thumbnailColumns, thumbnailRows, autoRemoveNonExistent,\n"
+                          << "  proxyEnabled, webEnabled, webHost, webPort, webUsername,\n"
+                          << "  webPassword, encoding.codec, encoding.crf, encoding.preset,\n"
+                          << "  encoding.maxWidth, encoding.maxHeight, encoding.enableCuda,\n"
+                          << "  encoding.encoder (0=Copy,1=x265,2=x264,3=NVENC-HEVC,4=NVENC-H264),\n"
+                          << "  spyPrivateEnabled, enablePreviewCapture, httpTimeoutSec\n";
+            }
+            else
+            {
+                std::string key = tokens[1];
+                std::string val = tokens[2];
+                for (size_t i = 3; i < tokens.size(); ++i)
+                    val += " " + tokens[i];
+
+                bool ok = true;
+                auto toBool = [](const std::string &s) -> bool
+                {
+                    return s == "true" || s == "1" || s == "on" || s == "yes";
+                };
+
+                if (key == "container")
+                    config.container = sm::parseContainerFormat(val);
+                else if (key == "wantedResolution")
+                {
+                    try
+                    {
+                        config.wantedResolution = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "downloadsDir")
+                    config.downloadsDir = val;
+                else if (key == "ffmpegPath")
+                    config.ffmpegPath = val;
+                else if (key == "filenameFormat")
+                    config.filenameFormat = val;
+                else if (key == "recordingMode")
+                {
+                    try
+                    {
+                        config.recordingMode = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "chunkSizeMB")
+                {
+                    try
+                    {
+                        config.chunkSizeMB = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "chunkDurationMin")
+                {
+                    try
+                    {
+                        config.chunkDurationMin = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "logLevel")
+                {
+                    config.logLevel = val;
+                    spdlog::set_level(spdlog::level::from_str(val));
+                }
+                else if (key == "minFreeDiskPercent")
+                {
+                    try
+                    {
+                        config.minFreeDiskPercent = std::stof(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "thumbnailEnabled")
+                    config.thumbnailEnabled = toBool(val);
+                else if (key == "thumbnailWidth")
+                {
+                    try
+                    {
+                        config.thumbnailWidth = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "thumbnailColumns")
+                {
+                    try
+                    {
+                        config.thumbnailColumns = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "thumbnailRows")
+                {
+                    try
+                    {
+                        config.thumbnailRows = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "autoRemoveNonExistent")
+                    config.autoRemoveNonExistent = toBool(val);
+                else if (key == "proxyEnabled")
+                    config.proxyEnabled = toBool(val);
+                else if (key == "webEnabled")
+                    config.webEnabled = toBool(val);
+                else if (key == "webHost")
+                    config.webHost = val;
+                else if (key == "webPort")
+                {
+                    try
+                    {
+                        config.webPort = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "webUsername")
+                    config.webUsername = val;
+                else if (key == "webPassword")
+                    config.webPassword = val;
+                else if (key == "httpTimeoutSec")
+                {
+                    try
+                    {
+                        config.httpTimeoutSec = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "encoding.encoder")
+                {
+                    try
+                    {
+                        config.encoding.encoder = static_cast<sm::EncoderType>(std::stoi(val));
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "encoding.crf")
+                {
+                    try
+                    {
+                        config.encoding.crf = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "encoding.preset")
+                    config.encoding.preset = val;
+                else if (key == "encoding.maxWidth")
+                {
+                    try
+                    {
+                        config.encoding.maxWidth = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "encoding.maxHeight")
+                {
+                    try
+                    {
+                        config.encoding.maxHeight = std::stoi(val);
+                    }
+                    catch (...)
+                    {
+                        ok = false;
+                    }
+                }
+                else if (key == "encoding.enableCuda")
+                    config.encoding.enableCuda = toBool(val);
+                else if (key == "spyPrivateEnabled")
+                    config.spyPrivateEnabled = toBool(val);
+                else if (key == "enablePreviewCapture")
+                    config.enablePreviewCapture = toBool(val);
+                else if (key == "verifySsl")
+                    config.verifySsl = toBool(val);
+                else
+                {
+                    std::cout << ansi::red << "Unknown setting: " << key << "\n"
+                              << ansi::reset;
+                    ok = false;
+                }
+
+                if (ok)
+                {
+                    config.saveToFile(appConfigPath);
+                    std::cout << ansi::green << "Set " << key << " = " << val << " (saved)\n"
+                              << ansi::reset;
+                }
+                else if (key != "")
+                {
+                    std::cout << ansi::red << "Invalid value for " << key << "\n"
+                              << ansi::reset;
                 }
             }
         }

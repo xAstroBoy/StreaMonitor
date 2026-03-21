@@ -3290,11 +3290,16 @@ namespace sm
                             if (state.transcoding && state.videoDecCtx)
                                 avcodec_flush_buffers(state.videoDecCtx);
 
-                            // For stream-copy: save restart offsets
+                            // For stream-copy: save restart offsets using the
+                            // highest timestamp + one frame/packet duration.
+                            // Using max(PTS, DTS) ensures continuity for HEVC
+                            // B-frame streams where PTS runs ahead of DTS.
                             if (!state.transcoding)
                             {
-                                state.videoRestartOffset = state.lastVideoOutPts + 1;
-                                state.audioRestartOffset = state.lastAudioOutPts + 1;
+                                int64_t vDur = state.lastVideoDuration > 0 ? state.lastVideoDuration : 1;
+                                int64_t aDur = state.lastAudioDuration > 0 ? state.lastAudioDuration : 1;
+                                state.videoRestartOffset = std::max(state.lastVideoOutPts, state.lastVideoOutDts) + vDur;
+                                state.audioRestartOffset = std::max(state.lastAudioOutPts, state.lastAudioOutDts) + aDur;
                             }
 
                             // Reset per-input-session state
@@ -3358,11 +3363,14 @@ namespace sm
                 {
                     log_->info("Stream ended — pausing (output file stays open)");
 
-                    // Save restart offsets for PTS continuity when resumed
+                    // Save restart offsets for PTS continuity when resumed.
+                    // Use max(PTS, DTS) + duration for proper B-frame handling.
                     if (!state.transcoding)
                     {
-                        state.videoRestartOffset = state.lastVideoOutPts + 1;
-                        state.audioRestartOffset = state.lastAudioOutPts + 1;
+                        int64_t vDur = state.lastVideoDuration > 0 ? state.lastVideoDuration : 1;
+                        int64_t aDur = state.lastAudioDuration > 0 ? state.lastAudioDuration : 1;
+                        state.videoRestartOffset = std::max(state.lastVideoOutPts, state.lastVideoOutDts) + vDur;
+                        state.audioRestartOffset = std::max(state.lastAudioOutPts, state.lastAudioOutDts) + aDur;
                     }
                     if (state.transcoding && state.videoDecCtx)
                         avcodec_flush_buffers(state.videoDecCtx);
