@@ -294,6 +294,7 @@ def package(args):
         f"StreaMonitor{exe_ext}",
         f"StripHelper{exe_ext}",
         f"ThumbnailTool{exe_ext}",
+        f"Sorter{exe_ext}",
     ]
 
     # Search locations: build/Release (MSVC), build/ (Ninja), tool subdirs
@@ -304,6 +305,8 @@ def package(args):
         BUILD_DIR / "tools" / "StripHelper",
         BUILD_DIR / "tools" / "ThumbnailTool" / "Release",
         BUILD_DIR / "tools" / "ThumbnailTool",
+        BUILD_DIR / "tools" / "Sorter" / "Release",
+        BUILD_DIR / "tools" / "Sorter",
     ]
 
     for exe_name in exe_names:
@@ -383,7 +386,7 @@ def package(args):
                 if f.is_file():
                     info = tf.gettarinfo(str(f), f.relative_to(dist).as_posix())
                     # Make executables actually executable
-                    if f.suffix == "" and f.stem in ("StreaMonitor", "StripHelper", "ThumbnailTool"):
+                    if f.suffix == "" and f.stem in ("StreaMonitor", "StripHelper", "ThumbnailTool", "Sorter"):
                         info.mode = 0o755
                     with open(f, 'rb') as fh:
                         tf.addfile(info, fh)
@@ -423,7 +426,7 @@ def deploy(args):
 
     # ── Step 1: Kill running processes ──
     print("\n[1/4] Killing running processes...")
-    procs_to_kill = [sm_exe, f"StripHelper{exe_ext}", f"ThumbnailTool{exe_ext}"]
+    procs_to_kill = [sm_exe, f"StripHelper{exe_ext}", f"ThumbnailTool{exe_ext}", f"Sorter{exe_ext}"]
     if IS_WINDOWS:
         for proc in procs_to_kill:
             subprocess.run(
@@ -471,7 +474,7 @@ def deploy(args):
         tools_dir = Path(r"C:\AstroTools\StripHelperCpp")
         tools_dir.mkdir(parents=True, exist_ok=True)
 
-        tool_names = [f"StripHelper{exe_ext}", f"ThumbnailTool{exe_ext}"]
+        tool_names = [f"StripHelper{exe_ext}", f"ThumbnailTool{exe_ext}", f"Sorter{exe_ext}"]
         for tool_name in tool_names:
             tool_src = dist / tool_name
             if tool_src.exists():
@@ -535,6 +538,11 @@ def install_context_menu():
             "display": "Generate Thumbnails",
             "exe": str(tools_dir / "ThumbnailTool.exe"),
         },
+        {
+            "name": "Sorter",
+            "display": "Sort with Sorter",
+            "exe": str(tools_dir / "Sorter.exe"),
+        },
     ]
 
     print(f"\n{'='*60}")
@@ -588,6 +596,8 @@ def uninstall_context_menu():
         r"Software\Classes\Directory\Background\shell\StripHelper",
         r"Software\Classes\Directory\shell\ThumbnailTool",
         r"Software\Classes\Directory\Background\shell\ThumbnailTool",
+        r"Software\Classes\Directory\shell\Sorter",
+        r"Software\Classes\Directory\Background\shell\Sorter",
     ]
 
     for key_path in keys_to_remove:

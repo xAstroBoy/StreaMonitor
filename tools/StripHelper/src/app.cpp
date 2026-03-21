@@ -1328,10 +1328,8 @@ namespace sh
                         // Embed thumbnail as cover art inside the MKV (in-place, no copy)
                         if (fs::exists(thumbPath))
                         {
-                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(),
-                                                    [this](const std::string &msg)
-                                                    { addLog("[thumb] " + msg); },
-                                                    g_mkvpropedit);
+                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), [this](const std::string &msg)
+                                                    { addLog("[thumb] " + msg); }, g_mkvpropedit);
                         }
 
                         if (fs::exists(thumbPath))

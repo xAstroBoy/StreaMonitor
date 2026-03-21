@@ -322,3 +322,10 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/tools/ThumbnailTool/CMakeLists.txt")
     add_subdirectory(tools/ThumbnailTool)
 endif()
+
+# ──────────────────────────────────────────────
+# Sorter tool (cross-platform, GLFW+OpenGL)
+# ──────────────────────────────────────────────
+if(EXISTS "${CMAKE_SOURCE_DIR}/tools/Sorter/CMakeLists.txt")
+    add_subdirectory(tools/Sorter)
+endif()

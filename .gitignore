@@ -59,6 +59,10 @@ ssl/
 Thumbs.db
 desktop.ini
 
+# ── Python ──
+__pycache__/
+*.pyc
+
 # ── Temp ──
 *.tmp
 *.temp

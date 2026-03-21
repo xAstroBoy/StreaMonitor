@@ -37,14 +37,56 @@ namespace sm
         const ThumbnailConfig &cfg = {},
         std::function<void(const std::string &)> logCb = nullptr);
 
-    // Embed a JPEG thumbnail as cover art attachment inside an MKV file.
-    // Uses mkvpropedit for in-place modification (no video copying/remuxing).
+    // Check if a video file already has cover art (attached picture) embedded.
+    bool hasCoverArt(const std::string &videoPath);
+
+    // Check the first 4 bytes for EBML magic — true only for real Matroska containers.
+    bool isRealMatroska(const std::string &path);
+
+    // Quick check for timestamp discontinuities (DTS jumps / backward gaps).
+    // Probes first ~5000 packets. Returns true if issues found.
+    bool hasTimestampIssues(const std::string &videoPath,
+                            std::function<void(const std::string &)> logCb = nullptr);
+
+    // Fix timestamps by remuxing in-place (stream copy, normalises DTS/PTS).
+    // Works on real Matroska files — remuxes to clean Matroska with monotonic timestamps.
+    bool fixTimestamps(const std::string &videoPath,
+                       std::function<void(const std::string &)> logCb = nullptr);
+
+    // Check if a video path indicates VR content (folder contains [SCVR], [DCVR], etc.)
+    bool isVRFromPath(const std::string &videoPath);
+
+    // Inject VR 180° SBS spatial metadata into a Matroska file via mkvpropedit.
+    // Sets native Matroska track elements:
+    //   StereoMode=1 (side-by-side, left eye first)
+    //   ProjectionType=1 (equirectangular)
+    //   ProjectionPose yaw/pitch/roll = 0
+    // Idempotent — safe to call multiple times on the same file.
+    bool injectVRSpatialMetadata(
+        const std::string &mkvPath,
+        std::function<void(const std::string &)> logCb = nullptr,
+        const std::string &mkvpropeditPath = "");
+
+    // Embed a JPEG thumbnail as cover art + inject VR spatial metadata.
+    // Handles all video formats: remuxes to MKV first, embeds cover via mkvpropedit,
+    // then injects VR180 SBS metadata for VR content (auto-detected from folder path).
+    // Skips cover embed if already has cover art. VR metadata is always injected for VR paths.
     // Returns true on success; on failure the .jpg file is kept alongside.
-    // mkvpropeditPath: explicit path to mkvpropedit exe, or empty for auto-detect.
     bool embedThumbnailInMKV(
         const std::string &videoPath,
         const std::string &jpegPath,
         std::function<void(const std::string &)> logCb = nullptr,
         const std::string &mkvpropeditPath = "");
+
+    // Ensure a video file is in a real Matroska (.mkv) container.
+    // - .mkv with EBML header → returns same path (already good)
+    // - .mkv without EBML → remuxes in-place, returns same path
+    // - Non-.mkv → creates .mkv alongside original, returns new path
+    // All remuxing is stream-copy (zero re-encoding).
+    // Fixes timestamp discontinuities during remux.
+    // Returns empty string on failure.
+    std::string ensureRealMKV(
+        const std::string &videoPath,
+        std::function<void(const std::string &)> logCb = nullptr);
 
 } // namespace sm

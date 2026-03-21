@@ -26,6 +26,7 @@ extern "C"
 #include <libswscale/swscale.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/hwcontext.h>
 }
 
 namespace sm
@@ -400,6 +401,17 @@ namespace sm
             }
         };
 
+        // RAII wrapper for hardware device context (CUDA/NVDEC)
+        struct HwDevice
+        {
+            AVBufferRef *ctx = nullptr;
+            ~HwDevice()
+            {
+                if (ctx)
+                    av_buffer_unref(&ctx);
+            }
+        };
+
         // Decode one frame near the target timestamp
         static bool seekAndDecode(AVFormatContext *fmtCtx, AVCodecContext *decCtx,
                                   int streamIdx, int64_t targetTs,
@@ -553,7 +565,7 @@ namespace sm
         AVStream *vStream = fmt.ctx->streams[streamIdx];
         AVCodecParameters *codecpar = vStream->codecpar;
 
-        // ── 3. Open decoder ──────────────────────────────────────────────
+        // ── 3. Open decoder (CUDA/NVDEC if available, fallback CPU) ────
         const AVCodec *decoder = avcodec_find_decoder(codecpar->codec_id);
         if (!decoder)
         {
@@ -561,16 +573,57 @@ namespace sm
             return false;
         }
 
+        HwDevice hwDev;
+        bool useCuda = false;
+        if (av_hwdevice_ctx_create(&hwDev.ctx, AV_HWDEVICE_TYPE_CUDA,
+                                   nullptr, nullptr, 0) >= 0)
+        {
+            useCuda = true;
+        }
+
         CodecCtx decCtx;
         decCtx.ctx = avcodec_alloc_context3(decoder);
         avcodec_parameters_to_context(decCtx.ctx, codecpar);
-        decCtx.ctx->thread_count = 4;
+
+        if (useCuda)
+        {
+            decCtx.ctx->hw_device_ctx = av_buffer_ref(hwDev.ctx);
+            decCtx.ctx->extra_hw_frames = 16; // Extra GPU frame buffers for maximum throughput
+            decCtx.ctx->thread_count = 1;     // NVDEC handles parallelism in hardware
+        }
+        else
+        {
+            // Use ALL CPU cores for software decoding
+            decCtx.ctx->thread_count = 0; // 0 = auto-detect optimal thread count
+            decCtx.ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+        }
 
         if (avcodec_open2(decCtx.ctx, decoder, nullptr) < 0)
         {
-            log("thumbnail: failed to open decoder");
-            return false;
+            // CUDA decoder open failed — retry with software
+            if (useCuda)
+            {
+                log("thumbnail: CUDA decoder open failed, falling back to CPU");
+                avcodec_free_context(&decCtx.ctx);
+                decCtx.ctx = avcodec_alloc_context3(decoder);
+                avcodec_parameters_to_context(decCtx.ctx, codecpar);
+                decCtx.ctx->thread_count = 4;
+                useCuda = false;
+                if (avcodec_open2(decCtx.ctx, decoder, nullptr) < 0)
+                {
+                    log("thumbnail: failed to open decoder");
+                    return false;
+                }
+            }
+            else
+            {
+                log("thumbnail: failed to open decoder");
+                return false;
+            }
         }
+
+        if (useCuda)
+            log("thumbnail: GPU (CUDA/NVDEC) hardware decoding active");
 
         int srcW = decCtx.ctx->width;
         int srcH = decCtx.ctx->height;
@@ -608,16 +661,9 @@ namespace sm
         fillRect(image.data(), stride, totalW, totalH,
                  0, 0, totalW, headerH, 30, 30, 35);
 
-        // ── 6. Set up scaler (bicubic for best quality) ─────────────────
+        // ── 6. Scaler — created lazily after first frame decode ────────
+        //  (CUDA frames need GPU→CPU transfer before we know the pixel format)
         SwsCtx thumbSws;
-        thumbSws.ctx = sws_getContext(srcW, srcH, decCtx.ctx->pix_fmt,
-                                      thumbW, thumbH, AV_PIX_FMT_RGB24,
-                                      SWS_BICUBIC, nullptr, nullptr, nullptr);
-        if (!thumbSws.ctx)
-        {
-            log("thumbnail: failed to create scaler");
-            return false;
-        }
 
         // ── 7. Calculate seek positions ──────────────────────────────────
         double duration = 0;
@@ -639,6 +685,7 @@ namespace sm
 
         // ── 8. Extract frames and compose grid ──────────────────────────
         Frame decFrame;
+        Frame swFrame; // for GPU→CPU transfer when using CUDA
         int thumbBufSize = thumbW * thumbH * 3;
         std::vector<uint8_t> thumbBuf(thumbBufSize);
 
@@ -664,11 +711,45 @@ namespace sm
                 continue;
             }
 
+            // GPU → CPU transfer for CUDA-decoded frames
+            AVFrame *srcFrame = decFrame.f;
+            if (useCuda && srcFrame->format == AV_PIX_FMT_CUDA)
+            {
+                av_frame_unref(swFrame.f);
+                if (av_hwframe_transfer_data(swFrame.f, srcFrame, 0) < 0)
+                {
+                    // CUDA transfer failed — fill with dark grey
+                    int col = i % cfg.columns;
+                    int row = i / cfg.columns;
+                    int x = cfg.spacing + col * (thumbW + cfg.spacing);
+                    int y = headerH + cfg.spacing + row * (thumbH + cfg.spacing);
+                    fillRect(image.data(), stride, totalW, totalH,
+                             x, y, thumbW, thumbH, 40, 40, 45);
+                    av_frame_unref(decFrame.f);
+                    continue;
+                }
+                srcFrame = swFrame.f;
+            }
+
+            // Lazy SWS init — pixel format known only after first decode
+            if (!thumbSws.ctx)
+            {
+                thumbSws.ctx = sws_getContext(srcW, srcH, (AVPixelFormat)srcFrame->format,
+                                              thumbW, thumbH, AV_PIX_FMT_RGB24,
+                                              SWS_BICUBIC, nullptr, nullptr, nullptr);
+                if (!thumbSws.ctx)
+                {
+                    log("thumbnail: failed to create scaler");
+                    av_frame_unref(decFrame.f);
+                    return false;
+                }
+            }
+
             // Scale decoded frame to thumbnail size (RGB24)
             uint8_t *dstData[1] = {thumbBuf.data()};
             int dstStride[1] = {thumbW * 3};
             sws_scale(thumbSws.ctx,
-                      decFrame.f->data, decFrame.f->linesize, 0, decFrame.f->height,
+                      srcFrame->data, srcFrame->linesize, 0, srcFrame->height,
                       dstData, dstStride);
 
             // Copy thumbnail into composite image
@@ -769,25 +850,300 @@ namespace sm
 
     namespace
     {
+        // Check if file starts with EBML magic bytes (real Matroska container)
+        // NOTE: also exposed as sm::isRealMatroska via the forwarding wrapper below
+        static bool isRealMatroskaImpl(const std::string &path)
+        {
+            std::ifstream f(path, std::ios::binary);
+            if (!f)
+                return false;
+            unsigned char hdr[4]{};
+            f.read(reinterpret_cast<char *>(hdr), 4);
+            // EBML header magic: 0x1A 0x45 0xDF 0xA3
+            return hdr[0] == 0x1A && hdr[1] == 0x45 && hdr[2] == 0xDF && hdr[3] == 0xA3;
+        }
+
+        // Remux a non-Matroska .mkv (e.g. MP4-in-.mkv) to a real Matroska container
+        // using FFmpeg API. Stream-copy only — zero re-encoding, no quality loss.
+        // Fixes timestamp jumps / discontinuities by normalising DTS/PTS per stream.
+        // On success the original file is replaced in-place.
+        static bool remuxToRealMKV(const std::string &path,
+                                   std::function<void(const std::string &)> log)
+        {
+            namespace fs = std::filesystem;
+
+            // Temp output next to original: video~remuxed.mkv
+            auto stem = fs::path(path).stem().string();
+            auto dir = fs::path(path).parent_path();
+            std::string tmpPath = (dir / (stem + "~remuxed.mkv")).string();
+
+            AVFormatContext *inCtx = nullptr;
+            if (avformat_open_input(&inCtx, path.c_str(), nullptr, nullptr) < 0)
+            {
+                if (log)
+                    log("remux: failed to open input: " + path);
+                return false;
+            }
+            if (avformat_find_stream_info(inCtx, nullptr) < 0)
+            {
+                avformat_close_input(&inCtx);
+                if (log)
+                    log("remux: failed to read stream info");
+                return false;
+            }
+
+            AVFormatContext *outCtx = nullptr;
+            if (avformat_alloc_output_context2(&outCtx, nullptr, "matroska", tmpPath.c_str()) < 0)
+            {
+                avformat_close_input(&inCtx);
+                if (log)
+                    log("remux: failed to create matroska output context");
+                return false;
+            }
+
+            // Map every stream (video, audio, subs) — stream copy
+            std::vector<int> streamMap(inCtx->nb_streams, -1);
+            int outIdx = 0;
+            for (unsigned i = 0; i < inCtx->nb_streams; i++)
+            {
+                AVStream *inStream = inCtx->streams[i];
+                auto ctype = inStream->codecpar->codec_type;
+                if (ctype != AVMEDIA_TYPE_VIDEO &&
+                    ctype != AVMEDIA_TYPE_AUDIO &&
+                    ctype != AVMEDIA_TYPE_SUBTITLE)
+                    continue;
+
+                AVStream *outStream = avformat_new_stream(outCtx, nullptr);
+                if (!outStream)
+                {
+                    if (log)
+                        log("remux: failed to create output stream");
+                    avformat_close_input(&inCtx);
+                    avformat_free_context(outCtx);
+                    return false;
+                }
+                avcodec_parameters_copy(outStream->codecpar, inStream->codecpar);
+                outStream->codecpar->codec_tag = 0; // let muxer pick
+                outStream->time_base = inStream->time_base;
+                streamMap[i] = outIdx++;
+            }
+
+            // Open output file
+            if (!(outCtx->oformat->flags & AVFMT_NOFILE))
+            {
+                if (avio_open(&outCtx->pb, tmpPath.c_str(), AVIO_FLAG_WRITE) < 0)
+                {
+                    if (log)
+                        log("remux: failed to open output file: " + tmpPath);
+                    avformat_close_input(&inCtx);
+                    avformat_free_context(outCtx);
+                    return false;
+                }
+            }
+
+            if (avformat_write_header(outCtx, nullptr) < 0)
+            {
+                if (log)
+                    log("remux: failed to write header");
+                avformat_close_input(&inCtx);
+                if (outCtx->pb)
+                    avio_closep(&outCtx->pb);
+                avformat_free_context(outCtx);
+                std::error_code ec;
+                fs::remove(tmpPath, ec);
+                return false;
+            }
+
+            // Per-stream DTS tracker to fix timestamp jumps / discontinuities
+            struct StreamTS
+            {
+                int64_t lastDts = AV_NOPTS_VALUE;
+                int64_t offset = 0; // cumulative offset to fix jumps
+            };
+            std::vector<StreamTS> tsTrack(inCtx->nb_streams);
+
+            AVPacket *pkt = av_packet_alloc();
+            bool ok = true;
+
+            while (av_read_frame(inCtx, pkt) >= 0)
+            {
+                unsigned srcIdx = pkt->stream_index;
+                if (srcIdx >= (unsigned)streamMap.size() || streamMap[srcIdx] < 0)
+                {
+                    av_packet_unref(pkt);
+                    continue;
+                }
+
+                AVStream *inStream = inCtx->streams[srcIdx];
+                AVStream *outStream = outCtx->streams[streamMap[srcIdx]];
+                auto &ts = tsTrack[srcIdx];
+
+                // ── Fix timestamp jumps ──────────────────────────
+                // If DTS jumps backwards or has a large forward gap,
+                // adjust offset so output timestamps stay monotonic.
+                if (pkt->dts != AV_NOPTS_VALUE)
+                {
+                    int64_t adjDts = pkt->dts + ts.offset;
+
+                    if (ts.lastDts != AV_NOPTS_VALUE)
+                    {
+                        int64_t diff = adjDts - ts.lastDts;
+                        // Detect backward jump or huge forward gap (> 10 s in stream TB)
+                        double diffSec = diff * av_q2d(inStream->time_base);
+                        if (diff < 0 || diffSec > 10.0)
+                        {
+                            // Shift so this packet follows right after the last one
+                            // with a 1-tick gap to keep strictly monotonic
+                            ts.offset += (ts.lastDts + 1) - (pkt->dts + ts.offset);
+                            adjDts = ts.lastDts + 1;
+                        }
+                    }
+                    ts.lastDts = adjDts;
+                    pkt->dts = adjDts;
+
+                    // PTS must be >= DTS
+                    if (pkt->pts != AV_NOPTS_VALUE)
+                    {
+                        pkt->pts += ts.offset;
+                        if (pkt->pts < pkt->dts)
+                            pkt->pts = pkt->dts;
+                    }
+                }
+                else if (pkt->pts != AV_NOPTS_VALUE)
+                {
+                    pkt->pts += ts.offset;
+                }
+
+                // Rescale to output timebase
+                pkt->stream_index = streamMap[srcIdx];
+                av_packet_rescale_ts(pkt, inStream->time_base, outStream->time_base);
+
+                if (av_interleaved_write_frame(outCtx, pkt) < 0)
+                {
+                    if (log)
+                        log("remux: write error, aborting");
+                    ok = false;
+                    av_packet_unref(pkt);
+                    break;
+                }
+                // av_interleaved_write_frame already unrefs on success
+            }
+
+            av_packet_free(&pkt);
+            if (ok)
+                ok = (av_write_trailer(outCtx) >= 0);
+
+            avformat_close_input(&inCtx);
+            if (outCtx->pb)
+                avio_closep(&outCtx->pb);
+            avformat_free_context(outCtx);
+
+            if (!ok)
+            {
+                std::error_code ec;
+                fs::remove(tmpPath, ec);
+                if (log)
+                    log("remux: failed, keeping original file");
+                return false;
+            }
+
+            // Verify output is valid BEFORE touching the original
+            {
+                std::error_code szEc;
+                auto tmpSz = fs::file_size(tmpPath, szEc);
+                auto origSz = fs::file_size(path, szEc);
+                if (tmpSz == 0 || (origSz > 0 && tmpSz < origSz / 4))
+                {
+                    std::error_code ec2;
+                    fs::remove(tmpPath, ec2);
+                    if (log)
+                        log("remux: output corrupt/too small (" +
+                            std::to_string(tmpSz) + " vs " + std::to_string(origSz) +
+                            " bytes), keeping original");
+                    return false;
+                }
+                if (!isRealMatroska(tmpPath))
+                {
+                    std::error_code ec2;
+                    fs::remove(tmpPath, ec2);
+                    if (log)
+                        log("remux: output is not valid Matroska, keeping original");
+                    return false;
+                }
+            }
+
+            // Replace original with remuxed file
+            std::error_code ec;
+            fs::remove(path, ec);
+            if (ec)
+            {
+                if (log)
+                    log("remux: failed to remove original: " + ec.message());
+                fs::remove(tmpPath, ec);
+                return false;
+            }
+            fs::rename(tmpPath, path, ec);
+            if (ec)
+            {
+                if (log)
+                    log("remux: failed to rename temp file: " + ec.message());
+                return false;
+            }
+
+            if (log)
+                log("remux: converted to real Matroska: " + fs::path(path).filename().string());
+            return true;
+        }
+
 #ifdef _WIN32
         // Run exe silently (no console window flash) on Windows.
-        // exePath: full path to the executable (used as lpApplicationName)
-        // cmdLine: full command line including exe + args (used as lpCommandLine)
-        static int silentRunExe(const std::string &exePath, const std::string &cmdLine)
+        // Captures stderr so caller can log the actual error message.
+        static int silentRunExe(const std::string &exePath, const std::string &cmdLine,
+                                std::string *stderrOut = nullptr)
         {
+            // Create pipe for stderr capture
+            HANDLE hReadErr = nullptr, hWriteErr = nullptr;
+            SECURITY_ATTRIBUTES sa{};
+            sa.nLength = sizeof(sa);
+            sa.bInheritHandle = TRUE;
+            if (stderrOut)
+                CreatePipe(&hReadErr, &hWriteErr, &sa, 0);
+
             STARTUPINFOA si{};
             si.cb = sizeof(si);
-            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
             si.wShowWindow = SW_HIDE;
+            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+            si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            si.hStdError = stderrOut ? hWriteErr : GetStdHandle(STD_ERROR_HANDLE);
+
             PROCESS_INFORMATION pi{};
-            // CreateProcessA needs mutable buffer for lpCommandLine
             std::string buf = cmdLine;
-            // Pass exePath as lpApplicationName so Windows doesn't need to parse
-            // quoted paths with spaces from the command line
-            BOOL ok = CreateProcessA(exePath.c_str(), buf.data(), nullptr, nullptr, FALSE,
+            BOOL ok = CreateProcessA(exePath.c_str(), buf.data(), nullptr, nullptr, TRUE,
                                      CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+            if (stderrOut && hWriteErr)
+                CloseHandle(hWriteErr); // close write end in parent
+
             if (!ok)
+            {
+                if (stderrOut && hReadErr)
+                    CloseHandle(hReadErr);
                 return -1;
+            }
+
+            // Read stderr while process runs
+            if (stderrOut && hReadErr)
+            {
+                char tmp[512];
+                DWORD nRead;
+                while (ReadFile(hReadErr, tmp, sizeof(tmp) - 1, &nRead, nullptr) && nRead > 0)
+                {
+                    tmp[nRead] = '\0';
+                    *stderrOut += tmp;
+                }
+                CloseHandle(hReadErr);
+            }
+
             WaitForSingleObject(pi.hProcess, INFINITE);
             DWORD code = 1;
             GetExitCodeProcess(pi.hProcess, &code);
@@ -798,45 +1154,402 @@ namespace sm
 #endif
     } // anonymous namespace
 
-    bool embedThumbnailInMKV(
+    bool hasCoverArt(const std::string &videoPath)
+    {
+        AVFormatContext *fmtCtx = nullptr;
+        if (avformat_open_input(&fmtCtx, videoPath.c_str(), nullptr, nullptr) < 0)
+            return false;
+        if (avformat_find_stream_info(fmtCtx, nullptr) < 0)
+        {
+            avformat_close_input(&fmtCtx);
+            return false;
+        }
+        // Check for attached picture streams (cover art)
+        bool found = false;
+        for (unsigned i = 0; i < fmtCtx->nb_streams; i++)
+        {
+            if (fmtCtx->streams[i]->disposition & AV_DISPOSITION_ATTACHED_PIC)
+            {
+                found = true;
+                break;
+            }
+        }
+        // Also check Matroska-style attachments via metadata
+        if (!found)
+        {
+            for (unsigned i = 0; i < fmtCtx->nb_streams; i++)
+            {
+                auto *par = fmtCtx->streams[i]->codecpar;
+                if (par->codec_type == AVMEDIA_TYPE_VIDEO &&
+                    par->codec_id == AV_CODEC_ID_MJPEG)
+                {
+                    found = true;
+                    break;
+                }
+                if (par->codec_id == AV_CODEC_ID_PNG ||
+                    par->codec_id == AV_CODEC_ID_BMP)
+                {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        avformat_close_input(&fmtCtx);
+        return found;
+    }
+
+    bool isRealMatroska(const std::string &path)
+    {
+        return isRealMatroskaImpl(path);
+    }
+
+    bool hasTimestampIssues(const std::string &videoPath,
+                            std::function<void(const std::string &)> logCb)
+    {
+        AVFormatContext *fmtCtx = nullptr;
+        if (avformat_open_input(&fmtCtx, videoPath.c_str(), nullptr, nullptr) < 0)
+            return false;
+        if (avformat_find_stream_info(fmtCtx, nullptr) < 0)
+        {
+            avformat_close_input(&fmtCtx);
+            return false;
+        }
+
+        struct TS
+        {
+            int64_t lastDts = AV_NOPTS_VALUE;
+        };
+        std::vector<TS> tracks(fmtCtx->nb_streams);
+
+        AVPacket *pkt = av_packet_alloc();
+        bool issues = false;
+        int count = 0;
+        constexpr int kMaxPackets = 5000;
+
+        while (av_read_frame(fmtCtx, pkt) >= 0)
+        {
+            unsigned si = pkt->stream_index;
+            if (si < (unsigned)tracks.size() && pkt->dts != AV_NOPTS_VALUE)
+            {
+                auto &t = tracks[si];
+                if (t.lastDts != AV_NOPTS_VALUE)
+                {
+                    int64_t diff = pkt->dts - t.lastDts;
+                    double diffSec = diff * av_q2d(fmtCtx->streams[si]->time_base);
+                    if (diff < 0 || diffSec > 10.0)
+                    {
+                        if (logCb)
+                            logCb("timestamps: DTS jump at pkt " + std::to_string(count) +
+                                  " (stream " + std::to_string(si) +
+                                  ", gap " + std::to_string((int)diffSec) + "s)");
+                        issues = true;
+                        av_packet_unref(pkt);
+                        break;
+                    }
+                }
+                t.lastDts = pkt->dts;
+            }
+            av_packet_unref(pkt);
+            if (++count >= kMaxPackets)
+                break;
+        }
+
+        av_packet_free(&pkt);
+        avformat_close_input(&fmtCtx);
+        return issues;
+    }
+
+    bool fixTimestamps(const std::string &videoPath,
+                       std::function<void(const std::string &)> logCb)
+    {
+        if (logCb)
+            logCb("timestamps: remuxing to fix DTS discontinuities...");
+        return remuxToRealMKV(videoPath, logCb);
+    }
+
+    bool isVRFromPath(const std::string &videoPath)
+    {
+        std::string lower = videoPath;
+        for (auto &c : lower)
+            c = (char)std::tolower((unsigned char)c);
+
+        // Check 1: [*VR] bracket tags (e.g. [SCVR], [DCVR])
+        size_t pos = 0;
+        while ((pos = lower.find('[', pos)) != std::string::npos)
+        {
+            auto end = lower.find(']', pos);
+            if (end != std::string::npos && end - pos >= 3)
+            {
+                if (lower.compare(end - 2, 2, "vr") == 0)
+                    return true;
+            }
+            pos++;
+        }
+
+        // Check 2: /VR/ or \VR\ as a standalone folder segment
+        //           (but NOT "NO VR" — that folder means non-VR)
+        std::string norm = lower;
+        for (auto &c : norm)
+            if (c == '\\')
+                c = '/';
+
+        // Ensure path starts/ends with separator for uniform matching
+        if (norm.front() != '/')
+            norm = "/" + norm;
+
+        auto vrPos = norm.find("/vr/");
+        while (vrPos != std::string::npos)
+        {
+            // Reject if preceded by "no " → "/no vr/"
+            if (vrPos >= 3 && norm.compare(vrPos - 3, 4, "/no ") == 0)
+            {
+                vrPos = norm.find("/vr/", vrPos + 4);
+                continue;
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    // Remux any video file to a real Matroska .mkv container.
+    // For .mkv files that aren't real Matroska, remuxes in-place.
+    // For non-.mkv files (mp4, etc), creates a .mkv alongside and returns the new path.
+    // Stream-copy only — zero re-encoding, no quality loss.
+    static std::string remuxToMKVIfNeeded(
         const std::string &videoPath,
-        const std::string &jpegPath,
-        std::function<void(const std::string &)> logCb,
-        const std::string &mkvpropeditPath)
+        std::function<void(const std::string &)> logCb)
     {
         namespace fs = std::filesystem;
-        auto log = [&](const std::string &msg)
-        {
-            if (logCb)
-                logCb(msg);
-        };
-
-        // Only works for MKV containers
         auto ext = fs::path(videoPath).extension().string();
         for (auto &ch : ext)
             ch = (char)std::tolower((unsigned char)ch);
-        if (ext != ".mkv")
-        {
-            log("thumbnail: embed skipped (not MKV: " + ext + ")");
-            return false;
-        }
 
-        if (!fs::exists(jpegPath))
+        if (ext == ".mkv")
         {
-            log("thumbnail: embed skipped (jpg not found)");
-            return false;
+            // Already .mkv — check if real Matroska
+            if (isRealMatroska(videoPath))
+                return videoPath; // good to go
+            // Fake mkv — remux in-place
+            if (logCb)
+                logCb("thumbnail: not a real Matroska container, remuxing in-place...");
+            if (remuxToRealMKV(videoPath, logCb))
+                return videoPath;
+            return ""; // failed
         }
+        else
+        {
+            // Non-MKV (mp4, ts, etc) — remux to .mkv next to original
+            auto mkvPath = fs::path(videoPath);
+            mkvPath.replace_extension(".mkv");
+            std::string mkvStr = mkvPath.string();
 
-        // Resolve mkvpropedit path: use provided, or auto-detect
-        std::string mkv_exe = mkvpropeditPath;
+            // If .mkv already exists and is real Matroska, use it
+            if (fs::exists(mkvPath) && isRealMatroska(mkvStr))
+                return mkvStr;
+
+            if (logCb)
+                logCb("thumbnail: remuxing " + ext + " to MKV (stream copy)...");
+
+            // Use temp name then rename
+            auto stem = mkvPath.stem().string();
+            auto dir = mkvPath.parent_path();
+            std::string tmpPath = (dir / (stem + "~remuxed.mkv")).string();
+
+            // We can't use remuxToRealMKV directly since paths differ.
+            // Open input from the original non-mkv path, write to tmpPath
+            AVFormatContext *inCtx = nullptr;
+            if (avformat_open_input(&inCtx, videoPath.c_str(), nullptr, nullptr) < 0)
+            {
+                if (logCb)
+                    logCb("remux: failed to open input: " + videoPath);
+                return "";
+            }
+            if (avformat_find_stream_info(inCtx, nullptr) < 0)
+            {
+                avformat_close_input(&inCtx);
+                if (logCb)
+                    logCb("remux: failed to read stream info");
+                return "";
+            }
+
+            AVFormatContext *outCtx = nullptr;
+            if (avformat_alloc_output_context2(&outCtx, nullptr, "matroska", tmpPath.c_str()) < 0)
+            {
+                avformat_close_input(&inCtx);
+                if (logCb)
+                    logCb("remux: failed to create matroska output");
+                return "";
+            }
+
+            std::vector<int> smap(inCtx->nb_streams, -1);
+            int outIdx = 0;
+            for (unsigned i = 0; i < inCtx->nb_streams; i++)
+            {
+                auto ctype = inCtx->streams[i]->codecpar->codec_type;
+                if (ctype != AVMEDIA_TYPE_VIDEO && ctype != AVMEDIA_TYPE_AUDIO &&
+                    ctype != AVMEDIA_TYPE_SUBTITLE)
+                    continue;
+                AVStream *os = avformat_new_stream(outCtx, nullptr);
+                if (!os)
+                {
+                    avformat_close_input(&inCtx);
+                    avformat_free_context(outCtx);
+                    return "";
+                }
+                avcodec_parameters_copy(os->codecpar, inCtx->streams[i]->codecpar);
+                os->codecpar->codec_tag = 0;
+                os->time_base = inCtx->streams[i]->time_base;
+                smap[i] = outIdx++;
+            }
+
+            if (!(outCtx->oformat->flags & AVFMT_NOFILE))
+                if (avio_open(&outCtx->pb, tmpPath.c_str(), AVIO_FLAG_WRITE) < 0)
+                {
+                    avformat_close_input(&inCtx);
+                    avformat_free_context(outCtx);
+                    return "";
+                }
+
+            if (avformat_write_header(outCtx, nullptr) < 0)
+            {
+                avformat_close_input(&inCtx);
+                if (outCtx->pb)
+                    avio_closep(&outCtx->pb);
+                avformat_free_context(outCtx);
+                std::error_code ec;
+                fs::remove(tmpPath, ec);
+                return "";
+            }
+
+            struct STS
+            {
+                int64_t lastDts = AV_NOPTS_VALUE;
+                int64_t offset = 0;
+            };
+            std::vector<STS> tst(inCtx->nb_streams);
+            AVPacket *pkt = av_packet_alloc();
+            bool ok = true;
+            while (av_read_frame(inCtx, pkt) >= 0)
+            {
+                unsigned si = pkt->stream_index;
+                if (si >= smap.size() || smap[si] < 0)
+                {
+                    av_packet_unref(pkt);
+                    continue;
+                }
+                auto *is = inCtx->streams[si];
+                auto *os = outCtx->streams[smap[si]];
+                auto &t = tst[si];
+                if (pkt->dts != AV_NOPTS_VALUE)
+                {
+                    int64_t adj = pkt->dts + t.offset;
+                    if (t.lastDts != AV_NOPTS_VALUE)
+                    {
+                        int64_t d = adj - t.lastDts;
+                        double ds = d * av_q2d(is->time_base);
+                        if (d < 0 || ds > 10.0)
+                        {
+                            t.offset += (t.lastDts + 1) - (pkt->dts + t.offset);
+                            adj = t.lastDts + 1;
+                        }
+                    }
+                    t.lastDts = adj;
+                    pkt->dts = adj;
+                    if (pkt->pts != AV_NOPTS_VALUE)
+                    {
+                        pkt->pts += t.offset;
+                        if (pkt->pts < pkt->dts)
+                            pkt->pts = pkt->dts;
+                    }
+                }
+                else if (pkt->pts != AV_NOPTS_VALUE)
+                    pkt->pts += t.offset;
+                pkt->stream_index = smap[si];
+                av_packet_rescale_ts(pkt, is->time_base, os->time_base);
+                if (av_interleaved_write_frame(outCtx, pkt) < 0)
+                {
+                    ok = false;
+                    av_packet_unref(pkt);
+                    break;
+                }
+            }
+            av_packet_free(&pkt);
+            if (ok)
+                ok = (av_write_trailer(outCtx) >= 0);
+            avformat_close_input(&inCtx);
+            if (outCtx->pb)
+                avio_closep(&outCtx->pb);
+            avformat_free_context(outCtx);
+
+            if (!ok)
+            {
+                std::error_code ec;
+                fs::remove(tmpPath, ec);
+                if (logCb)
+                    logCb("remux: failed");
+                return "";
+            }
+
+            // Verify output is valid BEFORE finalizing
+            {
+                std::error_code szEc;
+                auto tmpSz = fs::file_size(tmpPath, szEc);
+                auto origSz = fs::file_size(videoPath, szEc);
+                if (tmpSz == 0 || (origSz > 0 && tmpSz < origSz / 4))
+                {
+                    std::error_code ec2;
+                    fs::remove(tmpPath, ec2);
+                    if (logCb)
+                        logCb("remux: output corrupt/too small (" +
+                              std::to_string(tmpSz) + " vs " + std::to_string(origSz) +
+                              " bytes), aborting");
+                    return "";
+                }
+                if (!isRealMatroska(tmpPath))
+                {
+                    std::error_code ec2;
+                    fs::remove(tmpPath, ec2);
+                    if (logCb)
+                        logCb("remux: output is not valid Matroska, aborting");
+                    return "";
+                }
+            }
+
+            // Rename temp to final .mkv
+            std::error_code ec;
+            if (fs::exists(mkvPath))
+                fs::remove(mkvPath, ec);
+            fs::rename(tmpPath, mkvPath, ec);
+            if (ec)
+            {
+                if (logCb)
+                    logCb("remux: rename failed: " + ec.message());
+                fs::remove(tmpPath, ec);
+                return "";
+            }
+
+            if (logCb)
+                logCb("remux: created " + mkvPath.filename().string() + " (stream copy)");
+            return mkvStr;
+        }
+    }
+
+    // ── mkvpropedit path resolution (shared by embed + VR inject) ────
+    static std::string resolveMkvpropedit(
+        const std::string &provided,
+        std::function<void(const std::string &)> logCb)
+    {
+        auto log = [&](const std::string &msg)
+        { if (logCb) logCb(msg); };
+
+        std::string mkv_exe = provided;
         if (mkv_exe.empty())
-            mkv_exe = "mkvpropedit"; // bare command, rely on PATH
+            mkv_exe = "mkvpropedit";
 
 #ifdef _WIN32
-        // Auto-detect: if bare command name, resolve full path
         if (mkv_exe == "mkvpropedit")
         {
-            // First check if it's in PATH
             char pathBuf[MAX_PATH];
             if (SearchPathA(nullptr, "mkvpropedit.exe", nullptr, MAX_PATH, pathBuf, nullptr) > 0)
             {
@@ -844,7 +1557,6 @@ namespace sm
             }
             else
             {
-                // Check common install locations
                 const char *candidates[] = {
                     R"(C:\Program Files\MKVToolNix\mkvpropedit.exe)",
                     R"(C:\Program Files (x86)\MKVToolNix\mkvpropedit.exe)",
@@ -860,52 +1572,178 @@ namespace sm
             }
         }
 
-        // Final check: does the resolved exe exist?
         if (mkv_exe != "mkvpropedit" && GetFileAttributesA(mkv_exe.c_str()) == INVALID_FILE_ATTRIBUTES)
         {
-            log("thumbnail: mkvpropedit not found at " + mkv_exe);
-            return false;
+            log("mkvpropedit not found at " + mkv_exe);
+            return "";
         }
         if (mkv_exe == "mkvpropedit")
         {
-            log("thumbnail: mkvpropedit not found (not in PATH or Program Files)");
+            log("mkvpropedit not found (not in PATH or Program Files)");
+            return "";
+        }
+#endif
+        return mkv_exe;
+    }
+
+    // ── VR spatial metadata injection ────────────────────────────────
+    bool injectVRSpatialMetadata(
+        const std::string &mkvPath,
+        std::function<void(const std::string &)> logCb,
+        const std::string &mkvpropeditPath)
+    {
+        namespace fs = std::filesystem;
+        auto log = [&](const std::string &msg)
+        { if (logCb) logCb(msg); };
+
+        if (!fs::exists(mkvPath))
+        {
+            log("vr: file not found: " + mkvPath);
             return false;
         }
 
-        log("thumbnail: using mkvpropedit: " + mkv_exe);
-#endif
+        std::string mkv_exe = resolveMkvpropedit(mkvpropeditPath, logCb);
+        if (mkv_exe.empty())
+            return false;
 
-        // Build command line for mkvpropedit
-        std::string cmdLine = "\"" + mkv_exe + "\""
-                                               " \"" +
-                              videoPath + "\""
-                                          " --attachment-name cover.jpg"
-                                          " --attachment-mime-type image/jpeg"
-                                          " --add-attachment \"" +
-                              jpegPath + "\"";
+        // Set Matroska native VR track elements via mkvpropedit:
+        //   stereo-mode=1              → side-by-side (left eye first)
+        //   projection-type=1          → equirectangular
+        //   projection-pose-*=0        → no rotation
+        //   projection-private          → protobuf EquirectProjection with FOV bounds:
+        //     Field 3 (left_fov=90.0f):  tag=0x1D + float32 LE 0x0000B442
+        //     Field 4 (right_fov=90.0f): tag=0x25 + float32 LE 0x0000B442
+        //     → crops equirectangular to front 180° hemisphere (fisheye 180 SBS)
+        std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
+                                                                   " --edit track:v1"
+                                                                   " --set stereo-mode=1"
+                                                                   " --set projection-type=1"
+                                                                   " --set projection-pose-yaw=0"
+                                                                   " --set projection-pose-pitch=0"
+                                                                   " --set projection-pose-roll=0"
+                                                                   " --set projection-private=hex:1D0000B442250000B442";
+
+        log("vr: injecting fisheye 180\xC2\xB0 SBS spatial metadata...");
 
         int ret;
 #ifdef _WIN32
-        // Pass exe path explicitly as lpApplicationName for correct resolution
-        ret = silentRunExe(mkv_exe, cmdLine);
+        std::string errMsg;
+        ret = silentRunExe(mkv_exe, cmdLine, &errMsg);
 #else
-        cmdLine += " >/dev/null 2>&1";
+        cmdLine += " 2>&1";
         ret = std::system(cmdLine.c_str());
+        std::string errMsg;
 #endif
 
         if (ret == 0)
         {
-            // Embedded successfully — remove external .jpg
-            std::error_code ec;
-            fs::remove(jpegPath, ec);
-            log("thumbnail: embedded cover art in " +
-                fs::path(videoPath).filename().string());
+            log("vr: spatial metadata set (fisheye 180\xC2\xB0 SBS)");
             return true;
         }
 
-        log("thumbnail: mkvpropedit failed (exit code " +
-            std::to_string(ret) + "), keeping external .jpg");
+        while (!errMsg.empty() && (errMsg.back() == '\n' || errMsg.back() == '\r' || errMsg.back() == ' '))
+            errMsg.pop_back();
+
+        std::string failMsg = "vr: mkvpropedit failed (exit " + std::to_string(ret) + ")";
+        if (!errMsg.empty())
+            failMsg += ": " + errMsg;
+        log(failMsg);
         return false;
+    }
+
+    // ── Embed thumbnail + VR metadata ───────────────────────────────
+    bool embedThumbnailInMKV(
+        const std::string &videoPath,
+        const std::string &jpegPath,
+        std::function<void(const std::string &)> logCb,
+        const std::string &mkvpropeditPath)
+    {
+        namespace fs = std::filesystem;
+        auto log = [&](const std::string &msg)
+        {
+            if (logCb)
+                logCb(msg);
+        };
+
+        // Step 1: Ensure we have a real Matroska file (remux if needed)
+        std::string mkvPath = remuxToMKVIfNeeded(videoPath, logCb);
+        if (mkvPath.empty())
+        {
+            log("thumbnail: cannot prepare MKV for processing");
+            return false;
+        }
+
+        // Step 2: Resolve mkvpropedit
+        std::string mkv_exe = resolveMkvpropedit(mkvpropeditPath, logCb);
+        if (mkv_exe.empty())
+            return false;
+
+        log("thumbnail: using mkvpropedit: " + mkv_exe);
+
+        bool ok = true;
+
+        // Step 3: Embed cover art (if jpg exists and no cover yet)
+        if (fs::exists(jpegPath))
+        {
+            if (hasCoverArt(mkvPath))
+            {
+                log("thumbnail: already has cover art, skipping embed");
+            }
+            else
+            {
+                std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
+                                                                           " --attachment-name cover.jpg"
+                                                                           " --attachment-mime-type image/jpeg"
+                                                                           " --add-attachment \"" +
+                                      jpegPath + "\"";
+
+                log("thumbnail: embedding in " + fs::path(mkvPath).filename().string() + "...");
+
+                int ret;
+#ifdef _WIN32
+                std::string errMsg;
+                ret = silentRunExe(mkv_exe, cmdLine, &errMsg);
+#else
+                cmdLine += " 2>&1";
+                ret = std::system(cmdLine.c_str());
+                std::string errMsg;
+#endif
+
+                if (ret == 0)
+                {
+                    log("thumbnail: embedded cover art in " +
+                        fs::path(mkvPath).filename().string());
+                }
+                else
+                {
+                    while (!errMsg.empty() && (errMsg.back() == '\n' || errMsg.back() == '\r' || errMsg.back() == ' '))
+                        errMsg.pop_back();
+
+                    std::string failMsg = "thumbnail: mkvpropedit failed (exit code " + std::to_string(ret) + ")";
+                    if (!errMsg.empty())
+                        failMsg += ": " + errMsg;
+                    failMsg += ", keeping external .jpg";
+                    log(failMsg);
+                    ok = false;
+                }
+            }
+        }
+
+        // Step 4: Inject VR spatial metadata if this is VR content
+        if (isVRFromPath(videoPath))
+        {
+            log("thumbnail: VR content detected, injecting spatial metadata...");
+            injectVRSpatialMetadata(mkvPath, logCb, mkv_exe);
+        }
+
+        return ok;
+    }
+
+    std::string ensureRealMKV(
+        const std::string &videoPath,
+        std::function<void(const std::string &)> logCb)
+    {
+        return remuxToMKVIfNeeded(videoPath, logCb);
     }
 
 } // namespace sm
