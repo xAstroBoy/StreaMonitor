@@ -526,7 +526,8 @@ namespace sm
         const std::string &videoPath,
         const std::string &outputPath,
         const ThumbnailConfig &cfg,
-        std::function<void(const std::string &)> logCb)
+        std::function<void(const std::string &)> logCb,
+        std::function<bool()> cancelCb)
     {
         auto log = [&](const std::string &msg)
         {
@@ -692,6 +693,12 @@ namespace sm
         int framesExtracted = 0;
         for (int i = 0; i < totalFrames; ++i)
         {
+            // Check cancel between frame extractions
+            if (cancelCb && cancelCb())
+            {
+                log("thumbnail: cancelled by user");
+                return false;
+            }
             double seekTime = skipStart + (i + 1) * interval;
             if (seekTime >= duration)
                 seekTime = duration - 0.5;
@@ -868,7 +875,8 @@ namespace sm
         // Fixes timestamp jumps / discontinuities by normalising DTS/PTS per stream.
         // On success the original file is replaced in-place.
         static bool remuxToRealMKV(const std::string &path,
-                                   std::function<void(const std::string &)> log)
+                                   std::function<void(const std::string &)> log,
+                                   std::function<bool()> cancelCb = nullptr)
         {
             namespace fs = std::filesystem;
 
@@ -972,9 +980,18 @@ namespace sm
 
             AVPacket *pkt = av_packet_alloc();
             bool ok = true;
+            int pktCount = 0;
 
             while (av_read_frame(inCtx, pkt) >= 0)
             {
+                // Check cancel every 100 packets for responsive abort
+                if (++pktCount % 100 == 0 && cancelCb && cancelCb())
+                {
+                    if (log) log("remux: cancelled by user");
+                    ok = false;
+                    av_packet_unref(pkt);
+                    break;
+                }
                 unsigned srcIdx = pkt->stream_index;
                 if (srcIdx >= (unsigned)streamMap.size() || streamMap[srcIdx] < 0)
                 {
@@ -1268,11 +1285,12 @@ namespace sm
     }
 
     bool fixTimestamps(const std::string &videoPath,
-                       std::function<void(const std::string &)> logCb)
+                       std::function<void(const std::string &)> logCb,
+                       std::function<bool()> cancelCb)
     {
         if (logCb)
             logCb("timestamps: remuxing to fix DTS discontinuities...");
-        return remuxToRealMKV(videoPath, logCb);
+        return remuxToRealMKV(videoPath, logCb, cancelCb);
     }
 
     bool isVRFromPath(const std::string &videoPath)
@@ -1326,7 +1344,8 @@ namespace sm
     // Stream-copy only — zero re-encoding, no quality loss.
     static std::string remuxToMKVIfNeeded(
         const std::string &videoPath,
-        std::function<void(const std::string &)> logCb)
+        std::function<void(const std::string &)> logCb,
+        std::function<bool()> cancelCb = nullptr)
     {
         namespace fs = std::filesystem;
         auto ext = fs::path(videoPath).extension().string();
@@ -1341,7 +1360,7 @@ namespace sm
             // Fake mkv — remux in-place
             if (logCb)
                 logCb("thumbnail: not a real Matroska container, remuxing in-place...");
-            if (remuxToRealMKV(videoPath, logCb))
+            if (remuxToRealMKV(videoPath, logCb, cancelCb))
                 return videoPath;
             return ""; // failed
         }
@@ -1438,8 +1457,17 @@ namespace sm
             std::vector<STS> tst(inCtx->nb_streams);
             AVPacket *pkt = av_packet_alloc();
             bool ok = true;
+            int pktCount = 0;
             while (av_read_frame(inCtx, pkt) >= 0)
             {
+                // Check cancel every 100 packets for responsive abort
+                if (++pktCount % 100 == 0 && cancelCb && cancelCb())
+                {
+                    if (logCb) logCb("remux: cancelled by user");
+                    ok = false;
+                    av_packet_unref(pkt);
+                    break;
+                }
                 unsigned si = pkt->stream_index;
                 if (si >= smap.size() || smap[si] < 0)
                 {
@@ -1811,9 +1839,102 @@ namespace sm
 
     std::string ensureRealMKV(
         const std::string &videoPath,
-        std::function<void(const std::string &)> logCb)
+        std::function<void(const std::string &)> logCb,
+        std::function<bool()> cancelCb)
     {
-        return remuxToMKVIfNeeded(videoPath, logCb);
+        return remuxToMKVIfNeeded(videoPath, logCb, cancelCb);
+    }
+
+    // ── Processed tag via MKV metadata ───────────────────────────────
+    // Uses FFmpeg metadata API to read, mkvpropedit --tags to write.
+    // Tag: global MKV tag THUMBNAILED=done
+
+    bool hasProcessedTag(const std::string &videoPath)
+    {
+        AVFormatContext *fmtCtx = nullptr;
+        if (avformat_open_input(&fmtCtx, videoPath.c_str(), nullptr, nullptr) < 0)
+            return false;
+        // Don't need full stream info — just metadata
+        // But we do need it for tag reading in some containers
+        avformat_find_stream_info(fmtCtx, nullptr);
+
+        bool found = false;
+        if (fmtCtx->metadata)
+        {
+            AVDictionaryEntry *tag = av_dict_get(fmtCtx->metadata, "THUMBNAILED", nullptr, 0);
+            if (tag && tag->value)
+                found = true;
+        }
+        avformat_close_input(&fmtCtx);
+        return found;
+    }
+
+    bool writeProcessedTag(
+        const std::string &mkvPath,
+        std::function<void(const std::string &)> logCb,
+        const std::string &mkvpropeditPath)
+    {
+        namespace fs = std::filesystem;
+        auto log = [&](const std::string &msg)
+        { if (logCb) logCb(msg); };
+
+        if (!fs::exists(mkvPath) || !isRealMatroska(mkvPath))
+            return false;
+
+        std::string mkv_exe = resolveMkvpropedit(mkvpropeditPath, logCb);
+        if (mkv_exe.empty())
+            return false;
+
+        // Create a temporary XML tags file for mkvpropedit --tags
+        // Format: global tag THUMBNAILED=done
+        auto tmpDir = fs::temp_directory_path();
+        std::string tagFile = (tmpDir / "sm_tag.xml").string();
+        {
+            std::ofstream f(tagFile);
+            f << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+              << "<Tags>\n"
+              << "  <Tag>\n"
+              << "    <Targets></Targets>\n"
+              << "    <Simple>\n"
+              << "      <Name>THUMBNAILED</Name>\n"
+              << "      <String>done</String>\n"
+              << "    </Simple>\n"
+              << "  </Tag>\n"
+              << "</Tags>\n";
+        }
+
+        std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
+                              " --tags global:\"" + tagFile + "\"";
+
+        int ret;
+#ifdef _WIN32
+        std::string errMsg;
+        ret = silentRunExe(mkv_exe, cmdLine, &errMsg);
+#else
+        cmdLine += " 2>&1";
+        ret = std::system(cmdLine.c_str());
+        std::string errMsg;
+#endif
+
+        // Clean up temp file
+        std::error_code ec;
+        fs::remove(tagFile, ec);
+
+        if (ret == 0)
+        {
+            log("tag: marked as processed (THUMBNAILED=done)");
+            return true;
+        }
+        else
+        {
+            while (!errMsg.empty() && (errMsg.back() == '\n' || errMsg.back() == '\r' || errMsg.back() == ' '))
+                errMsg.pop_back();
+            std::string failMsg = "tag: mkvpropedit failed (exit " + std::to_string(ret) + ")";
+            if (!errMsg.empty())
+                failMsg += ": " + errMsg;
+            log(failMsg);
+            return false;
+        }
     }
 
 } // namespace sm

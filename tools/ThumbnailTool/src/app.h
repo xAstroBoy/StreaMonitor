@@ -28,9 +28,9 @@ namespace tt
     {
         std::atomic<bool> active{false};
         std::string filePath;
-        std::string action;    // "Remuxing", "Generating", "Embedding", "VR Metadata", etc.
-        std::string subAction; // more detail like frame count, percentage
-        int64_t fileSize = 0;  // size of current file being processed
+        std::string action;                              // "Remuxing", "Generating", "Embedding", "VR Metadata", etc.
+        std::string subAction;                           // more detail like frame count, percentage
+        int64_t fileSize = 0;                            // size of current file being processed
         std::chrono::steady_clock::time_point startTime; // when this file started
         std::mutex mtx;
     };
@@ -58,10 +58,12 @@ namespace tt
         bool hasThumb = false;      // .jpg file exists (or embedded cover = treated as thumb)
         bool hasCoverEmbed = false; // MKV has embedded cover art (detected during scan)
         bool coverProbed = false;   // true once hasCoverArt() has been called (deferred)
+        bool hasTag = false;        // has THUMBNAILED metadata tag (definitive processed marker)
         bool tsFixed = false;       // timestamps were fixed this run
         bool remuxed = false;       // was remuxed to real MKV this run
         bool processed = false;     // processed this run
         bool failed = false;        // processing failed
+        bool regenQueued = false;   // queued for thumbnail regeneration
         std::string errorMsg;
     };
 
@@ -110,8 +112,8 @@ namespace tt
         std::deque<std::string> log_;
         std::mutex logMtx_;
         bool autoScroll_ = true;
-        char logFilter_[128] = {};       // text search filter for log panel
-        int logLevelFilter_ = 0;         // 0=All, 1=INFO+, 2=WARN+, 3=ERROR only
+        char logFilter_[128] = {}; // text search filter for log panel
+        int logLevelFilter_ = 0;   // 0=All, 1=INFO+, 2=WARN+, 3=ERROR only
 
         // State
         bool scanned_ = false;

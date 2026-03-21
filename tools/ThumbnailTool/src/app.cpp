@@ -11,6 +11,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #include <shlwapi.h>
 #endif
 
@@ -276,11 +277,14 @@ namespace tt
             {
                 ve.hasCoverEmbed = sm::hasCoverArt(entry.path().string());
                 ve.coverProbed = true;
+                // Check for the definitive THUMBNAILED metadata tag
+                ve.hasTag = sm::hasProcessedTag(entry.path().string());
             }
             else
             {
                 ve.hasCoverEmbed = false;
                 ve.coverProbed = false;
+                ve.hasTag = false;
             }
 
             // Collect file size (fast — cached in directory entry on Windows)
@@ -294,8 +298,8 @@ namespace tt
             }
 
             count++;
-            // Count as "with thumbnail" if sidecar .jpg exists OR cover is embedded in MKV
-            if (ve.hasThumb || ve.hasCoverEmbed)
+            // Count as "with thumbnail" if the processed tag is present, or sidecar .jpg exists, or cover is embedded
+            if (ve.hasTag || ve.hasThumb || ve.hasCoverEmbed)
                 wThumb++;
             else
                 woThumb++;
@@ -342,7 +346,7 @@ namespace tt
         etaRollingBps_ = 0;
 
         // Count ALL unprocessed videos and calculate total bytes
-        // Skip files that are already done (processed this run, OR already a Real MKV with cover art)
+        // Skip files that are already done (processed this run, OR have the THUMBNAILED metadata tag)
         int count = 0;
         int64_t totalB = 0;
         int skipped = 0;
@@ -353,9 +357,9 @@ namespace tt
                 // Skip if already processed this run
                 if (v.processed)
                     continue;
-                // Skip if already fully done from a previous run
-                // (Real MKV with embedded cover art = already went through the full pipeline)
-                if (v.container == ContainerType::RealMKV && v.hasCoverEmbed)
+                // Skip if has the THUMBNAILED metadata tag (processed by a previous run)
+                // UNLESS it's been queued for regeneration
+                if (v.hasTag && !v.regenQueued)
                 {
                     v.processed = true; // mark so UI shows as Done
                     skipped++;
@@ -370,7 +374,7 @@ namespace tt
 
         if (skipped > 0)
             addLog("[INFO] Skipped " + std::to_string(skipped) +
-                   " already-processed files (Real MKV with embedded cover)");
+                   " already-processed files (THUMBNAILED tag found)");
 
         if (count == 0)
         {
@@ -418,10 +422,11 @@ namespace tt
             for (size_t i = 0; i < videos_.size(); i++)
             {
                 auto &v = videos_[i];
-                // Skip already processed or already-done files
+                // Skip already processed
                 if (v.processed)
                     continue;
-                if (v.container == ContainerType::RealMKV && v.hasCoverEmbed)
+                // Skip if has processed tag (unless queued for regen)
+                if (v.hasTag && !v.regenQueued)
                     continue;
                 sizeIdx.push_back({v.fileSize, i});
             }
@@ -532,7 +537,7 @@ namespace tt
             {
                 setProgress(videoStr, "Remuxing", "Converting to MKV...");
                 addLog("[INFO] Remuxing to MKV: " + videoStr);
-                std::string mkvPath = sm::ensureRealMKV(videoStr, logCb);
+                std::string mkvPath = sm::ensureRealMKV(videoStr, logCb, shouldCancel);
                 if (mkvPath.empty())
                 {
                     // Clean up orphaned temp and thumbnail files
@@ -596,7 +601,7 @@ namespace tt
                     setProgress(videoStr, "Fixing TS", "Remuxing to fix timestamps...");
                     addLog("[INFO] Timestamps broken → remuxing to fix: " +
                            videoStr);
-                    if (sm::fixTimestamps(videoStr, logCb))
+                    if (sm::fixTimestamps(videoStr, logCb, shouldCancel))
                     {
                         tsFixed = true;
                         wasRemuxed = true;
@@ -611,9 +616,23 @@ namespace tt
 
             // ── STEP 3: Has thumbnail? → No → Generate it! ─────────────
             // Check embedded cover art first (deferred probe)
+            // If regenQueued, force regeneration regardless of existing cover
             if (shouldCancel())
                 break; // Early exit check
-            if (!alreadyHasJpg)
+
+            bool isRegen = false;
+            {
+                std::lock_guard lock(videosMutex_);
+                isRegen = videos_[idx].regenQueued;
+            }
+
+            if (isRegen)
+            {
+                // Force regeneration — pretend there's no thumbnail
+                alreadyHasJpg = false;
+                addLog("[INFO] Regenerating thumbnail (user request): " + videoStr);
+            }
+            else if (!alreadyHasJpg)
             {
                 setProgress(videoStr, "Probing", "Checking for cover art...");
                 bool probed = false;
@@ -643,7 +662,7 @@ namespace tt
             {
                 setProgress(videoStr, "Generating", "Creating contact sheet...");
                 addLog("[INFO] Generating thumbnail: " + videoStr);
-                genOk = sm::generateContactSheet(videoStr, thumbStr, tc, logCb);
+                genOk = sm::generateContactSheet(videoStr, thumbStr, tc, logCb, shouldCancel);
             }
 
             bool anyError = false;
@@ -673,7 +692,19 @@ namespace tt
             {
                 setProgress(videoStr, "Embedding", "Checking cover art...");
                 bool wasEmbedded = sm::hasCoverArt(videoStr);
-                if (!wasEmbedded && fs::exists(thumbStr))
+
+                // For regeneration, force re-embed even if cover exists
+                if (isRegen && wasEmbedded && fs::exists(thumbStr))
+                {
+                    setProgress(videoStr, "Embedding", "Replacing cover art...");
+                    addLog("[INFO] Replacing cover art: " + videoStr);
+                    if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb))
+                    {
+                        embeddedCount_.fetch_add(1);
+                        wasEmbedded = true;
+                    }
+                }
+                else if (!wasEmbedded && fs::exists(thumbStr))
                 {
                     setProgress(videoStr, "Embedding", "Adding cover to MKV...");
                     addLog("[INFO] Embedding cover art: " + videoStr);
@@ -683,7 +714,7 @@ namespace tt
                         wasEmbedded = true;
                     }
                 }
-                else if (wasEmbedded)
+                else if (wasEmbedded && !isRegen)
                 {
                     setProgress(videoStr, "Fix Meta", "Updating DLNA metadata...");
                     // Fix existing cover attachment metadata for DLNA compatibility
@@ -711,11 +742,20 @@ namespace tt
                     vrCount_.fetch_add(1);
             }
 
+            // ── STEP 6: Write THUMBNAILED metadata tag ──────────────────
+            if (!shouldCancel() && !anyError)
+            {
+                setProgress(videoStr, "Tagging", "Writing metadata tag...");
+                sm::writeProcessedTag(videoStr, logCb);
+            }
+
             // Mark processed
             setProgress(videoStr, "Done", "");
             {
                 std::lock_guard lock(videosMutex_);
                 videos_[idx].processed = true;
+                videos_[idx].hasTag = true;
+                videos_[idx].regenQueued = false;
             }
 
             processedCount_.fetch_add(1);
@@ -1175,7 +1215,7 @@ namespace tt
                     countAll++;
                     if (v.failed)
                         countFailed++;
-                    else if (v.processed || v.hasThumb)
+                    else if (v.processed || v.hasTag || v.hasThumb)
                         countDone++;
                     else
                         countPending++;
@@ -1235,12 +1275,12 @@ namespace tt
 
             if (ImGui::BeginTable("##InProgressTable", 6, tFlags, ImGui::GetContentRegionAvail()))
             {
-                ImGui::TableSetupColumn("##",        ImGuiTableColumnFlags_WidthFixed, 28);      // thread #
-                ImGui::TableSetupColumn("Action",    ImGuiTableColumnFlags_WidthFixed, 100);
-                ImGui::TableSetupColumn("Detail",    ImGuiTableColumnFlags_WidthFixed, 180);
-                ImGui::TableSetupColumn("Size",      ImGuiTableColumnFlags_WidthFixed, 80);
-                ImGui::TableSetupColumn("Elapsed",   ImGuiTableColumnFlags_WidthFixed, 70);
-                ImGui::TableSetupColumn("File",      ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("##", ImGuiTableColumnFlags_WidthFixed, 28); // thread #
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 100);
+                ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthFixed, 180);
+                ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Elapsed", ImGuiTableColumnFlags_WidthFixed, 70);
+                ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableHeadersRow();
 
                 for (int t = 0; t < numThreads && t < kMaxThreads; t++)
@@ -1357,10 +1397,12 @@ namespace tt
             int64_t fileSize;
             bool hasThumb;
             bool hasCoverEmbed;
+            bool hasTag;
             bool processed;
             bool failed;
             bool tsFixed;
             bool remuxed;
+            size_t videoIdx; // index into videos_ for context menu actions
 
             // Sort key helpers
             int containerKey() const { return (int)container; }
@@ -1369,7 +1411,7 @@ namespace tt
             {
                 if (failed)
                     return 0;
-                if (processed)
+                if (processed || hasTag)
                     return 1;
                 if (!hasThumb)
                     return 2;
@@ -1381,12 +1423,13 @@ namespace tt
         {
             std::lock_guard lock(videosMutex_);
             rows.reserve(videos_.size());
-            for (auto &v : videos_)
+            for (size_t vi = 0; vi < videos_.size(); vi++)
             {
+                auto &v = videos_[vi];
                 // Tab-based filtering
                 bool isFailed = v.failed;
-                // Done = processed this session OR (Real MKV with thumbnail/cover embedded)
-                bool isDone = !v.failed && (v.processed ||
+                // Done = processed this session OR has THUMBNAILED tag OR (Real MKV with thumbnail/cover)
+                bool isDone = !v.failed && (v.processed || v.hasTag ||
                                             (v.container == ContainerType::RealMKV && (v.hasThumb || v.hasCoverEmbed)));
                 bool isPending = !isFailed && !isDone;
 
@@ -1412,7 +1455,7 @@ namespace tt
                 }
 
                 rows.push_back({v.relDisplay, v.container, v.fileSize, v.hasThumb,
-                                v.hasCoverEmbed, v.processed, v.failed, v.tsFixed, v.remuxed});
+                                v.hasCoverEmbed, v.hasTag, v.processed, v.failed, v.tsFixed, v.remuxed, vi});
             }
         }
 
@@ -1493,10 +1536,61 @@ namespace tt
                 {
                     auto &r = rows[i];
                     ImGui::TableNextRow();
+                    ImGui::PushID(i);
 
-                    // File column
+                    // File column — selectable for context menu
                     ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(r.rel.c_str());
+                    ImGui::Selectable(r.rel.c_str(), false,
+                                      ImGuiSelectableFlags_SpanAllColumns |
+                                      ImGuiSelectableFlags_AllowOverlap);
+
+                    // Right-click context menu on the row
+                    if (ImGui::BeginPopupContextItem("##RowCtx"))
+                    {
+                        ImGui::TextColored(COL_DIM, "%s", r.rel.c_str());
+                        ImGui::Separator();
+
+                        if (ImGui::MenuItem("Regenerate Thumbnail"))
+                        {
+                            std::lock_guard lock(videosMutex_);
+                            if (r.videoIdx < videos_.size())
+                            {
+                                videos_[r.videoIdx].regenQueued = true;
+                                videos_[r.videoIdx].processed = false;
+                                videos_[r.videoIdx].failed = false;
+                                videos_[r.videoIdx].errorMsg.clear();
+                            }
+                            addLog("[INFO] Queued for regeneration: " + r.rel);
+                        }
+
+                        if (ImGui::MenuItem("Copy Path"))
+                        {
+                            std::string fullPath;
+                            {
+                                std::lock_guard lock(videosMutex_);
+                                if (r.videoIdx < videos_.size())
+                                    fullPath = videos_[r.videoIdx].videoPath.string();
+                            }
+                            if (!fullPath.empty())
+                                ImGui::SetClipboardText(fullPath.c_str());
+                        }
+
+                        if (ImGui::MenuItem("Open Folder"))
+                        {
+                            std::string folder;
+                            {
+                                std::lock_guard lock(videosMutex_);
+                                if (r.videoIdx < videos_.size())
+                                    folder = videos_[r.videoIdx].videoPath.parent_path().string();
+                            }
+#ifdef _WIN32
+                            if (!folder.empty())
+                                ShellExecuteA(nullptr, "open", folder.c_str(), nullptr, nullptr, SW_SHOW);
+#endif
+                        }
+
+                        ImGui::EndPopup();
+                    }
 
                     // Size column
                     ImGui::TableNextColumn();
@@ -1530,18 +1624,20 @@ namespace tt
                     ImGui::TableNextColumn();
                     if (r.failed)
                         DrawBadge("Failed", COL_BADGE_ERR);
-                    else if (r.processed)
+                    else if (r.processed || r.hasTag)
                     {
                         DrawBadge("Done", COL_BADGE_OK);
+                        if (r.hasTag)
+                            DrawBadge("Tagged", IM_COL32(60, 160, 160, 255));
                         if (r.remuxed)
                             DrawBadge("Remuxed", IM_COL32(100, 60, 200, 255));
                         if (r.tsFixed)
                             DrawBadge("TS Fixed", IM_COL32(60, 130, 200, 255));
                     }
-                    else if (r.container == ContainerType::RealMKV && (r.hasThumb || r.hasCoverEmbed))
-                        DrawBadge("Done", COL_BADGE_OK); // Already has thumbnail - done from previous run
                     else
                         DrawBadge("Pending", COL_BADGE_PEND);
+
+                    ImGui::PopID();
                 }
             }
             ImGui::EndTable();
@@ -1576,10 +1672,10 @@ namespace tt
                 ImGui::SameLine(0, 4);
             };
 
-            levelBtn("All",  0, COL_TEXT);
+            levelBtn("All", 0, COL_TEXT);
             levelBtn("Info", 1, COL_DIM);
             levelBtn("Warn", 2, COL_YELLOW);
-            levelBtn("Err",  3, COL_RED);
+            levelBtn("Err", 3, COL_RED);
 
             ImGui::SameLine(0, 12);
             ImGui::SetNextItemWidth(std::min(w * 0.4f, 300.0f));
