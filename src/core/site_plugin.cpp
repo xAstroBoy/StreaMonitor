@@ -16,6 +16,10 @@
 #include <algorithm>
 #include <fstream>
 #include <regex>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -633,10 +637,52 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Output filename generation — faithful port of Python
-    // genOutFilename with sidecar checking, zero-byte cleanup,
-    // first-gap algorithm
+    // Output filename generation — supports configurable format (Issue #44)
+    // Tokens: {n} = sequential number, {model} = username, {site} = site slug,
+    //         {date} = YYYY-MM-DD, {time} = HH-MM-SS, {datetime} = YYYYMMDD-HHMMSS
+    // Legacy default "{n}" preserves backward compat (sidecar checking, zero-byte cleanup)
     // ─────────────────────────────────────────────────────────────────
+
+    // Helper: replace all occurrences of a token in a string
+    static std::string replaceAll(std::string str, const std::string &token, const std::string &value)
+    {
+        size_t pos = 0;
+        while ((pos = str.find(token, pos)) != std::string::npos)
+        {
+            str.replace(pos, token.length(), value);
+            pos += value.length();
+        }
+        return str;
+    }
+
+    // Helper: expand format tokens (except {n}) with current time and model info
+    static std::string expandFormatTokens(const std::string &fmt,
+                                           const std::string &username,
+                                           const std::string &siteSlug)
+    {
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_now{};
+#ifdef _WIN32
+        localtime_s(&tm_now, &time_t_now);
+#else
+        localtime_r(&time_t_now, &tm_now);
+#endif
+        // Format date/time strings
+        char dateBuf[16], timeBuf[16], datetimeBuf[32];
+        std::strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", &tm_now);
+        std::strftime(timeBuf, sizeof(timeBuf), "%H-%M-%S", &tm_now);
+        std::strftime(datetimeBuf, sizeof(datetimeBuf), "%Y%m%d-%H%M%S", &tm_now);
+
+        std::string result = fmt;
+        result = replaceAll(result, "{model}", username);
+        result = replaceAll(result, "{site}", siteSlug);
+        result = replaceAll(result, "{datetime}", std::string(datetimeBuf));
+        result = replaceAll(result, "{date}", std::string(dateBuf));
+        result = replaceAll(result, "{time}", std::string(timeBuf));
+        return result;
+    }
+
     std::string SitePlugin::generateOutputPath(const AppConfig &config)
     {
         std::lock_guard lock(fileNumberMutex_);
@@ -689,74 +735,114 @@ namespace sm
             };
         };
 
-        // ── Pass 2: Find first available gap (Python while True loop)
-        int n = 1;
-        while (true)
+        // Determine filename format (default: "{n}" for legacy behavior)
+        std::string nameFormat = config.filenameFormat.empty() ? "{n}" : config.filenameFormat;
+
+        // Check if the format uses sequential numbering
+        bool usesSequentialNumber = (nameFormat.find("{n}") != std::string::npos);
+
+        if (usesSequentialNumber)
         {
-            auto candidate = dir / (std::to_string(n) + ext);
+            // ── Sequential numbering mode: gap-finding with sidecar checks ──
+            // Expand non-{n} tokens first
+            std::string expandedBase = expandFormatTokens(nameFormat, username_, siteSlug_);
 
-            // If candidate file exists...
-            if (fs::exists(candidate, ec))
+            int n = 1;
+            while (true)
             {
-                try
-                {
-                    if (fs::file_size(candidate, ec) > 0)
-                    {
-                        n++;
-                        continue; // slot occupied by valid file
-                    }
-                    // Zero-byte → remove and reuse
-                    fs::remove(candidate, ec);
-                    logger_->debug("Removed zero-byte file during numbering: {}{}", n, ext);
-                }
-                catch (...)
-                {
-                    n++;
-                    continue;
-                }
-            }
+                std::string filename = replaceAll(expandedBase, "{n}", std::to_string(n));
+                auto candidate = dir / (filename + ext);
 
-            // Check sidecar files — if any non-zero sidecar exists,
-            // this slot is "in use" by another download
-            bool blocked = false;
-            for (const auto &sidecar : sidecarsFor(candidate))
-            {
-                if (fs::exists(sidecar, ec))
+                // If candidate file exists...
+                if (fs::exists(candidate, ec))
                 {
                     try
                     {
-                        if (fs::file_size(sidecar, ec) == 0)
+                        if (fs::file_size(candidate, ec) > 0)
                         {
-                            fs::remove(sidecar, ec);
-                            logger_->debug("Removed zero-byte sidecar: {}",
-                                           sidecar.filename().string());
+                            n++;
+                            continue; // slot occupied by valid file
                         }
-                        else
+                        // Zero-byte → remove and reuse
+                        fs::remove(candidate, ec);
+                        logger_->debug("Removed zero-byte file during numbering: {}{}", n, ext);
+                    }
+                    catch (...)
+                    {
+                        n++;
+                        continue;
+                    }
+                }
+
+                // Check sidecar files
+                bool blocked = false;
+                for (const auto &sidecar : sidecarsFor(candidate))
+                {
+                    if (fs::exists(sidecar, ec))
+                    {
+                        try
+                        {
+                            if (fs::file_size(sidecar, ec) == 0)
+                            {
+                                fs::remove(sidecar, ec);
+                                logger_->debug("Removed zero-byte sidecar: {}",
+                                               sidecar.filename().string());
+                            }
+                            else
+                            {
+                                blocked = true;
+                                break;
+                            }
+                        }
+                        catch (...)
                         {
                             blocked = true;
                             break;
                         }
                     }
-                    catch (...)
-                    {
-                        blocked = true;
-                        break;
-                    }
                 }
-            }
 
-            if (!blocked)
-            {
-                // Found available slot
+                if (!blocked)
                 {
                     std::lock_guard slock(stateMutex_);
                     state_.currentFile = candidate.string();
                     state_.fileCount = n;
+                    return candidate.string();
                 }
-                return candidate.string();
+
+                n++;
+            }
+        }
+        else
+        {
+            // ── Timestamp/custom mode: unique filename per recording ──
+            // Expand all tokens (no {n} present)
+            std::string filename = expandFormatTokens(nameFormat, username_, siteSlug_);
+            auto candidate = dir / (filename + ext);
+
+            // If file already exists (unlikely with timestamps but handle it),
+            // append a counter suffix
+            if (fs::exists(candidate, ec))
+            {
+                int suffix = 1;
+                while (true)
+                {
+                    auto suffixed = dir / (filename + "_" + std::to_string(suffix) + ext);
+                    if (!fs::exists(suffixed, ec))
+                    {
+                        candidate = suffixed;
+                        break;
+                    }
+                    suffix++;
+                }
             }
 
-            n++;
+            {
+                std::lock_guard slock(stateMutex_);
+                state_.currentFile = candidate.string();
+                state_.fileCount = 0; // Not using sequential numbering
+            }
+            return candidate.string();
         }
     }
 

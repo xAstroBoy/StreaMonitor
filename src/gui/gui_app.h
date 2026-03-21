@@ -239,7 +239,12 @@ namespace sm
         int editContainerFmt_ = 0; // 0=MKV, 1=MP4, 2=TS
         int editPort_ = 5000;
         char editFfmpegPath_[512] = {};
+        char editFilenameFormat_[256] = "{n}";
         bool editDirtyFlag_ = false;
+
+        // Stripchat spy private edit state
+        bool editSpyPrivateEnabled_ = false;
+        char editStripchatCookies_[2048] = {};
 
         // Encoding config edit state (mirrors EncodingConfig)
         int editEncoderType_ = 0; // 0=Copy, 1=X265, 2=X264, 3=NVENC_HEVC, 4=NVENC_H264

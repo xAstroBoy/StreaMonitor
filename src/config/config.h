@@ -29,6 +29,17 @@ namespace sm
         bool ffmpegReadRate = false;
         int segmentTimeSec = 0; // 0 = no segmenting
 
+        // Output filename format — supported tokens:
+        //   {n}     = sequential number (1, 2, 3...) — legacy default
+        //   {model} = model username
+        //   {site}  = site slug (SC, CB, BC, etc.)
+        //   {date}  = date as YYYY-MM-DD
+        //   {time}  = time as HH-MM-SS
+        //   {datetime} = YYYYMMDD-HHMMSS (Python SM style)
+        // Default "{n}" preserves backward compatibility.
+        // Example: "{model}-{datetime}" → "username-20250710-143022.mkv"
+        std::string filenameFormat = "{n}";
+
         // Network
         std::string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0";
         bool verifySsl = true;
@@ -58,6 +69,12 @@ namespace sm
 
         // Debug
         bool debug = false;
+
+        // Stripchat spy/private recording (Issue #8)
+        // When enabled and model goes Private, attempt to record using
+        // authenticated access. Requires valid stripchatCookies.
+        bool spyPrivateEnabled = false;
+        std::string stripchatCookies; // Browser cookies for Stripchat auth (e.g. "session_id=abc123; ...")
 
         // Preview capture (decoded video frames for GUI + web preview)
         bool enablePreviewCapture = true;

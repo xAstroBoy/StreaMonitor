@@ -614,6 +614,12 @@ namespace sm
         editPort_ = config.webPort;
         if (!config.ffmpegPath.empty())
             std::strncpy(editFfmpegPath_, config.ffmpegPath.string().c_str(), sizeof(editFfmpegPath_) - 1);
+        std::strncpy(editFilenameFormat_, config.filenameFormat.c_str(), sizeof(editFilenameFormat_) - 1);
+
+        // Stripchat spy private
+        editSpyPrivateEnabled_ = config.spyPrivateEnabled;
+        if (!config.stripchatCookies.empty())
+            std::strncpy(editStripchatCookies_, config.stripchatCookies.c_str(), sizeof(editStripchatCookies_) - 1);
 
         switch (config.container)
         {
@@ -3330,6 +3336,11 @@ namespace sm
             config_.wantedResolution = editResolution_;
             config_.webPort = editPort_;
             config_.ffmpegPath = editFfmpegPath_;
+            config_.filenameFormat = editFilenameFormat_;
+
+            // Stripchat spy private
+            config_.spyPrivateEnabled = editSpyPrivateEnabled_;
+            config_.stripchatCookies = editStripchatCookies_;
 
             switch (editContainerFmt_)
             {
@@ -3527,6 +3538,18 @@ namespace sm
             editDirtyFlag_ = true;
         }
         ImGui::TextColored(COL_TEXT_DIM, "99999 = highest available (default)");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Filename Format");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##FilenameFormat", editFilenameFormat_, sizeof(editFilenameFormat_)))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "Tokens: {n} = sequential number, {model} = username");
+        ImGui::TextColored(COL_TEXT_DIM, "{site} = site slug, {date} = YYYYMMDD, {time} = HHMMSS");
+        ImGui::TextColored(COL_TEXT_DIM, "{datetime} = YYYYMMDD_HHMMSS   (default: {n})");
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -4130,6 +4153,36 @@ namespace sm
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
         ImGui::TextColored(COL_TEXT_DIM, "Fetch latest keys from Stripchat's Doppio JS");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // ── Stripchat Spy Private ──────────────────────────────────
+        ImGui::TextColored(COL_ACCENT, "Stripchat — Spy on Private Shows");
+        ImGui::TextColored(COL_TEXT_DIM,
+                           "Attempt to spy-record when a model enters a private show.");
+        ImGui::TextColored(COL_TEXT_DIM,
+                           "Requires Stripchat account cookies and enough tokens.");
+        ImGui::Spacing();
+
+        if (ImGui::Checkbox("Enable Spy on Private", &editSpyPrivateEnabled_))
+            editDirtyFlag_ = true;
+
+        if (editSpyPrivateEnabled_)
+        {
+            ImGui::Spacing();
+            ImGui::Text("Stripchat Cookies");
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::InputTextMultiline("##StripchatCookies", editStripchatCookies_,
+                                          sizeof(editStripchatCookies_),
+                                          ImVec2(-1, 60 * dpiScale_)))
+                editDirtyFlag_ = true;
+            ImGui::TextColored(COL_TEXT_DIM,
+                               "Paste your browser cookies (e.g. session_id=abc; auth_token=xyz)");
+            ImGui::TextColored(COL_TEXT_DIM,
+                               "Get them from browser DevTools → Application → Cookies → stripchat.com");
+        }
 
         ImGui::Spacing();
         ImGui::Separator();

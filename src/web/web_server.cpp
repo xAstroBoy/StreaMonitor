@@ -799,6 +799,7 @@ namespace sm
                 {"container", config_.container == ContainerFormat::MKV ? "mkv" :
                               config_.container == ContainerFormat::MP4 ? "mp4" : "ts"},
                 {"wantedResolution", config_.wantedResolution},
+                {"filenameFormat", config_.filenameFormat},
                 {"webEnabled", config_.webEnabled},
                 {"webHost", config_.webHost},
                 {"webPort", config_.webPort},
@@ -806,7 +807,9 @@ namespace sm
                 {"enablePreviewCapture", config_.enablePreviewCapture},
                 {"minFreeDiskPercent", config_.minFreeDiskPercent},
                 {"httpTimeoutSec", config_.httpTimeoutSec},
-                {"userAgent", config_.userAgent}
+                {"userAgent", config_.userAgent},
+                {"spyPrivateEnabled", config_.spyPrivateEnabled},
+                {"stripchatCookiesSet", !config_.stripchatCookies.empty()}
             };
             jsonResponse(res, j); });
 
@@ -829,6 +832,12 @@ namespace sm
                     config_.minFreeDiskPercent = body["minFreeDiskPercent"].get<float>();
                 if (body.contains("enablePreviewCapture"))
                     config_.enablePreviewCapture = body["enablePreviewCapture"].get<bool>();
+                if (body.contains("filenameFormat"))
+                    config_.filenameFormat = body["filenameFormat"].get<std::string>();
+                if (body.contains("spyPrivateEnabled"))
+                    config_.spyPrivateEnabled = body["spyPrivateEnabled"].get<bool>();
+                if (body.contains("stripchatCookies"))
+                    config_.stripchatCookies = body["stripchatCookies"].get<std::string>();
 
                 jsonResponse(res, {{"success", true}, {"message", "Config updated"}});
             } catch (const std::exception &e) {
@@ -856,6 +865,27 @@ namespace sm
             if (!checkAuth(req, res)) return;
             manager_.saveConfig();
             jsonResponse(res, {{"success", true}, {"message", "Config saved"}}); });
+
+        // ── POST /api/import-config — Import Python SM config (Issue #45)
+        server_->Post("^/api/import-config$", [this](const H2Request &req, H2Response &res)
+                      {
+            if (!checkAuth(req, res)) return;
+            if (req.body.empty()) {
+                jsonError(res, "Request body must contain the Python SM config.json content");
+                return;
+            }
+            auto result = manager_.importFromPythonConfig(req.body);
+            json j = {
+                {"success", true},
+                {"imported", result.imported},
+                {"skipped", result.skipped},
+                {"failed", result.failed},
+                {"errors", result.errors},
+                {"message", std::to_string(result.imported) + " models imported, " +
+                            std::to_string(result.skipped) + " skipped, " +
+                            std::to_string(result.failed) + " failed"}
+            };
+            jsonResponse(res, j, result.imported > 0 ? 200 : 200); });
 
         // ── GET /api/logs ─────────────────────────────────────────
         server_->Get("^/api/logs$", [this](const H2Request &req, H2Response &res)

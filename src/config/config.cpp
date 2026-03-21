@@ -377,8 +377,14 @@ namespace sm
                 autoStartOnLogin = j["auto_start_on_login"];
             if (j.contains("debug"))
                 debug = j["debug"];
+            if (j.contains("spy_private_enabled"))
+                spyPrivateEnabled = j["spy_private_enabled"];
+            if (j.contains("stripchat_cookies"))
+                stripchatCookies = j["stripchat_cookies"].get<std::string>();
             if (j.contains("segment_time"))
                 segmentTimeSec = j["segment_time"];
+            if (j.contains("filename_format"))
+                filenameFormat = j["filename_format"].get<std::string>();
             if (j.contains("web_host"))
                 webHost = j["web_host"];
             if (j.contains("web_port"))
@@ -500,7 +506,11 @@ namespace sm
         j["minimize_to_tray"] = minimizeToTray;
         j["auto_start_on_login"] = autoStartOnLogin;
         j["debug"] = debug;
+        j["spy_private_enabled"] = spyPrivateEnabled;
+        if (!stripchatCookies.empty())
+            j["stripchat_cookies"] = stripchatCookies;
         j["segment_time"] = segmentTimeSec;
+        j["filename_format"] = filenameFormat;
         j["web_host"] = webHost;
         j["web_port"] = webPort;
         j["web_username"] = webUsername;
