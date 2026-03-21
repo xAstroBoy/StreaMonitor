@@ -1,9 +1,22 @@
 cmake_minimum_required(VERSION 3.20)
-project(StreaMonitor VERSION 2.1.68 LANGUAGES CXX C)
+project(StreaMonitor VERSION 2.1.69 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ──────────────────────────────────────────────
+# Always generate debug info (PDB on MSVC, DWARF on GCC/Clang)
+# This enables meaningful stack traces in crash reports.
+# ──────────────────────────────────────────────
+if(MSVC)
+    # /Zi  = full PDB,  /Zo = enhanced optimized debug info
+    add_compile_options(/Zi /Zo)
+    # Emit PDB alongside the .exe (not just the .obj PDB)
+    add_link_options(/DEBUG /OPT:REF /OPT:ICF)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-g -gdwarf-4)
+endif()
 
 # ──────────────────────────────────────────────
 # Platform detection

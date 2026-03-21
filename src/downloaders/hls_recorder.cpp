@@ -1726,6 +1726,24 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void HLSRecorder::closeInput(FFmpegState &state)
     {
+        // Shadow decoders reference the input's codec parameters and internal
+        // buffers. They MUST be destroyed BEFORE closing the input context,
+        // otherwise they become dangling pointers → heap corruption on next use.
+        if (state.shadowFrame)
+            av_frame_free(&state.shadowFrame);
+        if (state.shadowDecCtx)
+        {
+            avcodec_flush_buffers(state.shadowDecCtx);
+            avcodec_free_context(&state.shadowDecCtx);
+        }
+        if (state.shadowAudioFrame)
+            av_frame_free(&state.shadowAudioFrame);
+        if (state.shadowAudioDecCtx)
+        {
+            avcodec_flush_buffers(state.shadowAudioDecCtx);
+            avcodec_free_context(&state.shadowAudioDecCtx);
+        }
+
         if (state.inputCtx)
         {
             if (state.inputCtx->interrupt_callback.opaque)
@@ -3007,6 +3025,23 @@ namespace sm
                                     av_frame_free(&state.decFrame);
                                 if (state.encFrame)
                                     av_frame_free(&state.encFrame);
+
+                                // Shadow decoders also reference old input codec state —
+                                // they'll be lazily re-created for the new resolution.
+                                if (state.shadowFrame)
+                                    av_frame_free(&state.shadowFrame);
+                                if (state.shadowDecCtx)
+                                {
+                                    avcodec_flush_buffers(state.shadowDecCtx);
+                                    avcodec_free_context(&state.shadowDecCtx);
+                                }
+                                if (state.shadowAudioFrame)
+                                    av_frame_free(&state.shadowAudioFrame);
+                                if (state.shadowAudioDecCtx)
+                                {
+                                    avcodec_flush_buffers(state.shadowAudioDecCtx);
+                                    avcodec_free_context(&state.shadowAudioDecCtx);
+                                }
 
                                 state.headerWritten = false;
                                 state.transcoding = false;
