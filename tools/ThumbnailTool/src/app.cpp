@@ -1575,7 +1575,7 @@ namespace tt
         }
 
         ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY |
+                                ImGuiTableFlags_ScrollY |
                                 ImGuiTableFlags_SizingStretchProp |
                                 ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable |
                                 ImGuiTableFlags_SortTristate;
