@@ -57,12 +57,12 @@ namespace tt
         // Called every frame from the main loop
         void render();
 
-        // Settings (public for CLI overrides)
-        int thumbnailWidth = 3840;
-        int thumbnailColumns = 4;
-        int thumbnailRows = 4;
-        bool embedInVideo = true;
-        int threadCount = 4;
+        // Settings (public for CLI overrides) - atomic for live updates during processing
+        std::atomic<int> thumbnailWidth{3840};
+        std::atomic<int> thumbnailColumns{4};
+        std::atomic<int> thumbnailRows{4};
+        std::atomic<bool> embedInVideo{true};
+        std::atomic<int> threadCount{4};
 
     private:
         // Render sections

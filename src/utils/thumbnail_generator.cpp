@@ -901,6 +901,12 @@ namespace sm
                 return false;
             }
 
+            // Set matroska muxer options for proper cluster sizing
+            // This prevents fragmented output with too many segments
+            AVDictionary *opts = nullptr;
+            av_dict_set(&opts, "cluster_size_limit", "5242880", 0); // 5MB clusters max
+            av_dict_set(&opts, "cluster_time_limit", "5000000", 0); // 5 second clusters max
+
             // Map every stream (video, audio, subs) — stream copy
             std::vector<int> streamMap(inCtx->nb_streams, -1);
             int outIdx = 0;
@@ -941,10 +947,11 @@ namespace sm
                 }
             }
 
-            if (avformat_write_header(outCtx, nullptr) < 0)
+            if (avformat_write_header(outCtx, &opts) < 0)
             {
                 if (log)
                     log("remux: failed to write header");
+                av_dict_free(&opts);
                 avformat_close_input(&inCtx);
                 if (outCtx->pb)
                     avio_closep(&outCtx->pb);
@@ -953,6 +960,7 @@ namespace sm
                 fs::remove(tmpPath, ec);
                 return false;
             }
+            av_dict_free(&opts);
 
             // Per-stream DTS tracker to fix timestamp jumps / discontinuities
             struct StreamTS
@@ -1683,6 +1691,10 @@ namespace sm
         bool ok = true;
 
         // Step 3: Embed cover art (if jpg exists and no cover yet)
+        // Use standard Matroska cover art naming for DLNA/Skybox/Plex compatibility:
+        // - attachment-name: cover.jpg (required)
+        // - attachment-description: cover (helps some players)
+        // - mime-type: image/jpeg
         if (fs::exists(jpegPath))
         {
             if (hasCoverArt(mkvPath))
@@ -1691,8 +1703,10 @@ namespace sm
             }
             else
             {
+                // Use --attachment-description "cover" for better DLNA compatibility
                 std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
                                                                            " --attachment-name cover.jpg"
+                                                                           " --attachment-description cover"
                                                                            " --attachment-mime-type image/jpeg"
                                                                            " --add-attachment \"" +
                                       jpegPath + "\"";

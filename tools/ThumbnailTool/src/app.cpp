@@ -137,15 +137,15 @@ namespace tt
                 std::strncpy(rootDir_, rd.c_str(), sizeof(rootDir_) - 1);
             }
             if (j.contains("thumbnailWidth"))
-                thumbnailWidth = j["thumbnailWidth"].get<int>();
+                thumbnailWidth.store(j["thumbnailWidth"].get<int>());
             if (j.contains("thumbnailColumns"))
-                thumbnailColumns = j["thumbnailColumns"].get<int>();
+                thumbnailColumns.store(j["thumbnailColumns"].get<int>());
             if (j.contains("thumbnailRows"))
-                thumbnailRows = j["thumbnailRows"].get<int>();
+                thumbnailRows.store(j["thumbnailRows"].get<int>());
             if (j.contains("threadCount"))
-                threadCount = j["threadCount"].get<int>();
+                threadCount.store(j["threadCount"].get<int>());
             if (j.contains("embedInVideo"))
-                embedInVideo = j["embedInVideo"].get<bool>();
+                embedInVideo.store(j["embedInVideo"].get<bool>());
             if (j.contains("hideFinished"))
                 hideFinished_ = j["hideFinished"].get<bool>();
             if (j.contains("showLog"))
@@ -165,11 +165,11 @@ namespace tt
         {
             json j;
             j["rootDir"] = std::string(rootDir_);
-            j["thumbnailWidth"] = thumbnailWidth;
-            j["thumbnailColumns"] = thumbnailColumns;
-            j["thumbnailRows"] = thumbnailRows;
-            j["threadCount"] = threadCount;
-            j["embedInVideo"] = embedInVideo;
+            j["thumbnailWidth"] = thumbnailWidth.load();
+            j["thumbnailColumns"] = thumbnailColumns.load();
+            j["thumbnailRows"] = thumbnailRows.load();
+            j["threadCount"] = threadCount.load();
+            j["embedInVideo"] = embedInVideo.load();
             j["hideFinished"] = hideFinished_;
             j["showLog"] = showLog_;
             std::ofstream f(cfgPath);
@@ -357,15 +357,15 @@ namespace tt
             return;
         }
 
+        int numThreads = std::clamp(threadCount.load(), 1, 64);
         addLog("[INFO] Processing " + std::to_string(count) +
-               " videos with " + std::to_string(threadCount) + " threads...");
+               " videos with " + std::to_string(numThreads) + " threads...");
 
         working_.store(true);
         startTime_ = std::chrono::steady_clock::now();
         etaLastTime_ = startTime_;
 
         // Launch worker threads
-        int numThreads = std::clamp(threadCount, 1, 64);
         activeWorkers_.store(numThreads);
         workers_.clear();
         for (int t = 0; t < numThreads; t++)
@@ -375,11 +375,6 @@ namespace tt
 
     void App::workerFunc()
     {
-        sm::ThumbnailConfig tc;
-        tc.width = thumbnailWidth;
-        tc.columns = thumbnailColumns;
-        tc.rows = thumbnailRows;
-
         // Build sorted work queue: ALL unprocessed, sorted by file size ascending (smallest first)
         std::vector<std::pair<int64_t, size_t>> sizeIdx;
         {
@@ -411,6 +406,13 @@ namespace tt
             int myIdx = nextIdx_.fetch_add(1);
             if (myIdx >= (int)indices.size())
                 break;
+
+            // Read settings FRESH for each file (allows live config changes)
+            sm::ThumbnailConfig tc;
+            tc.width = thumbnailWidth.load();
+            tc.columns = thumbnailColumns.load();
+            tc.rows = thumbnailRows.load();
+            bool doEmbed = embedInVideo.load();
 
             size_t idx = indices[myIdx];
             std::string videoStr, thumbStr, origVideoStr;
@@ -574,7 +576,7 @@ namespace tt
             }
 
             // ── STEP 4: Embed cover art + clean up external .jpg ────────
-            if (genOk && embedInVideo && !anyError)
+            if (genOk && doEmbed && !anyError)
             {
                 bool wasEmbedded = sm::hasCoverArt(videoStr);
                 if (!wasEmbedded && fs::exists(thumbStr))
@@ -825,28 +827,56 @@ namespace tt
         if (working_.load())
         {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.08f, 0.12f, 1.0f));
-            float statsH = ImGui::GetFrameHeight() + 10;
+            float statsH = ImGui::GetFrameHeight() * 2 + 14;
             ImGui::BeginChild("##ProcessingStats", {w, statsH}, false);
             ImGui::SetCursorPos({12, 4});
+
+            // Load atomic values for display
+            int dispCols = thumbnailColumns.load();
+            int dispRows = thumbnailRows.load();
+            int dispWidth = thumbnailWidth.load();
+            bool dispEmbed = embedInVideo.load();
+
+            // Row 1: Processing info + current file
+            ImGui::TextColored(COL_ACCENT, "PROCESSING");
+            ImGui::SameLine(0, 12);
+            ImGui::TextColored(COL_DIM, "|");
+            ImGui::SameLine(0, 12);
+            ImGui::TextColored(COL_TEXT, "%d threads", activeWorkers_.load());
+            ImGui::SameLine(0, 12);
+            ImGui::TextColored(COL_DIM, "|");
+            ImGui::SameLine(0, 12);
+            ImGui::TextColored(COL_TEXT, "%dx%d @ %dpx", dispCols, dispRows, dispWidth);
+            ImGui::SameLine(0, 12);
+            ImGui::TextColored(COL_DIM, "|");
+            ImGui::SameLine(0, 12);
+            ImGui::TextColored(dispEmbed ? COL_GREEN : COL_DIM, "Embed: %s", dispEmbed ? "ON" : "OFF");
 
             // Current file
             {
                 std::lock_guard lock(currentFileMutex_);
                 if (!currentFile_.empty())
                 {
-                    ImGui::TextColored(COL_ACCENT, ">>>");
+                    ImGui::SameLine(0, 24);
+                    ImGui::TextColored(COL_YELLOW, ">>>");
                     ImGui::SameLine();
                     ImGui::TextUnformatted(currentFile_.c_str());
-                    ImGui::SameLine(0, 24);
                 }
             }
 
-            // Live stat counters
+            // Row 2: Live stat counters
+            ImGui::SetCursorPos({12, ImGui::GetFrameHeight() + 8});
             int rmx = remuxedCount_.load();
             int gen = generated_.load();
             int emb = embeddedCount_.load();
             int vr = vrCount_.load();
             int err = errors_.load();
+            int done = processedCount_.load();
+            int total = totalToProcess_.load();
+
+            ImGui::TextColored(COL_TEXT, "Progress: %d/%d", done, total);
+            ImGui::SameLine(0, 20);
+
             if (rmx > 0)
             {
                 ImGui::TextColored(COL_GREEN, "Remuxed: %d", rmx);
@@ -1120,7 +1150,8 @@ namespace tt
         }
 
         ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp |
+                                ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY |
+                                ImGuiTableFlags_SizingStretchProp |
                                 ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable |
                                 ImGuiTableFlags_SortTristate;
 
@@ -1274,28 +1305,38 @@ namespace tt
 
     void App::renderSettingsPopup()
     {
-        ImGui::SetNextWindowSize({460, 520}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize({460, 560}, ImGuiCond_Appearing);
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
                                 {0.5f, 0.5f});
 
         if (ImGui::Begin("Thumbnail Settings", &showSettings_, ImGuiWindowFlags_NoCollapse))
         {
+            // Load current values from atomics
+            int width = thumbnailWidth.load();
+            int cols = thumbnailColumns.load();
+            int rows = thumbnailRows.load();
+            int threads = threadCount.load();
+            bool embed = embedInVideo.load();
+
             // Section: Thumbnail Grid
             ImGui::SeparatorText("Thumbnail Grid");
 
             ImGui::Text("Image Width (px)");
             ImGui::SetNextItemWidth(-1);
-            ImGui::SliderInt("##Width", &thumbnailWidth, 1280, 7680, "%d px");
+            if (ImGui::SliderInt("##Width", &width, 1280, 7680, "%d px"))
+                thumbnailWidth.store(width);
 
             ImGui::Spacing();
             ImGui::Text("Grid Columns");
             ImGui::SetNextItemWidth(-1);
-            ImGui::SliderInt("##Cols", &thumbnailColumns, 2, 8);
+            if (ImGui::SliderInt("##Cols", &cols, 2, 8))
+                thumbnailColumns.store(cols);
 
             ImGui::Spacing();
             ImGui::Text("Grid Rows");
             ImGui::SetNextItemWidth(-1);
-            ImGui::SliderInt("##Rows", &thumbnailRows, 2, 12);
+            if (ImGui::SliderInt("##Rows", &rows, 2, 12))
+                thumbnailRows.store(rows);
 
             // Section: Processing
             ImGui::Spacing();
@@ -1303,10 +1344,19 @@ namespace tt
 
             ImGui::Text("Worker Threads");
             ImGui::SetNextItemWidth(-1);
-            ImGui::SliderInt("##Threads", &threadCount, 1, 64);
+            if (ImGui::SliderInt("##Threads", &threads, 1, 64))
+                threadCount.store(threads);
+
+            // Show note that changes apply immediately
+            if (working_.load())
+            {
+                ImGui::Spacing();
+                ImGui::TextColored(COL_GREEN, "Settings apply IMMEDIATELY to pending files!");
+            }
 
             ImGui::Spacing();
-            ImGui::Checkbox("Embed thumbnail in MKV (requires mkvpropedit)", &embedInVideo);
+            if (ImGui::Checkbox("Embed thumbnail in MKV (requires mkvpropedit)", &embed))
+                embedInVideo.store(embed);
 
             // Section: Shell Integration
             ImGui::Spacing();
@@ -1405,9 +1455,9 @@ namespace tt
             ImGui::Spacing();
             ImGui::SeparatorText("Info");
             ImGui::TextColored(COL_DIM, "Output: %dx%d contact sheet per video",
-                               thumbnailColumns, thumbnailRows);
+                               cols, rows);
             ImGui::TextColored(COL_DIM, "Width: %d px (adaptive: scales up for high-res sources)",
-                               thumbnailWidth);
+                               width);
 
             ImGui::Spacing();
             if (ImGui::Button("Close", {120, 0}))
