@@ -110,11 +110,11 @@ int guiMain(int argc, char **argv)
 
     sm::ModelConfigStore configStore;
     std::filesystem::path configPath = "config.json";
-    if (std::filesystem::exists(configPath))
-    {
-        configStore.load(configPath);
-        spdlog::info("Loaded {} model configs", configStore.getAll().size());
-    }
+    // Always call load() so lastPath_ is set for subsequent save() calls,
+    // even if the file doesn't exist yet (first launch). The load() method
+    // already handles missing files gracefully. (Fixes #46: models disappear)
+    configStore.load(configPath);
+    spdlog::info("Loaded {} model configs", configStore.getAll().size());
 
     // Print registered sites
     auto &registry = sm::SiteRegistry::instance();

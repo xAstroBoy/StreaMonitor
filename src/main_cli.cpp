@@ -17,6 +17,7 @@
 
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -223,6 +224,7 @@ static void printHelp()
               << "  " << ansi::bold << "status" << ansi::reset << "                   - Show status table\n"
               << "  " << ansi::bold << "sites" << ansi::reset << "                    - List available sites\n"
               << "  " << ansi::bold << "save" << ansi::reset << "                     - Save config\n"
+              << "  " << ansi::bold << "import" << ansi::reset << " <path>             - Import Python SM config.json\n"
               << "  " << ansi::bold << "web" << ansi::reset << "                      - Toggle web dashboard / show URL\n"
               << "  " << ansi::bold << "cls" << ansi::reset << "                      - Clear screen\n"
               << "  " << ansi::bold << "quit" << ansi::reset << "                     - Stop all and exit\n"
@@ -257,11 +259,10 @@ int cliMain(int argc, char **argv)
 
     sm::ModelConfigStore configStore;
     std::filesystem::path configPath = "config.json";
-    if (std::filesystem::exists(configPath))
-    {
-        configStore.load(configPath);
-        spdlog::info("Loaded {} model configs", configStore.getAll().size());
-    }
+    // Always call load() so lastPath_ is set for subsequent save() calls,
+    // even if the file doesn't exist yet (first launch). (Fixes #46)
+    configStore.load(configPath);
+    spdlog::info("Loaded {} model configs", configStore.getAll().size());
 
     // Print sites
     auto &registry = sm::SiteRegistry::instance();
@@ -634,6 +635,44 @@ int cliMain(int argc, char **argv)
             manager.saveConfig();
             std::cout << ansi::green << "Config saved\n"
                       << ansi::reset;
+        }
+        else if (cmd == "import")
+        {
+            if (tokens.size() < 2)
+            {
+                std::cout << ansi::yellow << "Usage: import <path-to-python-sm-config.json>\n"
+                          << ansi::reset;
+            }
+            else
+            {
+                std::string importPath = tokens[1];
+                // Rejoin tokens in case path has spaces
+                for (size_t i = 2; i < tokens.size(); ++i)
+                    importPath += " " + tokens[i];
+
+                std::ifstream importFile(importPath);
+                if (!importFile.is_open())
+                {
+                    std::cout << ansi::red << "Could not open file: " << importPath << "\n"
+                              << ansi::reset;
+                }
+                else
+                {
+                    std::string jsonContent((std::istreambuf_iterator<char>(importFile)),
+                                            std::istreambuf_iterator<char>());
+                    auto result = manager.importFromPythonConfig(jsonContent);
+                    std::cout << ansi::green << "Import complete: "
+                              << result.imported << " imported, "
+                              << result.skipped << " skipped, "
+                              << result.failed << " failed\n"
+                              << ansi::reset;
+                    for (const auto &err : result.errors)
+                    {
+                        std::cout << ansi::yellow << "  - " << err << "\n"
+                                  << ansi::reset;
+                    }
+                }
+            }
         }
         else if (cmd == "web")
         {
