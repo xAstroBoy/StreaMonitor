@@ -1,4 +1,4 @@
-// StripHelper C++ — ImGui GUI implementation
+// StripHelper C++ — ImGui GUI implementation (polished, matches StreaMonitor)
 #include "app.h"
 #include "pipeline.h"
 #include "subprocess.h"
@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <cmath>
 #include <windows.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
@@ -16,26 +17,45 @@
 namespace sh
 {
 
-    // ── Helpers ─────────────────────────────────────────────────────────────────
+    // ── Color palette (matches StreaMonitor exactly) ────────────────────────────
 
-    static ImU32 statusColor(RowStatus s)
+    static constexpr ImVec4 COL_ACCENT = {0.35f, 0.55f, 1.00f, 1.0f};
+    static constexpr ImVec4 COL_ACCENT_HOVER = {0.45f, 0.65f, 1.00f, 1.0f};
+    static constexpr ImVec4 COL_TEXT = {0.92f, 0.92f, 0.94f, 1.0f};
+    static constexpr ImVec4 COL_TEXT_DIM = {0.50f, 0.50f, 0.55f, 1.0f};
+    static constexpr ImVec4 COL_GREEN = {0.25f, 0.85f, 0.35f, 1.0f};
+    static constexpr ImVec4 COL_RED = {0.95f, 0.25f, 0.25f, 1.0f};
+    static constexpr ImVec4 COL_YELLOW = {0.95f, 0.80f, 0.15f, 1.0f};
+    static constexpr ImVec4 COL_CYAN = {0.30f, 0.85f, 0.85f, 1.0f};
+    static constexpr ImVec4 COL_ORANGE = {0.95f, 0.55f, 0.15f, 1.0f};
+    static constexpr ImVec4 COL_BG_PANEL = {0.10f, 0.10f, 0.12f, 1.0f};
+
+    // ── Status colors ───────────────────────────────────────────────────────────
+
+    static ImVec4 statusColorVec(RowStatus s)
     {
         switch (s)
         {
         case RowStatus::Pending:
-            return IM_COL32(140, 140, 140, 255);
+            return COL_TEXT_DIM;
         case RowStatus::Queued:
-            return IM_COL32(180, 180, 80, 255);
+            return COL_YELLOW;
         case RowStatus::Working:
-            return IM_COL32(80, 160, 255, 255);
+            return COL_CYAN;
         case RowStatus::Done:
-            return IM_COL32(80, 220, 80, 255);
+            return COL_GREEN;
         case RowStatus::Error:
-            return IM_COL32(240, 80, 80, 255);
+            return COL_RED;
         case RowStatus::Skipped:
-            return IM_COL32(180, 130, 60, 255);
+            return COL_ORANGE;
         }
-        return IM_COL32(255, 255, 255, 255);
+        return COL_TEXT;
+    }
+
+    static ImU32 statusColor(RowStatus s)
+    {
+        auto c = statusColorVec(s);
+        return IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), 255);
     }
 
     const char *App::statusLabel(RowStatus s)
@@ -245,83 +265,95 @@ namespace sh
 
     void App::renderTopBar()
     {
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 6));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 6));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
 
-        // Settings button FIRST (right side), then the rest fills remaining space
-        // Calculate how much space the right-side controls need:
-        // Browse(90) + gap + threads(60) + "threads" text(~50) + gap + Symlinks(~80) + gap + Start/Stop(80) + gap + Settings(50) + gaps
-        const float rightControlsW = 90 + 60 + 55 + 85 + 80 + 50 + 8 * 6; // ~468
+        ImGui::Spacing();
 
-        ImGui::SetNextItemWidth(std::max(100.0f, ImGui::GetContentRegionAvail().x - rightControlsW));
-        ImGui::InputText("##path", pathBuf_, sizeof(pathBuf_));
+        // ── Path input (stretches to fill) ──────────────────────────
+        float rightW = 550.0f; // space for right-side controls
+        ImGui::SetNextItemWidth(std::max(200.0f, ImGui::GetContentRegionAvail().x - rightW));
+        ImGui::InputTextWithHint("##path", "Folder to process...", pathBuf_, sizeof(pathBuf_));
+
+        // ── Browse button ───────────────────────────────────────────
         ImGui::SameLine();
-        if (ImGui::Button("Browse...", ImVec2(90, 0)))
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.18f, 0.18f, 0.22f, 1.0f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
+        if (ImGui::Button(" Browse ", ImVec2(0, 0)))
             browseFolder();
+        ImGui::PopStyleColor(2);
+
+        // ── Thread count ────────────────────────────────────────────
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(60);
+        ImGui::SetNextItemWidth(55);
         ImGui::InputInt("##threads", &threads_, 0, 0);
         threads_ = std::clamp(threads_, 1, 32);
         ImGui::SameLine();
-        ImGui::TextUnformatted("threads");
-        ImGui::SameLine();
+        ImGui::TextColored(COL_TEXT_DIM, "threads");
+
+        // ── Checkboxes ──────────────────────────────────────────────
+        ImGui::SameLine(0, 16);
         ImGui::Checkbox("Symlinks", &mkLinks_);
-        ImGui::SameLine();
+        ImGui::SameLine(0, 12);
         ImGui::Checkbox("PTS fix", &repairPts_);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Repair broken PTS in .ts files (slow).\nUncheck to skip for faster processing.");
-        ImGui::SameLine();
+            ImGui::SetTooltip("Repair broken PTS in .ts files (slower).\nUncheck to skip for faster processing.");
 
+        // ── Start / Stop (green / red accent) ───────────────────────
+        ImGui::SameLine(0, 16);
         bool busy = running_.load();
         if (!busy)
         {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.15f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.65f, 0.20f, 1.0f));
-            if (ImGui::Button("Start", ImVec2(80, 0)))
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.55f, 0.20f, 1.0f));
+            if (ImGui::Button(" Start ", ImVec2(80, 0)))
                 startProcessing();
             ImGui::PopStyleColor(2);
         }
         else
         {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.15f, 0.15f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.20f, 0.20f, 1.0f));
-            if (ImGui::Button("Stop", ImVec2(80, 0)))
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.12f, 0.12f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.18f, 0.18f, 1.0f));
+            if (ImGui::Button(" Stop ", ImVec2(80, 0)))
                 stopProcessing();
             ImGui::PopStyleColor(2);
         }
 
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.35f, 0.42f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.45f, 0.45f, 0.55f, 1.0f));
-        if (ImGui::Button("Settings", ImVec2(80, 0)))
+        // ── Settings (accent button) ────────────────────────────────
+        ImGui::SameLine(0, 8);
+        if (ImGui::Button(" Settings ", ImVec2(0, 0)))
             showSettings_ = true;
-        ImGui::PopStyleColor(2);
 
-        ImGui::PopStyleVar();
+        ImGui::PopStyleVar(2);
     }
 
     // ── Table ───────────────────────────────────────────────────────────────────
 
     void App::renderTable()
     {
-        float logH = showLog_ ? logHeight_ : 0;
-        ImVec2 avail = ImGui::GetContentRegionAvail();
-        avail.y -= (logH + 50); // leave room for bottom bar + log
+        ImGuiTableFlags flags = ImGuiTableFlags_RowBg |
+                                ImGuiTableFlags_Resizable |
+                                ImGuiTableFlags_ScrollX |
+                                ImGuiTableFlags_ScrollY |
+                                ImGuiTableFlags_Sortable |
+                                ImGuiTableFlags_SizingStretchProp |
+                                ImGuiTableFlags_BordersInnerV |
+                                ImGuiTableFlags_PadOuterX;
 
-        ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp;
-
-        if (!ImGui::BeginTable("##folders", 9, flags, avail))
+        if (!ImGui::BeginTable("##folders", 9, flags, ImVec2(0, 0)))
             return;
 
+        // Styled header
         ImGui::TableSetupScrollFreeze(1, 1);
-        ImGui::TableSetupColumn("Folder", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 0.30f);
-        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("Folder", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 0.28f);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 80);
         ImGui::TableSetupColumn("Stage", ImGuiTableColumnFlags_WidthStretch, 0.18f);
-        ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthFixed, 120);
-        ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableSetupColumn("Written", ImGuiTableColumnFlags_WidthFixed, 85);
-        ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 85);
+        ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthFixed, 130);
+        ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 75);
+        ImGui::TableSetupColumn("Written", ImGuiTableColumnFlags_WidthFixed, 90);
+        ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 90);
         ImGui::TableSetupColumn("Duration", ImGuiTableColumnFlags_WidthFixed, 110);
-        ImGui::TableSetupColumn("Info", ImGuiTableColumnFlags_WidthStretch, 0.20f);
+        ImGui::TableSetupColumn("Info", ImGuiTableColumnFlags_WidthStretch, 0.22f);
         ImGui::TableHeadersRow();
 
         std::lock_guard lk(mtx_);
@@ -333,60 +365,82 @@ namespace sh
             {
                 auto &r = rows_[i];
                 ImGui::TableNextRow();
-                ImU32 col = statusColor(r.status);
+                ImVec4 col = statusColorVec(r.status);
 
-                // Folder
+                // ── Folder name ─────────────────────────────────────
                 ImGui::TableNextColumn();
-                ImGui::PushStyleColor(ImGuiCol_Text, col);
                 ImGui::TextUnformatted(r.relPath.c_str());
 
-                // Status
+                // ── Status badge (colored pill) ─────────────────────
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(statusLabel(r.status));
+                {
+                    const char *label = statusLabel(r.status);
+                    ImVec2 textSz = ImGui::CalcTextSize(label);
+                    float padX = 8.0f, padY = 2.0f;
+                    ImVec2 cursor = ImGui::GetCursorScreenPos();
+                    ImVec4 bgCol = col;
+                    bgCol.w = 0.20f; // subtle background
 
-                // Stage
+                    ImDrawList *dl = ImGui::GetWindowDrawList();
+                    ImVec2 pMin = {cursor.x, cursor.y + 1};
+                    ImVec2 pMax = {cursor.x + textSz.x + padX * 2, cursor.y + textSz.y + padY * 2 + 1};
+                    dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bgCol), 4.0f);
+
+                    ImGui::SetCursorScreenPos({cursor.x + padX, cursor.y + padY + 1});
+                    ImGui::TextColored(col, "%s", label);
+                }
+
+                // ── Stage ───────────────────────────────────────────
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(r.stage.c_str());
+                if (r.status == RowStatus::Working)
+                    ImGui::TextColored(COL_CYAN, "%s", r.stage.c_str());
+                else
+                    ImGui::TextColored(COL_TEXT_DIM, "%s", r.stage.c_str());
 
-                // Progress bar
+                // ── Progress bar (colored by status) ────────────────
                 ImGui::TableNextColumn();
                 if (r.status == RowStatus::Working || r.status == RowStatus::Done)
                 {
                     float frac = r.pct / 100.0f;
                     char overlay[16];
                     snprintf(overlay, sizeof(overlay), "%.0f%%", r.pct);
-                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(
-                                                                      r.status == RowStatus::Done ? 0.3f : 0.2f,
-                                                                      r.status == RowStatus::Done ? 0.8f : 0.5f,
-                                                                      r.status == RowStatus::Done ? 0.3f : 0.9f, 1.0f));
-                    ImGui::ProgressBar(frac, ImVec2(-1, 0), overlay);
+
+                    ImVec4 barCol = r.status == RowStatus::Done
+                                        ? ImVec4(0.20f, 0.65f, 0.30f, 1.0f)
+                                        : ImVec4(0.25f, 0.50f, 0.85f, 1.0f);
+                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, barCol);
+                    ImGui::ProgressBar(frac, ImVec2(-1, 18), overlay);
                     ImGui::PopStyleColor();
                 }
 
-                // ETA
+                // ── ETA ─────────────────────────────────────────────
                 ImGui::TableNextColumn();
                 if (r.status == RowStatus::Working && r.eta > 0)
-                    ImGui::Text("%s", humanEta(r.eta).c_str());
+                    ImGui::TextColored(COL_TEXT_DIM, "%s", humanEta(r.eta).c_str());
 
-                // Written
+                // ── Written ─────────────────────────────────────────
                 ImGui::TableNextColumn();
                 if (r.written > 0)
-                    ImGui::Text("%s", humanBytes(r.written).c_str());
+                    ImGui::TextColored(COL_TEXT, "%s", humanBytes(r.written).c_str());
 
-                // Target
+                // ── Target ──────────────────────────────────────────
                 ImGui::TableNextColumn();
                 if (r.target > 0)
-                    ImGui::Text("%s", humanBytes(r.target).c_str());
+                    ImGui::TextColored(COL_TEXT, "%s", humanBytes(r.target).c_str());
 
-                // Duration
+                // ── Duration ────────────────────────────────────────
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(r.durInfo.c_str());
+                if (!r.durInfo.empty())
+                    ImGui::TextColored(COL_ACCENT, "%s", r.durInfo.c_str());
 
-                // Info
+                // ── Info ────────────────────────────────────────────
                 ImGui::TableNextColumn();
-                ImGui::TextWrapped("%s", r.info.c_str());
-
-                ImGui::PopStyleColor(); // text color
+                if (r.status == RowStatus::Error)
+                    ImGui::TextColored(COL_RED, "%s", r.info.c_str());
+                else if (r.status == RowStatus::Done)
+                    ImGui::TextColored(COL_GREEN, "%s", r.info.c_str());
+                else
+                    ImGui::TextWrapped("%s", r.info.c_str());
             }
         }
         ImGui::EndTable();
@@ -396,40 +450,36 @@ namespace sh
 
     void App::renderBottomBar()
     {
-        int done = doneCount_.load();
-        int errs = errCount_.load();
-        int total = totalCount_.load();
-
-        // Overall progress
-        float frac = total > 0 ? (float)done / (float)total : 0.0f;
-        char overlay[64];
-        snprintf(overlay, sizeof(overlay), "%d / %d done   (%d errors)", done, total, errs);
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.6f, 0.3f, 1.0f));
-        ImGui::ProgressBar(frac, ImVec2(-1, 20), overlay);
-        ImGui::PopStyleColor();
+        // No-op: status is shown in the status bar at the bottom of the frame
     }
 
-    // ── Log panel ───────────────────────────────────────────────────────────────
+    // ── Log panel (SM-style with colored text) ──────────────────────────────────
 
     void App::renderLogPanel()
     {
-        if (ImGui::CollapsingHeader("Log", ImGuiTreeNodeFlags_DefaultOpen))
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_BG_PANEL);
+        ImGui::BeginChild("##logscroll", ImVec2(0, 0), ImGuiChildFlags_None);
+
+        std::lock_guard lk(mtx_);
+        for (auto &line : log_)
         {
-            showLog_ = true;
-            ImGui::BeginChild("##logscroll", ImVec2(0, logHeight_), ImGuiChildFlags_Borders);
-            std::lock_guard lk(mtx_);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
-            for (auto &line : log_)
-                ImGui::TextUnformatted(line.c_str());
-            ImGui::PopStyleColor();
-            if (autoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20)
-                ImGui::SetScrollHereY(1.0f);
-            ImGui::EndChild();
+            // Color-code log lines by content
+            if (line.find("ERROR") != std::string::npos || line.find("FAIL") != std::string::npos)
+                ImGui::TextColored(COL_RED, "%s", line.c_str());
+            else if (line.find("WARNING") != std::string::npos || line.find("WARN") != std::string::npos)
+                ImGui::TextColored(COL_YELLOW, "%s", line.c_str());
+            else if (line.find("OK") != std::string::npos || line.find("complete") != std::string::npos || line.find("Done") != std::string::npos || line.find("saved") != std::string::npos)
+                ImGui::TextColored(COL_GREEN, "%s", line.c_str());
+            else if (line.find("===") != std::string::npos || line.find("Starting") != std::string::npos || line.find("Found") != std::string::npos)
+                ImGui::TextColored(COL_ACCENT, "%s", line.c_str());
+            else
+                ImGui::TextColored(COL_TEXT_DIM, "%s", line.c_str());
         }
-        else
-        {
-            showLog_ = false;
-        }
+        if (autoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20)
+            ImGui::SetScrollHereY(1.0f);
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
     }
 
     // ── Settings popup (tabbed like StreaMonitor) ─────────────────────────────
@@ -898,29 +948,155 @@ namespace sh
             startProcessing();
         }
 
-        // Full-window ImGui panel
+        // ── Full-window panel (matches StreaMonitor layout) ─────────
         ImGuiViewport *vp = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(vp->WorkPos);
         ImGui::SetNextWindowSize(vp->WorkSize);
-        ImGuiWindowFlags wf = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
+        ImGui::SetNextWindowViewport(vp->ID);
 
+        ImGuiWindowFlags wf = ImGuiWindowFlags_NoTitleBar |
+                              ImGuiWindowFlags_NoResize |
+                              ImGuiWindowFlags_NoMove |
+                              ImGuiWindowFlags_NoCollapse |
+                              ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
         ImGui::Begin("##main", nullptr, wf);
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 6));
+        ImGui::PopStyleVar(2);
 
-        // Title
-        ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "StripHelper");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), " — Remux & Merge Pipeline");
-        ImGui::Separator();
+        // ── Header bar ──────────────────────────────────────────────
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 6));
+        ImGui::BeginChild("##header", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY);
+        {
+            // Title + version
+            ImGui::TextColored(COL_ACCENT, "StripHelper");
+            ImGui::SameLine();
+            ImGui::TextColored(COL_TEXT_DIM, " \xE2\x80\x94 Remux & Merge Pipeline");
 
-        renderTopBar();
-        ImGui::Separator();
-        renderTable();
-        renderBottomBar();
-        renderLogPanel();
-
+            // Right-aligned: progress summary
+            int done = doneCount_.load();
+            int errs = errCount_.load();
+            int total = totalCount_.load();
+            if (total > 0)
+            {
+                char summary[128];
+                snprintf(summary, sizeof(summary), "%d / %d done  (%d errors)", done, total, errs);
+                float textW = ImGui::CalcTextSize(summary).x;
+                ImGui::SameLine(ImGui::GetWindowWidth() - textW - 16);
+                if (errs > 0)
+                    ImGui::TextColored(COL_RED, "%s", summary);
+                else if (done >= total)
+                    ImGui::TextColored(COL_GREEN, "%s", summary);
+                else
+                    ImGui::TextColored(COL_TEXT_DIM, "%s", summary);
+            }
+        }
+        ImGui::EndChild();
         ImGui::PopStyleVar();
-        ImGui::End();
+
+        ImGui::Separator();
+
+        // ── Toolbar ─────────────────────────────────────────────────
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 4));
+        ImGui::BeginChild("##toolbar", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY);
+        renderTopBar();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+
+        ImGui::Separator();
+
+        // ── Content area: Table + Log with draggable splitter ───────
+        float availH = ImGui::GetContentRegionAvail().y - 28.0f; // reserve for status bar
+        float tableH = showLog_ ? availH * splitRatio_ : availH;
+
+        // Table
+        if (ImGui::BeginChild("##TableArea", ImVec2(0, tableH), ImGuiChildFlags_None))
+            renderTable();
+        ImGui::EndChild();
+
+        if (showLog_)
+        {
+            // ── Draggable splitter bar ──────────────────────────────
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.15f, 0.15f, 0.18f, 1.0f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
+            ImGui::Button("##Splitter", ImVec2(-1, 4));
+            if (ImGui::IsItemActive())
+            {
+                splitRatio_ += ImGui::GetIO().MouseDelta.y / availH;
+                splitRatio_ = std::clamp(splitRatio_, 0.2f, 0.9f);
+            }
+            ImGui::PopStyleColor(2);
+
+            // Log panel fills remaining space above status bar
+            float logH = ImGui::GetContentRegionAvail().y - 28.0f;
+            if (logH < 40.0f)
+                logH = 40.0f;
+            if (ImGui::BeginChild("##LogArea", ImVec2(0, logH), ImGuiChildFlags_None))
+                renderLogPanel();
+            ImGui::EndChild();
+        }
+
+        ImGui::End(); // ##main
+
+        // ── Status bar (fixed at bottom, like StreaMonitor) ─────────
+        {
+            ImGuiViewport *svp = ImGui::GetMainViewport();
+            float barH = 28.0f;
+            ImGui::SetNextWindowPos(ImVec2(svp->WorkPos.x, svp->WorkPos.y + svp->WorkSize.y - barH));
+            ImGui::SetNextWindowSize(ImVec2(svp->WorkSize.x, barH));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 4));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.08f, 0.08f, 0.10f, 1.0f});
+
+            ImGui::Begin("##StatusBar", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+            int done = doneCount_.load();
+            int errs = errCount_.load();
+            int total = totalCount_.load();
+
+            // Left: progress
+            if (total > 0)
+            {
+                float frac = (float)done / (float)total;
+                char pctStr[32];
+                snprintf(pctStr, sizeof(pctStr), "%.0f%%", frac * 100.0f);
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.20f, 0.55f, 0.30f, 1.0f));
+                ImGui::ProgressBar(frac, ImVec2(200, 16), pctStr);
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+            }
+
+            if (running_.load())
+            {
+                // Pulsating dot
+                float pulse = (std::sin((float)ImGui::GetTime() * 4.0f) + 1.0f) * 0.5f;
+                ImVec4 dotCol = {1.0f, 0.2f + pulse * 0.3f, 0.2f + pulse * 0.3f, 1.0f};
+                ImGui::TextColored(dotCol, "\xE2\x97\x8F"); // ●
+                ImGui::SameLine(0, 4);
+                ImGui::TextColored(COL_TEXT, "Processing...");
+            }
+            else if (total > 0 && done >= total)
+            {
+                ImGui::TextColored(COL_GREEN, "\xE2\x9C\x93 Complete");
+            }
+            else
+            {
+                ImGui::TextColored(COL_TEXT_DIM, "Ready");
+            }
+
+            // Right: toggle log
+            float toggleW = ImGui::CalcTextSize(showLog_ ? "Hide Log" : "Show Log").x + 16;
+            ImGui::SameLine(ImGui::GetWindowWidth() - toggleW - 12);
+            if (ImGui::SmallButton(showLog_ ? "Hide Log" : "Show Log"))
+                showLog_ = !showLog_;
+
+            ImGui::End();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar();
+        }
 
         // Settings popup (rendered outside the main fullscreen window)
         renderSettingsPopup();

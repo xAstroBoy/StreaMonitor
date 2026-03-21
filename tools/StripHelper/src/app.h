@@ -150,6 +150,7 @@ namespace sh
         bool autoScroll_ = true;
         bool showLog_ = true;
         float logHeight_ = 180.0f;
+        float splitRatio_ = 0.65f; // splitter: table / log ratio
     };
 
 } // namespace sh

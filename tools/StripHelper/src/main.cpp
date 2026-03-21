@@ -138,41 +138,82 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 static void SetupStyle()
 {
-    ImGui::StyleColorsDark();
+    // ── Match StreaMonitor's polished dark theme exactly ────────────
     ImGuiStyle &s = ImGui::GetStyle();
-    s.WindowRounding = 0.0f;
-    s.FrameRounding = 4.0f;
-    s.GrabRounding = 3.0f;
-    s.ScrollbarRounding = 6.0f;
-    s.TabRounding = 4.0f;
-    s.WindowPadding = ImVec2(10, 10);
-    s.FramePadding = ImVec2(6, 4);
-    s.ItemSpacing = ImVec2(8, 5);
-    s.ScrollbarSize = 14.0f;
+    ImVec4 *c = s.Colors;
 
-    auto &c = s.Colors;
-    c[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
-    c[ImGuiCol_Header] = ImVec4(0.18f, 0.22f, 0.30f, 1.00f);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.25f, 0.32f, 0.45f, 1.00f);
-    c[ImGuiCol_HeaderActive] = ImVec4(0.30f, 0.40f, 0.55f, 1.00f);
-    c[ImGuiCol_Button] = ImVec4(0.18f, 0.25f, 0.38f, 1.00f);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.35f, 0.52f, 1.00f);
-    c[ImGuiCol_ButtonActive] = ImVec4(0.30f, 0.42f, 0.60f, 1.00f);
-    c[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.22f, 0.22f, 0.28f, 1.00f);
-    c[ImGuiCol_TableHeaderBg] = ImVec4(0.14f, 0.16f, 0.22f, 1.00f);
-    c[ImGuiCol_TableBorderStrong] = ImVec4(0.20f, 0.22f, 0.28f, 1.00f);
-    c[ImGuiCol_TableBorderLight] = ImVec4(0.14f, 0.16f, 0.20f, 1.00f);
-    c[ImGuiCol_TableRowBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    c[ImGuiCol_TableRowBgAlt] = ImVec4(1.00f, 1.00f, 1.00f, 0.03f);
-    c[ImGuiCol_TitleBg] = ImVec4(0.06f, 0.06f, 0.08f, 1.00f);
-    c[ImGuiCol_TitleBgActive] = ImVec4(0.12f, 0.14f, 0.20f, 1.00f);
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0.06f, 0.06f, 0.08f, 1.00f);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.22f, 0.24f, 0.30f, 1.00f);
-    c[ImGuiCol_CheckMark] = ImVec4(0.40f, 0.70f, 1.00f, 1.00f);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.40f, 0.70f, 1.00f, 1.00f);
-    c[ImGuiCol_PlotHistogram] = ImVec4(0.25f, 0.55f, 0.85f, 1.00f);
+    // Background
+    c[ImGuiCol_WindowBg] = {0.06f, 0.06f, 0.08f, 1.0f};
+    c[ImGuiCol_ChildBg] = {0.10f, 0.10f, 0.12f, 1.0f};
+    c[ImGuiCol_PopupBg] = {0.08f, 0.08f, 0.10f, 0.96f};
+    c[ImGuiCol_Border] = {0.18f, 0.18f, 0.20f, 0.50f};
+
+    // Frame (inputs, checkboxes)
+    c[ImGuiCol_FrameBg] = {0.14f, 0.14f, 0.16f, 1.0f};
+    c[ImGuiCol_FrameBgHovered] = {0.20f, 0.20f, 0.24f, 1.0f};
+    c[ImGuiCol_FrameBgActive] = {0.26f, 0.26f, 0.30f, 1.0f};
+
+    // Title bar
+    c[ImGuiCol_TitleBg] = {0.08f, 0.08f, 0.10f, 1.0f};
+    c[ImGuiCol_TitleBgActive] = {0.12f, 0.12f, 0.14f, 1.0f};
+    c[ImGuiCol_MenuBarBg] = {0.08f, 0.08f, 0.10f, 1.0f};
+
+    // Headers
+    c[ImGuiCol_Header] = {0.18f, 0.18f, 0.22f, 1.0f};
+    c[ImGuiCol_HeaderHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_HeaderActive] = {0.45f, 0.65f, 1.00f, 1.0f};
+
+    // Buttons (blue accent)
+    c[ImGuiCol_Button] = {0.18f, 0.18f, 0.22f, 1.0f};
+    c[ImGuiCol_ButtonHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_ButtonActive] = {0.45f, 0.65f, 1.00f, 1.0f};
+
+    // Tabs
+    c[ImGuiCol_Tab] = {0.12f, 0.12f, 0.14f, 1.0f};
+    c[ImGuiCol_TabHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_TabSelected] = {0.22f, 0.35f, 0.60f, 1.0f};
+
+    // Scrollbar
+    c[ImGuiCol_ScrollbarBg] = {0.06f, 0.06f, 0.08f, 0.5f};
+    c[ImGuiCol_ScrollbarGrab] = {0.28f, 0.28f, 0.32f, 1.0f};
+
+    // Table
+    c[ImGuiCol_TableHeaderBg] = {0.12f, 0.12f, 0.14f, 1.0f};
+    c[ImGuiCol_TableBorderStrong] = {0.18f, 0.18f, 0.20f, 1.0f};
+    c[ImGuiCol_TableBorderLight] = {0.14f, 0.14f, 0.16f, 1.0f};
+    c[ImGuiCol_TableRowBg] = {0.00f, 0.00f, 0.00f, 0.00f};
+    c[ImGuiCol_TableRowBgAlt] = {0.08f, 0.08f, 0.10f, 0.40f};
+
+    // Text
+    c[ImGuiCol_Text] = {0.92f, 0.92f, 0.94f, 1.0f};
+    c[ImGuiCol_TextDisabled] = {0.50f, 0.50f, 0.55f, 1.0f};
+
+    // Misc
+    c[ImGuiCol_CheckMark] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_SliderGrab] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_PlotHistogram] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_SeparatorHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_SeparatorActive] = {0.45f, 0.65f, 1.00f, 1.0f};
+    c[ImGuiCol_ResizeGrip] = {0.20f, 0.20f, 0.24f, 0.5f};
+    c[ImGuiCol_ResizeGripHovered] = {0.35f, 0.55f, 1.00f, 1.0f};
+    c[ImGuiCol_ResizeGripActive] = {0.45f, 0.65f, 1.00f, 1.0f};
+
+    // Geometry — rounded, spacious, modern
+    s.WindowRounding = 6.0f;
+    s.FrameRounding = 4.0f;
+    s.GrabRounding = 4.0f;
+    s.TabRounding = 4.0f;
+    s.ScrollbarRounding = 4.0f;
+    s.ChildRounding = 4.0f;
+    s.PopupRounding = 4.0f;
+    s.WindowPadding = {10, 10};
+    s.FramePadding = {8, 5};
+    s.ItemSpacing = {8, 6};
+    s.ScrollbarSize = 14.0f;
+    s.GrabMinSize = 12.0f;
+    s.WindowBorderSize = 1.0f;
+    s.ChildBorderSize = 0.0f;
+    s.TabBorderSize = 0.0f;
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
