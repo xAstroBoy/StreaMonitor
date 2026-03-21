@@ -17,9 +17,10 @@ namespace sh
 {
     namespace fs = std::filesystem;
 
-    // ── FFmpeg / FFprobe paths ──────────────────────────────────────────────────
+    // ── FFmpeg / FFprobe / MKVToolNix paths ─────────────────────────────────────
     inline std::string g_ffmpeg = "ffmpeg";
     inline std::string g_ffprobe = "ffprobe";
+    inline std::string g_mkvpropedit = "mkvpropedit";
 
     // ── Validation thresholds ───────────────────────────────────────────────────
     constexpr double MIN_SIZE_RATIO_GENERIC = 0.985;
@@ -48,8 +49,6 @@ namespace sh
     inline int TARGET_AUDIO_SR = 48000;
     inline int TARGET_AUDIO_CH = 2;
     inline int DEFAULT_TARGET_FPS = 30;
-    inline int CAP_MAX_WIDTH = 3840;
-    inline int CAP_MAX_HEIGHT = 2160;
 
     // ── Behavior (mutable at runtime via settings / CLI) ────────────────────────
     inline bool DELETE_TS_AFTER_REMUX = true;
@@ -74,6 +73,39 @@ namespace sh
             g_ffmpeg = p;
         if (auto *p = std::getenv("FFPROBE"))
             g_ffprobe = p;
+        if (auto *p = std::getenv("MKVPROPEDIT"))
+            g_mkvpropedit = p;
+
+        // Auto-detect mkvpropedit if not in PATH
+        // Check common install locations on Windows
+#ifdef _WIN32
+        if (g_mkvpropedit == "mkvpropedit")
+        {
+            // Test if bare command works (in PATH)
+            DWORD attr = GetFileAttributesA("mkvpropedit.exe");
+            bool inPath = false;
+            {
+                char buf[MAX_PATH];
+                inPath = SearchPathA(nullptr, "mkvpropedit.exe", nullptr, MAX_PATH, buf, nullptr) > 0;
+            }
+            if (!inPath)
+            {
+                // Check common install locations
+                const char *candidates[] = {
+                    R"(C:\Program Files\MKVToolNix\mkvpropedit.exe)",
+                    R"(C:\Program Files (x86)\MKVToolNix\mkvpropedit.exe)",
+                };
+                for (auto *c : candidates)
+                {
+                    if (GetFileAttributesA(c) != INVALID_FILE_ATTRIBUTES)
+                    {
+                        g_mkvpropedit = c;
+                        break;
+                    }
+                }
+            }
+        }
+#endif
 
         // Settings file lives next to the exe
         SETTINGS_PATH = getExeDir() / "settings.json";

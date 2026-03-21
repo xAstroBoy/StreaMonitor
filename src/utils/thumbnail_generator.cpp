@@ -797,7 +797,8 @@ namespace sm
     bool embedThumbnailInMKV(
         const std::string &videoPath,
         const std::string &jpegPath,
-        std::function<void(const std::string &)> logCb)
+        std::function<void(const std::string &)> logCb,
+        const std::string &mkvpropeditPath)
     {
         namespace fs = std::filesystem;
         auto log = [&](const std::string &msg)
@@ -822,9 +823,41 @@ namespace sm
             return false;
         }
 
+        // Resolve mkvpropedit path: use provided, or auto-detect
+        std::string mkv_exe = mkvpropeditPath;
+        if (mkv_exe.empty())
+            mkv_exe = "mkvpropedit"; // bare command, rely on PATH
+
+#ifdef _WIN32
+        // Auto-detect: if bare command name, check common install locations
+        if (mkv_exe == "mkvpropedit")
+        {
+            // First check if it's in PATH
+            char buf[MAX_PATH];
+            bool inPath = SearchPathA(nullptr, "mkvpropedit.exe", nullptr, MAX_PATH, buf, nullptr) > 0;
+            if (!inPath)
+            {
+                // Check common install locations
+                const char *candidates[] = {
+                    R"(C:\Program Files\MKVToolNix\mkvpropedit.exe)",
+                    R"(C:\Program Files (x86)\MKVToolNix\mkvpropedit.exe)",
+                };
+                for (auto *c : candidates)
+                {
+                    if (GetFileAttributesA(c) != INVALID_FILE_ATTRIBUTES)
+                    {
+                        mkv_exe = c;
+                        log("thumbnail: found mkvpropedit at " + std::string(c));
+                        break;
+                    }
+                }
+            }
+        }
+#endif
+
         // Build mkvpropedit command for in-place attachment
-        std::string cmd = "mkvpropedit"
-                          " \"" +
+        std::string cmd = "\"" + mkv_exe + "\""
+                                           " \"" +
                           videoPath + "\""
                                       " --attachment-name cover.jpg"
                                       " --attachment-mime-type image/jpeg"

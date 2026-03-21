@@ -244,8 +244,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
         int targetFps = -1;
         int audioSampleRate = -1;
         int audioChannels = -1;
-        int capMaxW = -1;
-        int capMaxH = -1;
         int thumbnailEnabled = -1;
         int thumbnailWidth = -1;
         int thumbnailCols = -1;
@@ -392,16 +390,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
                 cli.audioChannels = nextArgInt(i);
                 continue;
             }
-            if (a == "--max-width")
-            {
-                cli.capMaxW = nextArgInt(i);
-                continue;
-            }
-            if (a == "--max-height")
-            {
-                cli.capMaxH = nextArgInt(i);
-                continue;
-            }
             if (a == "--thumb-width")
             {
                 cli.thumbnailWidth = nextArgInt(i);
@@ -461,8 +449,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
             "  --target-fps, --fps <N>    Target FPS (default: 30)\n"
             "  --audio-sr <N>             Audio sample rate (default: 48000)\n"
             "  --audio-ch <N>             Audio channels (default: 2)\n"
-            "  --max-width <N>            Max video width (default: 3840)\n"
-            "  --max-height <N>           Max video height (default: 2160)\n"
             "  --thumbnails / --no-thumbnails  Generate contact sheet (default: on)\n"
             "  --thumb-width <N>          Thumbnail width (default: 1280)\n"
             "  --thumb-cols <N>           Thumbnail columns (default: 4)\n"
@@ -582,10 +568,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
         app.setAudioSampleRate(cli.audioSampleRate);
     if (cli.audioChannels > 0)
         app.setAudioChannels(cli.audioChannels);
-    if (cli.capMaxW > 0)
-        app.setCapMaxW(cli.capMaxW);
-    if (cli.capMaxH > 0)
-        app.setCapMaxH(cli.capMaxH);
     if (cli.thumbnailEnabled >= 0)
         app.setThumbnailEnabled(cli.thumbnailEnabled != 0);
     if (cli.thumbnailWidth > 0)

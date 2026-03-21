@@ -132,8 +132,6 @@ namespace sh
         DEFAULT_TARGET_FPS = targetFps_;
         TARGET_AUDIO_SR = audioSampleRate_;
         TARGET_AUDIO_CH = audioChannels_;
-        CAP_MAX_WIDTH = capMaxW_;
-        CAP_MAX_HEIGHT = capMaxH_;
         DELETE_TS_AFTER_REMUX = deleteTs_;
         FAILED_TS_DELETE_MAX_BYTES = static_cast<int64_t>(failedTsMaxMB_) * 1024 * 1024;
     }
@@ -165,10 +163,6 @@ namespace sh
                 audioSampleRate_ = j["audioSampleRate"].get<int>();
             if (j.contains("audioChannels"))
                 audioChannels_ = j["audioChannels"].get<int>();
-            if (j.contains("capMaxW"))
-                capMaxW_ = j["capMaxW"].get<int>();
-            if (j.contains("capMaxH"))
-                capMaxH_ = j["capMaxH"].get<int>();
             if (j.contains("defaultPath"))
             {
                 auto s = j["defaultPath"].get<std::string>();
@@ -224,8 +218,6 @@ namespace sh
             j["targetFps"] = targetFps_;
             j["audioSampleRate"] = audioSampleRate_;
             j["audioChannels"] = audioChannels_;
-            j["capMaxW"] = capMaxW_;
-            j["capMaxH"] = capMaxH_;
             j["defaultPath"] = std::string(defaultPathBuf_);
             j["configPath"] = std::string(configPathBuf_);
             j["toProcessPath"] = TO_PROCESS.string();
@@ -654,26 +646,6 @@ namespace sh
         ImGui::SetNextItemWidth(inputW);
         ImGui::InputInt("##ach", &audioChannels_, 1, 1);
         audioChannels_ = std::clamp(audioChannels_, 1, 8);
-
-        ImGui::Spacing();
-        ImGui::SeparatorText("Resolution Limits");
-        ImGui::Spacing();
-
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Max width");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Videos wider than this will be scaled down\nduring re-encode. Set 3840 for 4K.");
-        ImGui::SameLine(labelW);
-        ImGui::SetNextItemWidth(inputW);
-        ImGui::InputInt("##maxW", &capMaxW_, 100, 320);
-        capMaxW_ = std::clamp(capMaxW_, 320, 7680);
-
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Max height");
-        ImGui::SameLine(labelW);
-        ImGui::SetNextItemWidth(inputW);
-        ImGui::InputInt("##maxH", &capMaxH_, 100, 240);
-        capMaxH_ = std::clamp(capMaxH_, 240, 4320);
     }
 
     void App::renderSettingsPaths()
@@ -716,6 +688,10 @@ namespace sh
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "FFprobe:");
         ImGui::SameLine();
         ImGui::TextWrapped("%s", g_ffprobe.c_str());
+
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "mkvpropedit:");
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", g_mkvpropedit.c_str());
     }
 
     void App::renderSettingsThumbnails()
@@ -1354,7 +1330,8 @@ namespace sh
                         {
                             sm::embedThumbnailInMKV(merged.string(), thumbPath.string(),
                                                     [this](const std::string &msg)
-                                                    { addLog("[thumb] " + msg); });
+                                                    { addLog("[thumb] " + msg); },
+                                                    g_mkvpropedit);
                         }
 
                         if (fs::exists(thumbPath))

@@ -40,9 +40,11 @@ namespace sm
     // Embed a JPEG thumbnail as cover art attachment inside an MKV file.
     // Uses mkvpropedit for in-place modification (no video copying/remuxing).
     // Returns true on success; on failure the .jpg file is kept alongside.
+    // mkvpropeditPath: explicit path to mkvpropedit exe, or empty for auto-detect.
     bool embedThumbnailInMKV(
         const std::string &videoPath,
         const std::string &jpegPath,
-        std::function<void(const std::string &)> logCb = nullptr);
+        std::function<void(const std::string &)> logCb = nullptr,
+        const std::string &mkvpropeditPath = "");
 
 } // namespace sm

@@ -62,8 +62,6 @@ namespace sh
         void setTargetFps(int v) { targetFps_ = std::clamp(v, 1, 120); }
         void setAudioSampleRate(int v) { audioSampleRate_ = std::clamp(v, 8000, 192000); }
         void setAudioChannels(int v) { audioChannels_ = std::clamp(v, 1, 8); }
-        void setCapMaxW(int v) { capMaxW_ = std::clamp(v, 320, 7680); }
-        void setCapMaxH(int v) { capMaxH_ = std::clamp(v, 240, 4320); }
         void setThumbnailEnabled(bool v) { thumbnailEnabled_ = v; }
         void setThumbnailWidth(int v) { thumbnailWidth_ = std::clamp(v, 320, 3840); }
         void setThumbnailColumns(int v) { thumbnailColumns_ = std::clamp(v, 1, 10); }
@@ -121,8 +119,6 @@ namespace sh
         int targetFps_ = DEFAULT_TARGET_FPS;
         int audioSampleRate_ = TARGET_AUDIO_SR;
         int audioChannels_ = TARGET_AUDIO_CH;
-        int capMaxW_ = CAP_MAX_WIDTH;
-        int capMaxH_ = CAP_MAX_HEIGHT;
         char defaultPathBuf_[1024] = {};
         char configPathBuf_[1024] = {};
 

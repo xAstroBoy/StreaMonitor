@@ -795,18 +795,6 @@ namespace sh
         int targetFps = DEFAULT_TARGET_FPS;
         if (!fpsVals.empty())
             targetFps = std::max(1, (int)std::round(*std::max_element(fpsVals.begin(), fpsVals.end())));
-        if (maxW > CAP_MAX_WIDTH)
-        {
-            double s = (double)CAP_MAX_WIDTH / maxW;
-            maxW = CAP_MAX_WIDTH;
-            maxH = (int)(maxH * s);
-        }
-        if (maxH > CAP_MAX_HEIGHT)
-        {
-            double s = (double)CAP_MAX_HEIGHT / maxH;
-            maxH = CAP_MAX_HEIGHT;
-            maxW = (int)(maxW * s);
-        }
         if (maxW <= 0)
             maxW = 640;
         if (maxH <= 0)
