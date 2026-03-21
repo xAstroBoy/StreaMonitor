@@ -148,10 +148,14 @@ namespace sm
 
     void BotManager::shutdown()
     {
-        if (isShutdown_)
+        if (isShutdown_.load())
             return;
-        isShutdown_ = true;
+        isShutdown_.store(true);
         spdlog::info("Shutting down bot manager...");
+
+        // Join all restart threads first (Fixes #47)
+        joinRestartThreads();
+
         {
             std::lock_guard lock(mutex_);
             // Stop all groups first
@@ -168,6 +172,17 @@ namespace sm
             bots_.clear(); // destructors join threads
         }
         spdlog::info("Bot manager shut down");
+    }
+
+    void BotManager::joinRestartThreads()
+    {
+        std::lock_guard rlock(restartMutex_);
+        for (auto &t : restartThreads_)
+        {
+            if (t.joinable())
+                t.join();
+        }
+        restartThreads_.clear();
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -380,20 +395,34 @@ namespace sm
     bool BotManager::restartBot(const std::string &username, const std::string &site)
     {
         stopBot(username, site);
-        // Use a detached thread so we don't block the caller (GUI thread)
+        // Use a tracked thread so we can join during shutdown (Fixes #47)
         std::string u = username;
         std::string s = site;
-        std::thread([this, u, s]()
-                    {
+        std::lock_guard rlock(restartMutex_);
+        // Clean up any finished restart threads first
+        restartThreads_.erase(
+            std::remove_if(restartThreads_.begin(), restartThreads_.end(),
+                           [](std::thread &t)
+                           {
+                               // Can't check if done without joining, so skip non-joinable
+                               return !t.joinable();
+                           }),
+            restartThreads_.end());
+        restartThreads_.emplace_back([this, u, s]()
+                                     {
             try {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                // Sleep with periodic shutdown checks (100ms intervals)
+                for (int i = 0; i < 10; ++i) {
+                    if (isShutdown_.load()) return;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                if (isShutdown_.load()) return;
                 startBot(u, s);
             } catch (const std::exception &e) {
                 spdlog::error("restartBot({}, {}) exception: {}", u, s, e.what());
             } catch (...) {
                 spdlog::error("restartBot({}, {}) unknown exception", u, s);
-            } })
-            .detach();
+            } });
         return true;
     }
 
@@ -754,6 +783,8 @@ namespace sm
     void BotManager::emitEvent(ManagerEvent::Type type, const std::string &botId,
                                const std::string &msg)
     {
+        if (isShutdown_.load())
+            return; // Don't fire events during shutdown (Fixes #47)
         ManagerEventCallback cb;
         {
             std::lock_guard lock(eventMutex_);
@@ -778,6 +809,139 @@ namespace sm
                                        entry.plugin->isRunning());
         }
         configStore_.save();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Import from Python StreaMonitor config.json (Issue #45)
+    // Python format: JSON array of {"site":"StripChat","username":"xxx",
+    //   "running":true,"country":"...","gender":"female"/"male"/...}
+    // ─────────────────────────────────────────────────────────────────
+    BotManager::ImportResult BotManager::importFromPythonConfig(const std::string &jsonStr)
+    {
+        ImportResult result;
+
+        // Python gender string → C++ Gender enum
+        auto parseGender = [](const std::string &g) -> Gender
+        {
+            std::string gl = g;
+            std::transform(gl.begin(), gl.end(), gl.begin(), ::tolower);
+            if (gl == "female")
+                return Gender::Female;
+            if (gl == "male")
+                return Gender::Male;
+            if (gl == "couple" || gl == "malefemale")
+                return Gender::Couple;
+            if (gl == "trans" || gl == "transwoman")
+                return Gender::TransWoman;
+            if (gl == "transman")
+                return Gender::TransMan;
+            return Gender::Unknown;
+        };
+
+        // Python site name → C++ site name (most are identical)
+        // Python uses: StripChat, StripChatVR, Chaturbate, BongaCams,
+        //   MyFreeCams, CamSoda, Flirt4Free, StreaMate, DreamCam, DreamCamVR,
+        //   CherryTV, SexChatHU, ManyVids, AmateurTV, XLoveCam, Cam4, CamsCom
+        auto &registry = SiteRegistry::instance();
+
+        try
+        {
+            auto j = nlohmann::json::parse(jsonStr);
+            if (!j.is_array())
+            {
+                result.errors.push_back("Expected a JSON array");
+                return result;
+            }
+
+            for (const auto &entry : j)
+            {
+                if (!entry.is_object())
+                    continue;
+
+                std::string site = entry.value("site", "");
+                std::string username = entry.value("username", "");
+                bool running = entry.value("running", true);
+
+                if (site.empty() || username.empty())
+                {
+                    result.failed++;
+                    result.errors.push_back("Missing site or username in entry");
+                    continue;
+                }
+
+                // Try to resolve the site name (Python and C++ use same names)
+                // Also try the slug in case config uses slugs
+                if (!registry.hasSite(site))
+                {
+                    // Try slug lookup
+                    std::string fromSlug = registry.slugToName(site);
+                    if (!fromSlug.empty())
+                        site = fromSlug;
+                    else
+                    {
+                        result.failed++;
+                        result.errors.push_back("Unknown site: " + site + " (user: " + username + ")");
+                        continue;
+                    }
+                }
+
+                // Check if already exists
+                std::string slug = registry.nameToSlug(site);
+                if (findBot(username, site) || findBot(username, slug))
+                {
+                    result.skipped++;
+                    continue;
+                }
+
+                // Add the bot
+                if (addBot(username, site, running))
+                {
+                    // Update extra fields if available
+                    if (entry.contains("gender"))
+                    {
+                        auto genderVal = entry["gender"];
+                        Gender g = Gender::Unknown;
+                        if (genderVal.is_string())
+                            g = parseGender(genderVal.get<std::string>());
+                        else if (genderVal.is_number_integer())
+                            g = static_cast<Gender>(genderVal.get<int>());
+
+                        if (g != Gender::Unknown)
+                        {
+                            // Update in config store
+                            auto models = configStore_.getAll();
+                            for (auto &mc : models)
+                            {
+                                if (mc.username == username && mc.site == site)
+                                    mc.gender = g;
+                            }
+                        }
+                    }
+                    if (entry.contains("country") && entry["country"].is_string())
+                    {
+                        std::string country = entry["country"].get<std::string>();
+                        // Config store update happens through addBot/saveConfig
+                    }
+                    result.imported++;
+                }
+                else
+                {
+                    result.skipped++; // Already exists (race condition or duplicate in file)
+                }
+            }
+
+            // Save after all imports
+            if (result.imported > 0)
+                saveConfig();
+        }
+        catch (const std::exception &e)
+        {
+            result.errors.push_back(std::string("JSON parse error: ") + e.what());
+        }
+
+        spdlog::info("Python config import: {} imported, {} skipped, {} failed",
+                      result.imported, result.skipped, result.failed);
+        return result;
     }
 
     std::vector<std::string> BotManager::availableSites() const

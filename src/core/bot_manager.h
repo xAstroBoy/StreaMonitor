@@ -11,6 +11,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <functional>
 #include <unordered_map>
 
@@ -105,6 +106,16 @@ namespace sm
         // ── Config persistence ──────────────────────────────────────
         void saveConfig();
 
+        // ── Import from Python StreaMonitor config (Issue #45) ────────
+        struct ImportResult
+        {
+            int imported = 0;
+            int skipped = 0; // already exists
+            int failed = 0;  // unknown site
+            std::vector<std::string> errors;
+        };
+        ImportResult importFromPythonConfig(const std::string &jsonStr);
+
         // ── Available sites ─────────────────────────────────────────
         std::vector<std::string> availableSites() const;
 
@@ -160,7 +171,12 @@ namespace sm
         std::vector<std::unique_ptr<ModelGroup>> groups_;
         std::mutex eventMutex_; // protects eventCb_
         ManagerEventCallback eventCb_;
-        bool isShutdown_ = false;
+        std::atomic<bool> isShutdown_{false};
+
+        // Tracked restart threads (fixes #47: detached thread crash)
+        std::mutex restartMutex_;
+        std::vector<std::thread> restartThreads_;
+        void joinRestartThreads(); // join & cleanup finished restart threads
     };
 
 } // namespace sm
