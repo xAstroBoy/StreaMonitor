@@ -1147,8 +1147,7 @@ namespace sh
         saveSettings();
 
         // Reset so To Process gets wiped fresh for this batch
-        if (mkLinks_)
-            resetToProcessPurge();
+        resetToProcessPurge();
 
         addLog("Scanning for work folders in " + root.string() + " ...");
 
@@ -1342,24 +1341,44 @@ namespace sh
         {
             mergeFolder(folder, guiCb, cfg_, mkLinks_, noteCb, metricCb, repairPts_);
 
-            // Generate thumbnail contact sheet after successful merge
-            if (thumbnailEnabled_)
+            // ── Post-merge pipeline (matches ThumbnailTool) ──────────────
+            auto merged = folder / "0.mkv";
+            if (fs::exists(merged))
             {
-                auto merged = folder / "0.mkv";
-                if (fs::exists(merged))
+                auto logCb = [this](const std::string &msg)
+                { addLog("[post] " + msg); };
+
+                // 1. VR spatial metadata injection (before thumbnail so frames show VR)
+                try
+                {
+                    if (sm::isVRFromPath(folder.string()))
+                    {
+                        noteCb("injecting VR 180° SBS metadata...");
+                        sm::injectVRSpatialMetadata(merged.string(), logCb, g_mkvpropedit);
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    addLog("[post] VR metadata WARNING: " + std::string(e.what()));
+                }
+
+                // 2. Thumbnail: clean orphans → generate → embed → delete
+                if (thumbnailEnabled_)
                 {
                     try
                     {
                         // Clean up orphan .thumb.jpg files from per-segment recording
                         for (auto &entry : fs::directory_iterator(folder))
                         {
-                            if (!entry.is_regular_file()) continue;
+                            if (!entry.is_regular_file())
+                                continue;
                             auto fname = entry.path().filename().string();
                             if (fname.size() > 10 && fname.find(".thumb.jpg") != std::string::npos)
                             {
                                 std::error_code ec;
                                 fs::remove(entry.path(), ec);
-                                if (!ec) addLog("[thumb] cleaned orphan: " + fname);
+                                if (!ec)
+                                    addLog("[thumb] cleaned orphan: " + fname);
                             }
                         }
 
@@ -1376,11 +1395,10 @@ namespace sh
                                                  [this](const std::string &msg)
                                                  { addLog("[thumb] " + msg); });
 
-                        // Embed thumbnail as cover art inside the MKV (in-place, no copy)
+                        // Embed thumbnail as cover art inside the MKV
                         if (fs::exists(thumbPath))
                         {
-                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), [this](const std::string &msg)
-                                                    { addLog("[thumb] " + msg); }, g_mkvpropedit);
+                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), logCb, g_mkvpropedit);
 
                             // Delete .thumb.jpg after successful embed
                             std::error_code ec;
@@ -1390,11 +1408,24 @@ namespace sh
                             else
                                 noteCb("thumbnail embedded (cleanup failed: " + ec.message() + ")");
                         }
+
+                        // Fix DLNA cover attachment metadata
+                        sm::fixCoverAttachmentMetadata(merged.string(), logCb, g_mkvpropedit);
                     }
                     catch (const std::exception &e)
                     {
                         addLog("[thumb] WARNING: " + std::string(e.what()));
                     }
+                }
+
+                // 3. Write THUMBNAILED=done tag (marks file as fully processed)
+                try
+                {
+                    sm::writeProcessedTag(merged.string(), logCb, g_mkvpropedit);
+                }
+                catch (const std::exception &e)
+                {
+                    addLog("[post] tag WARNING: " + std::string(e.what()));
                 }
             }
 
@@ -1410,20 +1441,24 @@ namespace sh
                 }
                 // Sort deepest first
                 std::sort(emptyDirs.begin(), emptyDirs.end(),
-                    [](const fs::path &a, const fs::path &b) {
-                        return a.string().size() > b.string().size();
-                    });
+                          [](const fs::path &a, const fs::path &b)
+                          {
+                              return a.string().size() > b.string().size();
+                          });
                 for (auto &d : emptyDirs)
                 {
                     if (fs::is_empty(d))
                     {
                         std::error_code ec;
                         fs::remove(d, ec);
-                        if (!ec) addLog("[" + std::to_string(idx) + "] removed empty dir: " + d.filename().string());
+                        if (!ec)
+                            addLog("[" + std::to_string(idx) + "] removed empty dir: " + d.filename().string());
                     }
                 }
             }
-            catch (...) {}
+            catch (...)
+            {
+            }
 
             {
                 std::lock_guard lk(mtx_);

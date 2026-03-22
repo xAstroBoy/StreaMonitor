@@ -7,6 +7,7 @@
 #include <fmt/format.h>
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <set>
 #include <unordered_map>
 
@@ -508,72 +509,108 @@ namespace sm
         std::string folderName = username + " [" + slug + "]";
         auto destFolder = unprocessedDir / folderName;
 
-        // Check for file conflicts if dest exists
-        if (fs::exists(destFolder, ec) && fs::is_directory(destFolder, ec))
+        // Helper: find next available {n}.ext in destDir (never overwrite)
+        auto safeDestPath = [](const fs::path &destDir, const fs::path &filename) -> fs::path
         {
-            std::set<std::string> existing, source;
-            for (const auto &e : fs::directory_iterator(destFolder, ec))
-                existing.insert(e.path().filename().string());
-            for (const auto &e : fs::directory_iterator(sourceFolder, ec))
-                source.insert(e.path().filename().string());
+            auto dst = destDir / filename;
+            if (!fs::exists(dst))
+                return dst;
 
-            std::vector<std::string> conflicts;
-            for (const auto &f : source)
+            // Find highest existing numeric filename with same extension
+            auto ext = filename.extension().string();
+            int maxN = -1;
+            std::error_code sec;
+            for (auto &e : fs::directory_iterator(destDir, sec))
             {
-                if (existing.count(f))
-                    conflicts.push_back(f);
-            }
-
-            if (!conflicts.empty())
-            {
-                if (wasRunning)
-                    startBot(username, slug);
-                std::string preview;
-                for (size_t i = 0; i < std::min(conflicts.size(), size_t(3)); i++)
+                if (!e.is_regular_file())
+                    continue;
+                auto eExt = e.path().extension().string();
+                if (eExt != ext)
+                    continue;
+                try
                 {
-                    if (!preview.empty())
-                        preview += ", ";
-                    preview += conflicts[i];
+                    int n = std::stoi(e.path().stem().string());
+                    if (n > maxN)
+                        maxN = n;
                 }
-                if (conflicts.size() > 3)
-                    preview += "...";
-                return {false, fmt::format("Conflicts detected: {}", preview)};
+                catch (...)
+                {
+                }
             }
-        }
+            // Next number after the highest
+            int next = std::max(maxN + 1, 0);
+            for (;; ++next)
+            {
+                dst = destDir / (std::to_string(next) + ext);
+                if (!fs::exists(dst))
+                    return dst;
+            }
+        };
 
-        // Move files
+        // Recursive move helper: moves all contents from src → dst, never overwrites
+        std::function<void(const fs::path &, const fs::path &)> moveContents;
+        moveContents = [&](const fs::path &src, const fs::path &dst)
+        {
+            fs::create_directories(dst, ec);
+            for (const auto &entry : fs::directory_iterator(src, ec))
+            {
+                if (entry.is_directory())
+                {
+                    // Recurse into subdirectories (e.g. Mobile/)
+                    moveContents(entry.path(), dst / entry.path().filename());
+                }
+                else
+                {
+                    auto target = safeDestPath(dst, entry.path().filename());
+                    std::error_code mec;
+                    fs::rename(entry.path(), target, mec);
+                    if (mec)
+                    {
+                        // Cross-device fallback: copy + remove
+                        fs::copy_file(entry.path(), target,
+                                      fs::copy_options::skip_existing, mec);
+                        if (!mec)
+                            fs::remove(entry.path(), mec);
+                    }
+                }
+            }
+        };
+
+        // Move files (never overwrite — increment filename on conflict)
         try
         {
             if (!fs::exists(destFolder, ec))
             {
-                // Move entire folder
+                // No existing dest — move the whole folder
                 fs::rename(sourceFolder, destFolder, ec);
                 if (ec)
                 {
-                    // Cross-device? Fall back to copy + remove
-                    fs::copy(sourceFolder, destFolder,
-                             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-                    if (!ec)
-                        fs::remove_all(sourceFolder, ec);
+                    // Cross-device? Fall back to recursive move
+                    moveContents(sourceFolder, destFolder);
+                    fs::remove_all(sourceFolder, ec);
                 }
             }
             else
             {
-                // Move individual files into existing dest
-                for (const auto &entry : fs::directory_iterator(sourceFolder, ec))
-                {
-                    auto dst = destFolder / entry.path().filename();
-                    fs::rename(entry.path(), dst, ec);
-                    if (ec)
-                    {
-                        fs::copy_file(entry.path(), dst,
-                                      fs::copy_options::overwrite_existing, ec);
-                        if (!ec)
-                            fs::remove(entry.path(), ec);
-                    }
-                }
+                // Dest exists — merge contents in, incrementing filenames on conflict
+                moveContents(sourceFolder, destFolder);
 
-                // Remove empty source folder
+                // Clean up empty source directories (deepest first)
+                std::vector<fs::path> dirs;
+                for (auto &e : fs::recursive_directory_iterator(sourceFolder,
+                                                                fs::directory_options::skip_permission_denied, ec))
+                {
+                    if (e.is_directory())
+                        dirs.push_back(e.path());
+                }
+                std::sort(dirs.begin(), dirs.end(),
+                          [](const fs::path &a, const fs::path &b)
+                          { return a.string().size() > b.string().size(); });
+                for (auto &d : dirs)
+                {
+                    if (fs::is_empty(d, ec))
+                        fs::remove(d, ec);
+                }
                 if (fs::exists(sourceFolder, ec) && fs::is_empty(sourceFolder, ec))
                 {
                     fs::remove(sourceFolder, ec);
@@ -601,7 +638,12 @@ namespace sm
 
     BotManager::MoveResult BotManager::moveAllFilesToUnprocessed()
     {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        // First: move active bots via per-bot logic (stops recording, etc.)
         auto states = getAllStates();
+        std::set<std::string> handledFolders; // track which folders we already moved
         int moved = 0, failed = 0;
         std::string details;
 
@@ -619,13 +661,151 @@ namespace sm
                 failed++;
                 details += fmt::format("  [{}] {}: {}\n", st.siteSlug, st.username, result.message);
             }
+            // Track this folder name so we don't process it again below
+            handledFolders.insert(st.username + " [" + st.siteSlug + "]");
+        }
+
+        // Second: move ALL remaining subfolders in downloads/ that aren't active bots
+        auto dlDir = config_.downloadsDir;
+        auto unprocessedDir = dlDir.parent_path() / "unprocessed";
+
+        // Helper lambdas (same logic as per-bot move)
+        auto safeDestPath = [](const fs::path &destDir, const fs::path &filename) -> fs::path
+        {
+            auto dst = destDir / filename;
+            if (!fs::exists(dst))
+                return dst;
+            auto ext = filename.extension().string();
+            int maxN = -1;
+            std::error_code sec;
+            for (auto &e : fs::directory_iterator(destDir, sec))
+            {
+                if (!e.is_regular_file())
+                    continue;
+                if (e.path().extension().string() != ext)
+                    continue;
+                try
+                {
+                    int n = std::stoi(e.path().stem().string());
+                    if (n > maxN)
+                        maxN = n;
+                }
+                catch (...)
+                {
+                }
+            }
+            int next = std::max(maxN + 1, 0);
+            for (;; ++next)
+            {
+                dst = destDir / (std::to_string(next) + ext);
+                if (!fs::exists(dst))
+                    return dst;
+            }
+        };
+
+        std::function<void(const fs::path &, const fs::path &)> moveContents;
+        moveContents = [&](const fs::path &src, const fs::path &dst)
+        {
+            fs::create_directories(dst, ec);
+            for (const auto &entry : fs::directory_iterator(src, ec))
+            {
+                if (entry.is_directory())
+                    moveContents(entry.path(), dst / entry.path().filename());
+                else
+                {
+                    auto target = safeDestPath(dst, entry.path().filename());
+                    std::error_code mec;
+                    fs::rename(entry.path(), target, mec);
+                    if (mec)
+                    {
+                        fs::copy_file(entry.path(), target, fs::copy_options::skip_existing, mec);
+                        if (!mec)
+                            fs::remove(entry.path(), mec);
+                    }
+                }
+            }
+        };
+
+        if (fs::exists(dlDir, ec) && fs::is_directory(dlDir, ec))
+        {
+            for (auto &sub : fs::directory_iterator(dlDir, ec))
+            {
+                if (!sub.is_directory())
+                    continue;
+                auto folderName = sub.path().filename().string();
+                if (handledFolders.count(folderName))
+                    continue; // already handled above
+
+                // Check if folder has any files
+                bool hasFiles = false;
+                for (auto &e : fs::recursive_directory_iterator(sub.path(),
+                                                                fs::directory_options::skip_permission_denied, ec))
+                {
+                    if (e.is_regular_file())
+                    {
+                        hasFiles = true;
+                        break;
+                    }
+                }
+                if (!hasFiles)
+                    continue;
+
+                auto destFolder = unprocessedDir / folderName;
+                try
+                {
+                    fs::create_directories(unprocessedDir, ec);
+                    if (!fs::exists(destFolder, ec))
+                    {
+                        fs::rename(sub.path(), destFolder, ec);
+                        if (ec)
+                        {
+                            moveContents(sub.path(), destFolder);
+                            fs::remove_all(sub.path(), ec);
+                        }
+                    }
+                    else
+                    {
+                        moveContents(sub.path(), destFolder);
+                    }
+                    moved++;
+                    details += fmt::format("  {}: moved (orphan)\n", folderName);
+                }
+                catch (const std::exception &e)
+                {
+                    failed++;
+                    details += fmt::format("  {}: {}\n", folderName, e.what());
+                }
+            }
+        }
+
+        // Clean up empty directories in downloads/ (deepest first)
+        if (fs::exists(dlDir, ec))
+        {
+            std::vector<fs::path> dirs;
+            for (auto &e : fs::recursive_directory_iterator(dlDir,
+                                                            fs::directory_options::skip_permission_denied, ec))
+            {
+                if (e.is_directory())
+                    dirs.push_back(e.path());
+            }
+            std::sort(dirs.begin(), dirs.end(),
+                      [](const fs::path &a, const fs::path &b)
+                      { return a.string().size() > b.string().size(); });
+            for (auto &d : dirs)
+            {
+                if (fs::is_empty(d, ec))
+                {
+                    fs::remove(d, ec);
+                    spdlog::info("Removed empty dir: {}", d.string());
+                }
+            }
         }
 
         if (moved == 0 && failed == 0)
             return {true, "No files to move"};
 
         return {failed == 0,
-                fmt::format("Moved files for {} bot(s){}\n{}",
+                fmt::format("Moved files for {} folder(s){}\n{}",
                             moved,
                             failed > 0 ? fmt::format(", {} failed", failed) : "",
                             details)};

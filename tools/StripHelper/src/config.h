@@ -183,7 +183,8 @@ namespace sh
 
     inline std::string humanSecs(double s)
     {
-        if (s < 0) s = 0;
+        if (s < 0)
+            s = 0;
         int total = static_cast<int>(s);
         int h = total / 3600;
         int m = (total % 3600) / 60;
