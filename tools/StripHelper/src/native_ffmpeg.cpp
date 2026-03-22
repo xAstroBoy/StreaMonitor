@@ -5,10 +5,8 @@
 
 #include "native_ffmpeg.h"
 #include <algorithm>
-#include <fstream>
 #include <cmath>
 #include <unordered_map>
-#include <mutex>
 
 extern "C"
 {
@@ -23,9 +21,6 @@ extern "C"
 
 namespace sh
 {
-    // Mutex for current_path operations (concat demuxer needs relative path resolution)
-    static std::mutex g_cwdMutex;
-
     // ── RAII helpers ─────────────────────────────────────────────────
     namespace
     {
@@ -281,19 +276,23 @@ namespace sh
             pkt->stream_index = dstIdx;
             av_packet_rescale_ts(pkt, inTb, outTb);
 
-            bytesWritten += pkt->size;
+            // Capture packet fields BEFORE write_frame — it unrefs the packet!
+            int64_t pktDts = pkt->dts;
+            int pktSize = pkt->size;
+
+            bytesWritten += pktSize;
 
             if (av_interleaved_write_frame(ofmt.ctx, pkt) < 0)
             {
-                av_packet_unref(pkt);
+                // pkt is already unreffed by write_frame on error too
                 // Non-fatal: skip problematic packets
                 continue;
             }
 
-            // Progress callback
-            if (progress && pkt->dts != AV_NOPTS_VALUE)
+            // Progress callback (using captured values — pkt is now unreffed)
+            if (progress && pktDts != AV_NOPTS_VALUE)
             {
-                double timeSec = pkt->dts * av_q2d(outTb);
+                double timeSec = pktDts * av_q2d(outTb);
                 progress(timeSec, bytesWritten, totalSize);
             }
         }
@@ -313,12 +312,12 @@ namespace sh
                       NativeProgressCb progress,
                       NativeCancelCb cancelCb)
     {
-        // Use FFmpeg's built-in concat demuxer
+        // The caller (writeConcat) already writes absolute paths with forward
+        // slashes, so the concat demuxer never needs relative path resolution.
+        // No temp file rewrite needed — fully thread-safe.
+
         FmtCtxIn ifmt;
-        
-        // Build full path to concat list file.
-        // The concat demuxer resolves relative paths in the list relative to the list file's directory.
-        std::string listPath = (workDir / concatListFile.filename()).string();
+        std::string listPath = concatListFile.string();
 
         AVDictionary *opts = nullptr;
         av_dict_set(&opts, "safe", "0", 0);
@@ -330,28 +329,15 @@ namespace sh
             return false;
         }
 
-        // Use mutex to protect current_path changes - concat demuxer needs cwd for relative paths
-        std::unique_lock<std::mutex> cwdLock(g_cwdMutex);
-        auto prevDir = fs::current_path();
-        fs::current_path(workDir);
-
         if (avformat_open_input(&ifmt.ctx, listPath.c_str(), concatFmt, &opts) < 0)
         {
             av_dict_free(&opts);
-            fs::current_path(prevDir);
             return false;
         }
         av_dict_free(&opts);
 
         if (avformat_find_stream_info(ifmt.ctx, nullptr) < 0)
-        {
-            fs::current_path(prevDir);
             return false;
-        }
-
-        // Restore cwd immediately after opening - files are now open, no more relative path lookups
-        fs::current_path(prevDir);
-        cwdLock.unlock();
 
         // Create output
         FmtCtxOut ofmt;
@@ -457,14 +443,19 @@ namespace sh
                 lastDts[dstIdx] = pkt->dts;
             }
 
-            bytesWritten += pkt->size;
+            // Capture packet fields BEFORE write_frame — it unrefs the packet!
+            int64_t pktDts = pkt->dts;
+            int pktSize = pkt->size;
+
+            bytesWritten += pktSize;
 
             av_interleaved_write_frame(ofmt.ctx, pkt);
             // Don't check return — some packets may fail in concat
+            // pkt is now unreffed — do NOT access its fields!
 
-            if (progress && pkt->dts != AV_NOPTS_VALUE)
+            if (progress && pktDts != AV_NOPTS_VALUE)
             {
-                double timeSec = pkt->dts * av_q2d(outTb);
+                double timeSec = pktDts * av_q2d(outTb);
                 progress(timeSec, bytesWritten, 0);
             }
         }

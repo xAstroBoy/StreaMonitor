@@ -1752,18 +1752,44 @@ namespace sm
             }
             else
             {
+                std::string cmdLine;
+
                 if (hasExistingCover && forceRegenerate)
                 {
                     log("thumbnail: replacing existing cover art (force regenerate)");
+
+                    // First delete all existing image attachments, then add the new one.
+                    // mkvpropedit --delete-attachment mime-type:image/jpeg deletes by mime type.
+                    // We delete both jpeg and png to be thorough, then add fresh.
+                    std::string deleteCmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
+                                                                                     " --delete-attachment mime-type:image/jpeg"
+                                                                                     " --delete-attachment mime-type:image/png";
+                    log("thumbnail: removing old cover attachments...");
+#ifdef _WIN32
+                    std::string delErr;
+                    silentRunExe(mkv_exe, deleteCmdLine, &delErr);
+#else
+                    deleteCmdLine += " 2>&1";
+                    std::system(deleteCmdLine.c_str());
+#endif
+                    // Now add the new attachment (same as fresh embed)
+                    cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
+                                                                   " --attachment-name cover.jpg"
+                                                                   " --attachment-description cover"
+                                                                   " --attachment-mime-type image/jpeg"
+                                                                   " --add-attachment \"" +
+                              jpegPath + "\"";
                 }
-                
-                // Use --attachment-description "cover" for better DLNA compatibility
-                std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
-                                                                           " --attachment-name cover.jpg"
-                                                                           " --attachment-description cover"
-                                                                           " --attachment-mime-type image/jpeg"
-                                                                           " --add-attachment \"" +
-                                      jpegPath + "\"";
+                else
+                {
+                    // Fresh embed — no existing cover
+                    cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
+                                                                   " --attachment-name cover.jpg"
+                                                                   " --attachment-description cover"
+                                                                   " --attachment-mime-type image/jpeg"
+                                                                   " --add-attachment \"" +
+                              jpegPath + "\"";
+                }
 
                 log("thumbnail: embedding in " + mkvPath + "...");
 

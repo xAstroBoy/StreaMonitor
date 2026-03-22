@@ -218,6 +218,8 @@ namespace sm
 
         // DPI scale factor (detected from monitor)
         float dpiScale_ = 1.0f;
+        float lastDpiScale_ = 1.0f;
+        bool needFontRebuild_ = false;
 
         // Cached LAN URL for web dashboard (detected once at startup)
         std::string cachedLanUrl_;

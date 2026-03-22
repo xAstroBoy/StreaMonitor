@@ -284,8 +284,22 @@ namespace sh
 
         ImGui::Spacing();
 
+        // ── Calculate right-side width dynamically ────────────────────
+        const auto &sty = ImGui::GetStyle();
+        float sp     = sty.ItemSpacing.x;                                    // default SameLine gap
+        float fp2    = sty.FramePadding.x * 2.0f;                           // button horizontal padding
+        float cbPad  = ImGui::GetFrameHeight() + sty.ItemInnerSpacing.x;    // checkbox square + inner gap
+
+        float rightW = sp + (ImGui::CalcTextSize(" Browse ").x + fp2)       // Browse button
+                      + sp + 55.0f                                           // thread input
+                      + sp + ImGui::CalcTextSize("threads").x               // "threads" label
+                      + 16.0f + (cbPad + ImGui::CalcTextSize("Symlinks").x) // Symlinks checkbox
+                      + 12.0f + (cbPad + ImGui::CalcTextSize("PTS fix").x)  // PTS fix checkbox
+                      + 16.0f + 80.0f                                       // Start/Stop button
+                      + 8.0f  + (ImGui::CalcTextSize(" Settings ").x + fp2) // Settings button
+                      + sp;                                                  // trailing pad
+
         // ── Path input (stretches to fill) ──────────────────────────
-        float rightW = 620.0f; // space for right-side controls (incl. Settings)
         ImGui::SetNextItemWidth(std::max(200.0f, ImGui::GetContentRegionAvail().x - rightW));
         ImGui::InputTextWithHint("##path", "Folder to process...", pathBuf_, sizeof(pathBuf_));
 

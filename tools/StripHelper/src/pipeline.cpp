@@ -9,13 +9,12 @@
 #include <set>
 #include <chrono>
 #include <sstream>
-#include <mutex>
 #include <windows.h>
 
 namespace sh
 {
 
-    // ── Encoder ladder (hardware-first, fast salvage/concat) ────────────────────
+    // ── Encoder ladder (CPU-first for reliability, GPU as optional fallback) ──
 
     std::vector<EncoderArgs> encoderArgsetsFast()
     {
@@ -28,6 +27,13 @@ namespace sh
                 out.push_back({std::move(args), std::move(label)});
         };
 
+        // CPU encoders first — universally available, no driver quirks
+        if (have.count("libx264") && have["libx264"])
+            out.push_back({{"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-tune", "fastdecode"}, "libx264_vfast_crf20"});
+        if (have.count("libx265") && have["libx265"])
+            out.push_back({{"-c:v", "libx265", "-preset", "fast", "-x265-params", "crf=22:pmode=1:pme=1"}, "libx265_fast_crf22"});
+
+        // Hardware encoders as fallback
         add("hevc_nvenc", {"-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-bf", "0"}, "hevc_nvenc_p5_cq19");
         add("h264_nvenc", {"-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-bf", "0"}, "h264_nvenc_p5_cq19");
         add("av1_nvenc", {"-c:v", "av1_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-bf", "0"}, "av1_nvenc_p5_cq23");
@@ -37,11 +43,6 @@ namespace sh
         add("hevc_amf", {"-c:v", "hevc_amf", "-quality", "speed", "-usage", "transcoding"}, "hevc_amf_speed");
         add("h264_amf", {"-c:v", "h264_amf", "-quality", "speed", "-usage", "transcoding"}, "h264_amf_speed");
         add("av1_amf", {"-c:v", "av1_amf", "-quality", "speed", "-usage", "transcoding"}, "av1_amf_speed");
-
-        if (have.count("libx264") && have["libx264"])
-            out.push_back({{"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-tune", "fastdecode"}, "libx264_vfast_crf20"});
-        if (have.count("libx265") && have["libx265"])
-            out.push_back({{"-c:v", "libx265", "-preset", "fast", "-x265-params", "crf=22:pmode=1:pme=1"}, "libx265_fast_crf22"});
 
         return out;
     }
@@ -676,16 +677,17 @@ namespace sh
     {
         auto txt = folder / fname;
         std::ofstream f(txt, std::ios::out | std::ios::trunc);
-        if (includeZero)
-            f << "file '0.mkv'\n";
-        for (auto &p : parts)
+        // Write absolute paths with forward slashes so the FFmpeg concat
+        // demuxer never needs relative path resolution. Fully thread-safe
+        // and avoids creating a second temp .txt file.
+        auto writeAbsEntry = [&](const std::string &filename)
         {
-            if (p.filename() == "0.mkv")
-                continue;
-            auto name = p.filename().string();
+            auto absPath = (folder / filename).string();
+            // FFmpeg expects forward slashes even on Windows
+            std::replace(absPath.begin(), absPath.end(), '\\', '/');
             // Escape single quotes for FFmpeg concat
             std::string safe;
-            for (char c : name)
+            for (char c : absPath)
             {
                 if (c == '\'')
                     safe += "'\\''";
@@ -693,6 +695,14 @@ namespace sh
                     safe += c;
             }
             f << "file '" << safe << "'\n";
+        };
+        if (includeZero)
+            writeAbsEntry("0.mkv");
+        for (auto &p : parts)
+        {
+            if (p.filename() == "0.mkv")
+                continue;
+            writeAbsEntry(p.filename().string());
         }
         return txt;
     }
@@ -935,7 +945,7 @@ namespace sh
 
     void purgeTemp(const fs::path &folder)
     {
-        const char *junk[] = {"concat_list.txt", "concat_list_norm.txt", "0~merge.mp4", "0~merge.mkv", ".stage.mkv", ".merge2.mkv"};
+        const char *junk[] = {"concat_list.txt", "concat_list_norm.txt", ".concat_native_abs.txt", "0~merge.mp4", "0~merge.mkv", ".stage.mkv", ".merge2.mkv"};
         for (auto &f : junk)
         {
             std::error_code ec;
@@ -1945,11 +1955,29 @@ namespace sh
             lastWritten = bw > 0 ? bw : lastWritten;
             if (!gui)
                 return;
-            float pct = (totalDur > 0) ? (float)(sec / totalDur * 100.0) : 0.0f;
+
+            // Dual progress: time-based and bytes-based, use whichever is better
+            float pctTime = (totalDur > 0 && sec > 0) ? (float)(sec / totalDur * 100.0) : 0.0f;
+            float pctBytes = (targetBytes > 0 && lastWritten > 0) ? (float)((double)lastWritten / targetBytes * 100.0) : 0.0f;
+            float pct = std::max(pctTime, pctBytes);
+            pct = std::clamp(pct, 0.0f, 99.9f); // Don't show 100% until commit phase
+
             auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count();
-            double speed = (elapsed > 0) ? sec / elapsed : 0;
-            float eta = (speed > 0) ? (float)((totalDur - sec) / speed) : 0;
-            gui(pct, eta, lastWritten, tgt);
+            float eta = 0;
+            if (pctTime > 1.0f && sec > 0)
+            {
+                // Time-based ETA
+                double speed = (elapsed > 0) ? sec / elapsed : 0;
+                eta = (speed > 0) ? (float)((totalDur - sec) / speed) : 0;
+            }
+            else if (pctBytes > 1.0f && lastWritten > 0)
+            {
+                // Bytes-based ETA fallback
+                double bps = (elapsed > 0) ? lastWritten / elapsed : 0;
+                eta = (bps > 0) ? (float)((targetBytes - lastWritten) / bps) : 0;
+            }
+
+            gui(pct, eta, lastWritten, tgt > 0 ? tgt : targetBytes);
         };
 
         std::vector<fs::path> usedFiles;

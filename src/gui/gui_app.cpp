@@ -926,6 +926,7 @@ namespace sm
             if (mode && mode->width >= 2560)
                 dpiScale_ = std::max(dpiScale_, (float)mode->width / 1920.0f);
         }
+        lastDpiScale_ = dpiScale_;
 
         // Scale font size for the monitor DPI
         float fontSize = 16.0f * dpiScale_;
@@ -1263,6 +1264,74 @@ namespace sm
                     lastDiskRefresh_ = now;
                 }
 
+                // ── Handle DPI / content scale changes (monitor switch, resolution change) ──
+                {
+                    float xscale = 1.0f, yscale = 1.0f;
+                    glfwGetWindowContentScale(window_, &xscale, &yscale);
+                    float currentScale = std::max(xscale, yscale);
+                    if (currentScale < 1.0f)
+                        currentScale = 1.0f;
+                    if (std::abs(currentScale - lastDpiScale_) > 0.01f)
+                    {
+                        lastDpiScale_ = currentScale;
+                        dpiScale_ = currentScale;
+                        needFontRebuild_ = true;
+                    }
+                }
+
+                // ── Rebuild font atlas on DPI change ──
+                if (needFontRebuild_)
+                {
+                    needFontRebuild_ = false;
+                    ImGuiIO &ioRef = ImGui::GetIO();
+                    ImGui_ImplOpenGL3_DestroyFontsTexture();
+                    ioRef.Fonts->Clear();
+                    float newFontSize = 16.0f * dpiScale_;
+                    ImFontConfig fontCfg2;
+                    fontCfg2.SizePixels = newFontSize;
+                    fontCfg2.OversampleH = 2;
+                    fontCfg2.OversampleV = 1;
+                    bool rebuildLoaded = false;
+#ifdef _WIN32
+                    {
+                        static const ImWchar glyphRanges[] = {
+                            0x0020, 0x00FF,
+                            0x2600, 0x26FF,
+                            0x2700, 0x27BF,
+                            0x25A0, 0x25FF,
+                            0,
+                        };
+                        const char *systemFonts[] = {
+                            "C:\\Windows\\Fonts\\segoeui.ttf",
+                            "C:\\Windows\\Fonts\\arial.ttf",
+                            "C:\\Windows\\Fonts\\consola.ttf",
+                        };
+                        for (const char *fontPath : systemFonts)
+                        {
+                            if (std::filesystem::exists(fontPath))
+                            {
+                                fontCfg2.GlyphRanges = glyphRanges;
+                                ImFont *f = ioRef.Fonts->AddFontFromFileTTF(fontPath, newFontSize, &fontCfg2);
+                                if (f) { rebuildLoaded = true; break; }
+                            }
+                        }
+                    }
+#endif
+                    if (!rebuildLoaded)
+                        ioRef.Fonts->AddFontDefault(&fontCfg2);
+                    ioRef.Fonts->Build();
+                    ImGui_ImplOpenGL3_CreateFontsTexture();
+                }
+
+                // ── Skip rendering when framebuffer is 0 (minimized / resolution transition) ──
+                int displayW, displayH;
+                glfwGetFramebufferSize(window_, &displayW, &displayH);
+                if (displayW <= 0 || displayH <= 0)
+                {
+                    glfwWaitEventsTimeout(0.1);
+                    continue;
+                }
+
                 ImGui_ImplOpenGL3_NewFrame();
                 ImGui_ImplGlfw_NewFrame();
                 ImGui::NewFrame();
@@ -1270,8 +1339,6 @@ namespace sm
                 renderFrame();
 
                 ImGui::Render();
-                int displayW, displayH;
-                glfwGetFramebufferSize(window_, &displayW, &displayH);
                 glViewport(0, 0, displayW, displayH);
                 glClearColor(COL_BG_DARK.x, COL_BG_DARK.y, COL_BG_DARK.z, 1.0f);
                 glClear(GL_COLOR_BUFFER_BIT);

@@ -179,6 +179,8 @@ int main(int, char **)
 
     // DPI-aware font loading
     float dpiScale = 1.0f;
+    float lastDpiScale = 1.0f;
+    bool needFontRebuild = false;
     {
         float xscale = 1.0f, yscale = 1.0f;
         GLFWmonitor *monitor = glfwGetPrimaryMonitor();
@@ -194,6 +196,7 @@ int main(int, char **)
             if (mode && mode->width >= 2560)
                 dpiScale = std::max(dpiScale, (float)mode->width / 1920.0f);
         }
+        lastDpiScale = dpiScale;
     }
     float fontSize = 16.0f * dpiScale;
 
@@ -240,6 +243,62 @@ int main(int, char **)
     {
         glfwPollEvents();
 
+        // ── Handle DPI / content scale changes (monitor switch, resolution change) ──
+        {
+            float xscale = 1.0f, yscale = 1.0f;
+            glfwGetWindowContentScale(window, &xscale, &yscale);
+            float currentScale = std::max(xscale, yscale);
+            if (currentScale < 1.0f)
+                currentScale = 1.0f;
+            if (std::abs(currentScale - lastDpiScale) > 0.01f)
+            {
+                lastDpiScale = currentScale;
+                dpiScale = currentScale;
+                needFontRebuild = true;
+            }
+        }
+
+        // ── Rebuild font atlas on DPI change ──
+        if (needFontRebuild)
+        {
+            needFontRebuild = false;
+            ImGui_ImplOpenGL3_DestroyFontsTexture();
+            io.Fonts->Clear();
+            float newFontSize = 16.0f * dpiScale;
+#ifdef _WIN32
+            {
+                char windir[MAX_PATH];
+                GetWindowsDirectoryA(windir, MAX_PATH);
+                std::string fontPath = std::string(windir) + "\\Fonts\\segoeui.ttf";
+                if (std::filesystem::exists(fontPath))
+                    io.Fonts->AddFontFromFileTTF(fontPath.c_str(), newFontSize);
+                else
+                {
+                    ImFontConfig fc;
+                    fc.SizePixels = newFontSize;
+                    io.Fonts->AddFontDefault(&fc);
+                }
+            }
+#else
+            {
+                ImFontConfig fc;
+                fc.SizePixels = newFontSize;
+                io.Fonts->AddFontDefault(&fc);
+            }
+#endif
+            io.Fonts->Build();
+            ImGui_ImplOpenGL3_CreateFontsTexture();
+        }
+
+        // ── Skip rendering when framebuffer is 0 (minimized / resolution transition) ──
+        int displayW, displayH;
+        glfwGetFramebufferSize(window, &displayW, &displayH);
+        if (displayW <= 0 || displayH <= 0)
+        {
+            glfwWaitEventsTimeout(0.1);
+            continue;
+        }
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -247,8 +306,6 @@ int main(int, char **)
         app.render();
 
         ImGui::Render();
-        int displayW, displayH;
-        glfwGetFramebufferSize(window, &displayW, &displayH);
         glViewport(0, 0, displayW, displayH);
         glClearColor(0.06f, 0.06f, 0.08f, 1.00f);
         glClear(GL_COLOR_BUFFER_BIT);
