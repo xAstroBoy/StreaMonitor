@@ -746,11 +746,20 @@ namespace sh
         try
         {
             NativeProgressCb nProg = nullptr;
-            if (prog)
+            bool finalizingShown = false;
+            if (prog || note)
             {
                 nProg = [&](double timeSec, int64_t written, int64_t target)
                 {
-                    prog(timeSec, written, target > 0 ? target : targetBytes);
+                    // timeSec == -1 signals finalization phase (av_write_trailer)
+                    if (timeSec < 0 && !finalizingShown)
+                    {
+                        finalizingShown = true;
+                        if (note)
+                            note("finalizing MKV index...");
+                    }
+                    if (prog && timeSec >= 0)
+                        prog(timeSec, written, target > 0 ? target : targetBytes);
                 };
             }
             NativeCancelCb cancelCb = []()

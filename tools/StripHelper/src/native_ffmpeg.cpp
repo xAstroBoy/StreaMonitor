@@ -461,6 +461,11 @@ namespace sh
         }
 
         av_packet_free(&pkt);
+        
+        // Signal finalizing phase (progress sends -1 to indicate trailer write)
+        if (progress)
+            progress(-1.0, bytesWritten, 0);
+        
         av_write_trailer(ofmt.ctx);
 
         return true;
