@@ -321,5 +321,5 @@ This project is for educational purposes only. Please respect content creators' 
 
 ## Credits
 
-- Original Python implementation: [StreaMonitor](https://github.com/...)
-- Inspired by [Recordurbate](https://github.com/oliverjrose99/Recordurbate)
+- **Original Python implementation**: [lossless1024/StreaMonitor](https://github.com/lossless1024/StreaMonitor) - This C++ rewrite was initially forked from and inspired by lossless1024's excellent Python StreaMonitor project
+- **Inspired by**: [Recordurbate](https://github.com/oliverjrose99/Recordurbate)
