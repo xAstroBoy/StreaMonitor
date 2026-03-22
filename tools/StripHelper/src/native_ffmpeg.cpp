@@ -236,13 +236,19 @@ namespace sh
         while (av_read_frame(ifmt.ctx, pkt) >= 0)
         {
             int srcIdx = pkt->stream_index;
-            if (srcIdx < 0 || srcIdx >= (int)ifmt.ctx->nb_streams || streamMap[srcIdx] < 0)
+            // Use streamMap.size() — nb_streams could theoretically change
+            if (srcIdx < 0 || srcIdx >= (int)streamMap.size() || streamMap[srcIdx] < 0)
             {
                 av_packet_unref(pkt);
                 continue;
             }
 
             int dstIdx = streamMap[srcIdx];
+            if (dstIdx >= (int)ofmt.ctx->nb_streams)
+            {
+                av_packet_unref(pkt);
+                continue;
+            }
 
             // Record first DTS for offset calculation
             if (!dtsOffsetSet[srcIdx] && pkt->dts != AV_NOPTS_VALUE)
@@ -398,13 +404,21 @@ namespace sh
         while (av_read_frame(ifmt.ctx, pkt) >= 0)
         {
             int srcIdx = pkt->stream_index;
-            if (srcIdx < 0 || srcIdx >= (int)ifmt.ctx->nb_streams || streamMap[srcIdx] < 0)
+            // Use streamMap.size() for bounds — the concat demuxer can
+            // dynamically add streams from later segments, growing
+            // nb_streams beyond our original map.  Guard against OOB.
+            if (srcIdx < 0 || srcIdx >= (int)streamMap.size() || streamMap[srcIdx] < 0)
             {
                 av_packet_unref(pkt);
                 continue;
             }
 
             int dstIdx = streamMap[srcIdx];
+            if (dstIdx >= (int)ofmt.ctx->nb_streams)
+            {
+                av_packet_unref(pkt);
+                continue;
+            }
 
             // Rescale timestamps
             AVRational inTb = ifmt.ctx->streams[srcIdx]->time_base;

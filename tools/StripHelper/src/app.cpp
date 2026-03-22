@@ -742,8 +742,8 @@ namespace sh
     void App::renderSettingsShellIntegration()
     {
         ImGui::Spacing();
-        ImGui::TextWrapped("Add a \"Process with StripHelper (Symlinks)\" option to the right-click context menu for folders in Windows Explorer.");
-        ImGui::TextWrapped("Right-clicking a folder will launch StripHelper with --symlinks mode enabled.");
+        ImGui::TextWrapped("Add a \"Process with StripHelper (Symlinks)\" option to the right-click context menu in Windows Explorer.");
+        ImGui::TextWrapped("Works both when right-clicking ON a folder and when right-clicking inside a folder (background).");
         ImGui::Spacing();
 
         bool installed = sh::isShellMenuInstalled();
@@ -785,7 +785,7 @@ namespace sh
             ImGui::Spacing();
             ImGui::SeparatorText("Legacy Cleanup");
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
-                "Old \"MergeAllFilesSymlink\" entry found (from Python installer)");
+                               "Old \"MergeAllFilesSymlink\" entry found (from Python installer)");
             ImGui::Spacing();
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.35f, 0.10f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.65f, 0.45f, 0.15f, 1.0f));
