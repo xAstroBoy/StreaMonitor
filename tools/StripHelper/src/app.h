@@ -110,6 +110,7 @@ namespace sh
         bool started_ = false;
         bool quit_ = false;
         bool autoStart_ = false; // auto-run on first frame
+        bool autoClose_ = false; // auto-close window when processing finishes
         bool showSettings_ = false;
 
         // Configurable thresholds (persisted in settings.json)

@@ -16,9 +16,9 @@ namespace sh
 
     // Registry paths for the shell extension (HKCU — no admin needed)
     // Two entries: one for right-clicking ON a folder, one for inside a folder.
-    static const char *REG_SHELL_KEY     = "Software\\Classes\\Directory\\shell\\StripHelper";
-    static const char *REG_COMMAND_KEY   = "Software\\Classes\\Directory\\shell\\StripHelper\\command";
-    static const char *REG_BG_SHELL_KEY  = "Software\\Classes\\Directory\\Background\\shell\\StripHelper";
+    static const char *REG_SHELL_KEY = "Software\\Classes\\Directory\\shell\\StripHelper";
+    static const char *REG_COMMAND_KEY = "Software\\Classes\\Directory\\shell\\StripHelper\\command";
+    static const char *REG_BG_SHELL_KEY = "Software\\Classes\\Directory\\Background\\shell\\StripHelper";
     static const char *REG_BG_COMMAND_KEY = "Software\\Classes\\Directory\\Background\\shell\\StripHelper\\command";
 
     std::string getExePath()
@@ -59,7 +59,11 @@ namespace sh
     {
         HKEY hKey = nullptr;
         LONG result = RegOpenKeyExA(HKEY_CURRENT_USER, key, 0, KEY_READ, &hKey);
-        if (result == ERROR_SUCCESS) { RegCloseKey(hKey); return true; }
+        if (result == ERROR_SUCCESS)
+        {
+            RegCloseKey(hKey);
+            return true;
+        }
         return false;
     }
 

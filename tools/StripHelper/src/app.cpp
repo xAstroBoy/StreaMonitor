@@ -192,6 +192,8 @@ namespace sh
                 thumbnailColumns_ = j["thumbnailColumns"].get<int>();
             if (j.contains("thumbnailRows"))
                 thumbnailRows_ = j["thumbnailRows"].get<int>();
+            if (j.contains("autoClose"))
+                autoClose_ = j["autoClose"].get<bool>();
 
             // Clamp
             threads_ = std::clamp(threads_, 1, 32);
@@ -225,6 +227,7 @@ namespace sh
             j["thumbnailWidth"] = thumbnailWidth_;
             j["thumbnailColumns"] = thumbnailColumns_;
             j["thumbnailRows"] = thumbnailRows_;
+            j["autoClose"] = autoClose_;
 
             fs::create_directories(SETTINGS_PATH.parent_path());
             std::ofstream f(SETTINGS_PATH);
@@ -503,7 +506,8 @@ namespace sh
         if (!showSettings_)
             return;
 
-        ImGui::SetNextWindowSize(ImVec2(620, 520), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(700, 580), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(550, 400), ImVec2(1200, 900));
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 7));
@@ -595,6 +599,10 @@ namespace sh
         ImGui::Checkbox("Create symlinks by default", &mkLinks_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Create symlinks in the output folder\nfor models found in config.json.");
+
+        ImGui::Checkbox("Auto-close when finished", &autoClose_);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Automatically close the window once\nall folders have been processed.");
 
         ImGui::Spacing();
         ImGui::SeparatorText("File Cleanup");
@@ -1215,6 +1223,11 @@ namespace sh
             if (running_.compare_exchange_strong(expected, false))
             {
                 addLog("=== Processing complete ===");
+                if (autoClose_ && !stopReq_.load())
+                {
+                    addLog("Auto-close enabled — exiting...");
+                    quit_ = true;
+                }
             }
         }
     }
@@ -1337,6 +1350,19 @@ namespace sh
                 {
                     try
                     {
+                        // Clean up orphan .thumb.jpg files from per-segment recording
+                        for (auto &entry : fs::directory_iterator(folder))
+                        {
+                            if (!entry.is_regular_file()) continue;
+                            auto fname = entry.path().filename().string();
+                            if (fname.size() > 10 && fname.find(".thumb.jpg") != std::string::npos)
+                            {
+                                std::error_code ec;
+                                fs::remove(entry.path(), ec);
+                                if (!ec) addLog("[thumb] cleaned orphan: " + fname);
+                            }
+                        }
+
                         sm::ThumbnailConfig tc;
                         tc.width = thumbnailWidth_;
                         tc.columns = thumbnailColumns_;
@@ -1355,10 +1381,15 @@ namespace sh
                         {
                             sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), [this](const std::string &msg)
                                                     { addLog("[thumb] " + msg); }, g_mkvpropedit);
-                        }
 
-                        if (fs::exists(thumbPath))
-                            noteCb("thumbnail saved: " + thumbPath.filename().string());
+                            // Delete .thumb.jpg after successful embed
+                            std::error_code ec;
+                            fs::remove(thumbPath, ec);
+                            if (!ec)
+                                noteCb("thumbnail embedded & cleaned up");
+                            else
+                                noteCb("thumbnail embedded (cleanup failed: " + ec.message() + ")");
+                        }
                     }
                     catch (const std::exception &e)
                     {
@@ -1366,6 +1397,33 @@ namespace sh
                     }
                 }
             }
+
+            // Clean up empty subfolders (Mobile, etc.)
+            try
+            {
+                // Iterate in reverse depth order so children are removed before parents
+                std::vector<fs::path> emptyDirs;
+                for (auto &entry : fs::recursive_directory_iterator(folder, fs::directory_options::skip_permission_denied))
+                {
+                    if (entry.is_directory())
+                        emptyDirs.push_back(entry.path());
+                }
+                // Sort deepest first
+                std::sort(emptyDirs.begin(), emptyDirs.end(),
+                    [](const fs::path &a, const fs::path &b) {
+                        return a.string().size() > b.string().size();
+                    });
+                for (auto &d : emptyDirs)
+                {
+                    if (fs::is_empty(d))
+                    {
+                        std::error_code ec;
+                        fs::remove(d, ec);
+                        if (!ec) addLog("[" + std::to_string(idx) + "] removed empty dir: " + d.filename().string());
+                    }
+                }
+            }
+            catch (...) {}
 
             {
                 std::lock_guard lk(mtx_);

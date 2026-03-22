@@ -42,6 +42,17 @@ jobs:
         with:
           vcpkgGitCommitId: 'e0edebd1dc2d03cf7d02349df91de74ef4d0c00e'  # 2026.02.27
 
+      # Explicit cache for vcpkg installed packages (FFmpeg MSYS2 builds bypass x-gha)
+      - name: Cache vcpkg installed packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/build/vcpkg_installed
+          key: vcpkg-win-x64-static-md-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            vcpkg-win-x64-static-md-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-win-x64-static-md-
+
       - name: Configure
         run: |
           cmake -S . -B build `

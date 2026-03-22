@@ -1320,14 +1320,14 @@ namespace tt
             if (ImGui::BeginTable("##InProgressTable", 8, tFlags, ImGui::GetContentRegionAvail()))
             {
                 // Dynamic layout: fixed columns for compact data, stretch columns for text
-                ImGui::TableSetupColumn("##",      ImGuiTableColumnFlags_WidthFixed, 30.0f);
-                ImGui::TableSetupColumn("Action",  ImGuiTableColumnFlags_WidthFixed, 90.0f);
-                ImGui::TableSetupColumn("Detail",  ImGuiTableColumnFlags_WidthStretch, 2.0f);
-                ImGui::TableSetupColumn("Size",    ImGuiTableColumnFlags_WidthFixed, 80.0f);
-                ImGui::TableSetupColumn("Speed",   ImGuiTableColumnFlags_WidthFixed, 110.0f);
-                ImGui::TableSetupColumn("ETA",     ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("##", ImGuiTableColumnFlags_WidthFixed, 30.0f);
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+                ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("Speed", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+                ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 80.0f);
                 ImGui::TableSetupColumn("Elapsed", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-                ImGui::TableSetupColumn("File",    ImGuiTableColumnFlags_WidthStretch, 3.0f);
+                ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_WidthStretch, 3.0f);
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableHeadersRow();
 
@@ -1468,9 +1468,12 @@ namespace tt
                     {
                         // Show relative path from root dir (same as Done/All tabs)
                         std::string display;
-                        try {
+                        try
+                        {
                             display = fs::relative(fs::path(filePath), fs::path(rootDir_)).string();
-                        } catch (...) {
+                        }
+                        catch (...)
+                        {
                             display = fs::path(filePath).filename().string();
                         }
                         ImGui::TextUnformatted(display.c_str());

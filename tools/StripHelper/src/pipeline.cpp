@@ -1729,8 +1729,9 @@ namespace sh
                 else
                 {
                     if (note)
-                        note("drop unreadable " + f.filename().string() + " (" + humanBytes(fSize) + ")");
-                    // Don't delete — just exclude from processing
+                        note("delete unreadable " + f.filename().string() + " (" + humanBytes(fSize) + ")");
+                    std::error_code ec;
+                    fs::remove(f, ec);
                 }
             }
         }

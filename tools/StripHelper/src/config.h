@@ -183,8 +183,15 @@ namespace sh
 
     inline std::string humanSecs(double s)
     {
+        if (s < 0) s = 0;
+        int total = static_cast<int>(s);
+        int h = total / 3600;
+        int m = (total % 3600) / 60;
+        int sec = total % 60;
         std::ostringstream os;
-        os << std::fixed << std::setprecision(3) << s << "s";
+        os << std::setfill('0') << std::setw(2) << h << ":"
+           << std::setfill('0') << std::setw(2) << m << ":"
+           << std::setfill('0') << std::setw(2) << sec;
         return os.str();
     }
 
