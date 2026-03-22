@@ -291,6 +291,10 @@ namespace sh
                 continue;
             }
 
+            // Flush to disk periodically (every ~10MB) so file size updates visibly
+            if ((bytesWritten % (10 * 1024 * 1024)) < pktSize)
+                avio_flush(ofmt.ctx->pb);
+
             // Progress callback (using captured values — pkt is now unreffed)
             if (progress && pktDts != AV_NOPTS_VALUE)
             {
@@ -298,6 +302,9 @@ namespace sh
                 progress(timeSec, bytesWritten, totalSize);
             }
         }
+
+        // Final flush before trailer
+        avio_flush(ofmt.ctx->pb);
 
         av_packet_free(&pkt);
 
@@ -461,6 +468,10 @@ namespace sh
             // Don't check return — some packets may fail in concat
             // pkt is now unreffed — do NOT access its fields!
 
+            // Flush to disk periodically (every ~10MB) so file size updates visibly
+            if ((bytesWritten % (10 * 1024 * 1024)) < pktSize)
+                avio_flush(ofmt.ctx->pb);
+
             if (progress && pktDts != AV_NOPTS_VALUE)
             {
                 double timeSec = pktDts * av_q2d(outTb);
@@ -468,12 +479,15 @@ namespace sh
             }
         }
 
+        // Final flush before trailer
+        avio_flush(ofmt.ctx->pb);
+
         av_packet_free(&pkt);
-        
+
         // Signal finalizing phase (progress sends -1 to indicate trailer write)
         if (progress)
             progress(-1.0, bytesWritten, 0);
-        
+
         av_write_trailer(ofmt.ctx);
 
         return true;

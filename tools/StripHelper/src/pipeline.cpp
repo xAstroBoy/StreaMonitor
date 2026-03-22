@@ -66,11 +66,11 @@ namespace sh
     DurationInfo bestDurationWithFallback(const fs::path &fp, const fs::path &cwd, double refTotal)
     {
         DurationInfo d;
-        
+
         // First try native probe (fast, uses libavformat directly)
         auto fullPath = (cwd / fp.filename());
         d.probed = nativeProbeDuration(fullPath);
-        
+
         // Only fallback to subprocess if native probe failed
         if (d.probed <= 0.0)
             d.probed = ffprobeBestDuration(fp, cwd);
@@ -79,11 +79,11 @@ namespace sh
         auto ext = fp.extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
         bool isMkv = (ext == ".mkv");
-        
+
         // Only do expensive fallbacks for truly broken files (duration missing or way too short)
         // For merged MKV files, container duration should be accurate
         bool needPkt = !isMkv && ((d.probed <= 0.0) ||
-                       (refTotal > 0 && d.probed < refTotal * 0.20));
+                                  (refTotal > 0 && d.probed < refTotal * 0.20));
         d.pkt = needPkt ? ffprobeLastPacketPts(fp, cwd) : 0.0;
         d.best = std::max(d.probed, d.pkt);
 
@@ -2071,21 +2071,27 @@ namespace sh
         auto tmp = folder / "0~merge.mkv";
         if (note)
             note("validating merged output...");
-        
+
         // Quick size-based validation - skip expensive duration probing
         int64_t outSize = 0;
-        try { outSize = (int64_t)fs::file_size(tmp); } catch (...) {}
-        
+        try
+        {
+            outSize = (int64_t)fs::file_size(tmp);
+        }
+        catch (...)
+        {
+        }
+
         // If output file exists and has reasonable size (>80% of expected), accept it
         bool quickValid = (outSize > 0) && (targetBytes <= 0 || outSize >= targetBytes * 0.80);
-        
+
         if (!quickValid && fs::exists(tmp))
         {
             // Only do full validation if quick check failed
             auto vr = validateMerge(folder, tmp, targetBytes, totalDur, true);
             quickValid = vr.ok;
         }
-        
+
         if (!quickValid && fs::exists(tmp))
         {
             // Last resort: accept if file exists and is non-trivial
