@@ -74,13 +74,15 @@ namespace sm
     // Embed a JPEG thumbnail as cover art + inject VR spatial metadata.
     // Handles all video formats: remuxes to MKV first, embeds cover via mkvpropedit,
     // then injects VR180 SBS metadata for VR content (auto-detected from folder path).
-    // Skips cover embed if already has cover art. VR metadata is always injected for VR paths.
+    // Skips cover embed if already has cover art (unless forceRegenerate=true).
+    // VR metadata is always injected for VR paths.
     // Returns true on success; on failure the .jpg file is kept alongside.
     bool embedThumbnailInMKV(
         const std::string &videoPath,
         const std::string &jpegPath,
         std::function<void(const std::string &)> logCb = nullptr,
-        const std::string &mkvpropeditPath = "");
+        const std::string &mkvpropeditPath = "",
+        bool forceRegenerate = false);
 
     // Fix existing cover art attachment to have proper description for DLNA compatibility.
     // Uses mkvpropedit to update attachment metadata (name + description).

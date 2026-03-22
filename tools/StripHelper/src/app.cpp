@@ -1398,7 +1398,7 @@ namespace sh
                         // Embed thumbnail as cover art inside the MKV
                         if (fs::exists(thumbPath))
                         {
-                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), logCb, g_mkvpropedit);
+                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), logCb, g_mkvpropedit, false);
 
                             // Delete .thumb.jpg after successful embed
                             std::error_code ec;

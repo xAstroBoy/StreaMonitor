@@ -1711,7 +1711,8 @@ namespace sm
         const std::string &videoPath,
         const std::string &jpegPath,
         std::function<void(const std::string &)> logCb,
-        const std::string &mkvpropeditPath)
+        const std::string &mkvpropeditPath,
+        bool forceRegenerate)
     {
         namespace fs = std::filesystem;
         auto log = [&](const std::string &msg)
@@ -1737,19 +1738,25 @@ namespace sm
 
         bool ok = true;
 
-        // Step 3: Embed cover art (if jpg exists and no cover yet)
+        // Step 3: Embed cover art (if jpg exists and no cover yet, or force regenerate)
         // Use standard Matroska cover art naming for DLNA/Skybox/Plex compatibility:
         // - attachment-name: cover.jpg (required)
         // - attachment-description: cover (helps some players)
         // - mime-type: image/jpeg
         if (fs::exists(jpegPath))
         {
-            if (hasCoverArt(mkvPath))
+            bool hasExistingCover = hasCoverArt(mkvPath);
+            if (hasExistingCover && !forceRegenerate)
             {
                 log("thumbnail: already has cover art, skipping embed");
             }
             else
             {
+                if (hasExistingCover && forceRegenerate)
+                {
+                    log("thumbnail: replacing existing cover art (force regenerate)");
+                }
+                
                 // Use --attachment-description "cover" for better DLNA compatibility
                 std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
                                                                            " --attachment-name cover.jpg"

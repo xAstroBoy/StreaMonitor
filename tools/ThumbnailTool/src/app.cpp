@@ -717,7 +717,7 @@ namespace tt
                 {
                     setProgress(videoStr, "Embedding", "Replacing cover art...");
                     addLog("[INFO] Replacing cover art: " + videoStr);
-                    if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb))
+                    if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb, "", true))
                     {
                         embeddedCount_.fetch_add(1);
                         wasEmbedded = true;
@@ -727,7 +727,7 @@ namespace tt
                 {
                     setProgress(videoStr, "Embedding", "Adding cover to MKV...");
                     addLog("[INFO] Embedding cover art: " + videoStr);
-                    if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb))
+                    if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb, "", false))
                     {
                         embeddedCount_.fetch_add(1);
                         wasEmbedded = true;
