@@ -206,10 +206,8 @@ namespace sh
         // Write header with MKV-friendly options
         // avoid_negative_ts: let the muxer handle truly negative timestamps
         // (preserves HEVC B-frame CTO instead of manual clamping)
-        // Use flush_packets=1 to write immediately (faster finalization)
         AVDictionary *outOpts = nullptr;
         av_dict_set(&outOpts, "max_interleave_delta", "0", 0);
-        av_dict_set(&outOpts, "flush_packets", "1", 0);
         ofmt.ctx->avoid_negative_ts = AVFMT_AVOID_NEG_TS_MAKE_ZERO;
         if (avformat_write_header(ofmt.ctx, &outOpts) < 0)
         {
@@ -222,7 +220,8 @@ namespace sh
         std::unordered_map<int, int64_t> dtsOffset;
         std::unordered_map<int, bool> dtsOffsetSet;
 
-        // Copy packets
+        // Copy packets — use av_write_frame for direct disk writes (no RAM buffer).
+        // av_write_frame does NOT take ownership of pkt, so we unref it ourselves.
         AVPacket *pkt = av_packet_alloc();
         int64_t bytesWritten = 0;
         int64_t totalSize = 0;
@@ -237,7 +236,6 @@ namespace sh
         while (av_read_frame(ifmt.ctx, pkt) >= 0)
         {
             int srcIdx = pkt->stream_index;
-            // Use streamMap.size() — nb_streams could theoretically change
             if (srcIdx < 0 || srcIdx >= (int)streamMap.size() || streamMap[srcIdx] < 0)
             {
                 av_packet_unref(pkt);
@@ -259,11 +257,6 @@ namespace sh
             }
 
             // Normalize timestamps: subtract initial offset so stream starts near 0.
-            // NOTE: Do NOT clamp DTS <= PTS or force non-negative here!
-            // HEVC B-frames legitimately have DTS > PTS (negative composition
-            // time offset). The muxer's avoid_negative_ts = MAKE_ZERO handles
-            // any truly negative timestamps at write time. Manually forcing
-            // DTS = PTS would destroy B-frame display order and corrupt seeking.
             if (dtsOffsetSet[srcIdx])
             {
                 if (pkt->dts != AV_NOPTS_VALUE)
@@ -278,24 +271,18 @@ namespace sh
             pkt->stream_index = dstIdx;
             av_packet_rescale_ts(pkt, inTb, outTb);
 
-            // Capture packet fields BEFORE write_frame — it unrefs the packet!
+            // Grab fields before write
             int64_t pktDts = pkt->dts;
             int pktSize = pkt->size;
 
+            // Direct write — data goes to muxer immediately, no interleave buffer
+            int ret = av_write_frame(ofmt.ctx, pkt);
+            av_packet_unref(pkt); // av_write_frame does NOT unref
+            if (ret < 0)
+                continue;
+
             bytesWritten += pktSize;
 
-            if (av_interleaved_write_frame(ofmt.ctx, pkt) < 0)
-            {
-                // pkt is already unreffed by write_frame on error too
-                // Non-fatal: skip problematic packets
-                continue;
-            }
-
-            // Flush to disk periodically (every ~10MB) so file size updates visibly
-            if ((bytesWritten % (10 * 1024 * 1024)) < pktSize)
-                avio_flush(ofmt.ctx->pb);
-
-            // Progress callback (using captured values — pkt is now unreffed)
             if (progress && pktDts != AV_NOPTS_VALUE)
             {
                 double timeSec = pktDts * av_q2d(outTb);
@@ -303,12 +290,9 @@ namespace sh
             }
         }
 
-        // Final flush before trailer
-        avio_flush(ofmt.ctx->pb);
-
         av_packet_free(&pkt);
 
-        // Signal finalization stage (-1 = writing MKV index)
+        // Signal finalization stage
         if (progress)
             progress(-1.0, bytesWritten, totalSize);
 
@@ -390,10 +374,8 @@ namespace sh
         }
 
         // Write header with timestamp normalization
-        // Use flush_packets=1 to write immediately (faster finalization)
         AVDictionary *outOpts = nullptr;
         av_dict_set(&outOpts, "max_interleave_delta", "0", 0);
-        av_dict_set(&outOpts, "flush_packets", "1", 0);
         ofmt.ctx->avoid_negative_ts = AVFMT_AVOID_NEG_TS_MAKE_ZERO;
         if (avformat_write_header(ofmt.ctx, &outOpts) < 0)
         {
@@ -406,14 +388,14 @@ namespace sh
         // at concat segment boundaries
         std::unordered_map<int, int64_t> lastDts;
 
-        // Copy packets
+        // Copy packets — use av_write_frame for direct disk writes (no RAM buffer).
         AVPacket *pkt = av_packet_alloc();
         int64_t bytesWritten = 0;
         int pktCount = 0;
 
         while (av_read_frame(ifmt.ctx, pkt) >= 0)
         {
-            // Check for cancellation every ~100 packets to avoid excessive overhead
+            // Check for cancellation every ~100 packets
             if (cancelCb && (++pktCount % 100) == 0 && cancelCb())
             {
                 av_packet_free(&pkt);
@@ -421,9 +403,6 @@ namespace sh
             }
 
             int srcIdx = pkt->stream_index;
-            // Use streamMap.size() for bounds — the concat demuxer can
-            // dynamically add streams from later segments, growing
-            // nb_streams beyond our original map.  Guard against OOB.
             if (srcIdx < 0 || srcIdx >= (int)streamMap.size() || streamMap[srcIdx] < 0)
             {
                 av_packet_unref(pkt);
@@ -443,34 +422,27 @@ namespace sh
             pkt->stream_index = dstIdx;
             av_packet_rescale_ts(pkt, inTb, outTb);
 
-            // Enforce DTS monotonicity across concat segment boundaries.
-            // The concat demuxer normally handles this, but edge cases
-            // (truncated segments, timestamp wraps) can produce non-monotonic
-            // DTS which corrupts the output container's index.
+            // Enforce DTS monotonicity across concat segment boundaries
             if (pkt->dts != AV_NOPTS_VALUE)
             {
                 auto it = lastDts.find(dstIdx);
                 if (it != lastDts.end() && pkt->dts <= it->second)
                 {
                     av_packet_unref(pkt);
-                    continue; // Drop non-monotonic packet
+                    continue;
                 }
                 lastDts[dstIdx] = pkt->dts;
             }
 
-            // Capture packet fields BEFORE write_frame — it unrefs the packet!
+            // Grab fields before write
             int64_t pktDts = pkt->dts;
             int pktSize = pkt->size;
 
+            // Direct write — data goes to muxer immediately, no interleave buffer
+            av_write_frame(ofmt.ctx, pkt);
+            av_packet_unref(pkt); // av_write_frame does NOT unref
+
             bytesWritten += pktSize;
-
-            av_interleaved_write_frame(ofmt.ctx, pkt);
-            // Don't check return — some packets may fail in concat
-            // pkt is now unreffed — do NOT access its fields!
-
-            // Flush to disk periodically (every ~10MB) so file size updates visibly
-            if ((bytesWritten % (10 * 1024 * 1024)) < pktSize)
-                avio_flush(ofmt.ctx->pb);
 
             if (progress && pktDts != AV_NOPTS_VALUE)
             {
@@ -479,12 +451,9 @@ namespace sh
             }
         }
 
-        // Final flush before trailer
-        avio_flush(ofmt.ctx->pb);
-
         av_packet_free(&pkt);
 
-        // Signal finalizing phase (progress sends -1 to indicate trailer write)
+        // Signal finalization stage
         if (progress)
             progress(-1.0, bytesWritten, 0);
 
