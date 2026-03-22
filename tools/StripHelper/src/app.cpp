@@ -1287,18 +1287,33 @@ namespace sh
             workers_.emplace_back(&App::workerMain, this);
     }
 
+    App::~App()
+    {
+        // Ensure all workers are stopped and joined before members are destroyed
+        stopReq_ = true;
+        requestGlobalStop();
+        for (auto &w : workers_)
+        {
+            if (w.joinable())
+                w.join();
+        }
+        workers_.clear();
+    }
+
     void App::stopProcessing()
     {
         stopReq_ = true;
         requestGlobalStop(); // kill all active FFmpeg/FFprobe processes NOW
         addLog("Stop requested — killing active processes...");
-        // Detach workers — they'll throw StopRequested and exit quickly now
+        // Join workers — they exit quickly because stopReq_ is set
+        // and requestGlobalStop() kills all active FFmpeg/FFprobe processes.
         for (auto &w : workers_)
         {
             if (w.joinable())
-                w.detach();
+                w.join();
         }
         workers_.clear();
+        running_ = false;
     }
 
     void App::workerMain()
@@ -1311,19 +1326,25 @@ namespace sh
             processOne(idx);
         }
 
-        // Check if we're the last worker
-        int done = doneCount_.load() + errCount_.load();
-        int total = totalCount_.load();
-        if (done >= total || stopReq_.load())
+        // Check if all items are finished (done + error covers every claimed index)
+        // Use nextIdx_ to know how many items were claimed — items still pending
+        // after stop don't increment done/error, but nextIdx_ tracks them.
+        int claimed = std::min(nextIdx_.load(), totalCount_.load());
+        int finished = doneCount_.load() + errCount_.load();
+        bool allDone = (finished >= claimed) || stopReq_.load();
+        if (allDone)
         {
             bool expected = true;
             if (running_.compare_exchange_strong(expected, false))
             {
-                addLog("=== Processing complete ===");
-                if (autoClose_ && !stopReq_.load())
+                if (!stopReq_.load())
                 {
-                    addLog("Auto-close enabled — exiting...");
-                    quit_ = true;
+                    addLog("=== Processing complete ===");
+                    if (autoClose_)
+                    {
+                        addLog("Auto-close enabled — exiting...");
+                        quit_ = true;
+                    }
                 }
             }
         }

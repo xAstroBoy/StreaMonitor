@@ -110,6 +110,13 @@ static void CleanupDeviceD3D()
     }
 }
 
+static constexpr UINT_PTR TIMER_RENDER_DURING_DRAG = 1;
+static bool g_inModalLoop = false; // true while window is being dragged/resized
+
+// Forward declaration — render one ImGui frame (called from main loop AND WM_TIMER)
+static void RenderOneFrame(sh::App &app);
+static sh::App *g_appPtr = nullptr; // set once in main, used by WndProc timer callback
+
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
@@ -127,6 +134,30 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if ((wParam & 0xfff0) == SC_KEYMENU)
             return 0; // disable Alt menu
         break;
+    case WM_ENTERSIZEMOVE:
+        // Windows enters a modal loop for drag/resize — our main loop stops.
+        // Start a timer so we keep rendering inside the modal loop.
+        g_inModalLoop = true;
+        SetTimer(hWnd, TIMER_RENDER_DURING_DRAG, 16, nullptr); // ~60 fps
+        return 0;
+    case WM_EXITSIZEMOVE:
+        g_inModalLoop = false;
+        KillTimer(hWnd, TIMER_RENDER_DURING_DRAG);
+        return 0;
+    case WM_TIMER:
+        if (wParam == TIMER_RENDER_DURING_DRAG && g_appPtr)
+        {
+            // Pump a frame from inside the modal loop so the GUI stays alive
+            if (g_resizeW != 0 && g_resizeH != 0)
+            {
+                CleanupRenderTarget();
+                g_pSwapChain->ResizeBuffers(0, g_resizeW, g_resizeH, DXGI_FORMAT_UNKNOWN, 0);
+                g_resizeW = g_resizeH = 0;
+                CreateRenderTarget();
+            }
+            RenderOneFrame(*g_appPtr);
+        }
+        return 0;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -585,6 +616,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
     // Push final settings (from JSON + CLI overrides) → config.h globals
     app.syncSettingsToGlobals();
 
+    // Set global app pointer for WM_TIMER rendering during drag/resize
+    g_appPtr = &app;
+
     // Main loop
     const float clearColor[4] = {0.06f, 0.06f, 0.08f, 1.00f};
     bool running = true;
@@ -600,6 +634,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
         // Processing (workers active):  poll at ~30 fps so the table/progress
         //                                updates at a reasonable rate.
         //                     → CPU usage ≈ 1-2 % from the UI thread alone
+        //
+        // Modal loop (drag/resize): WM_TIMER fires at ~60fps — handled
+        // in WndProc → RenderOneFrame(). We still need to enter the
+        // message pump so DispatchMessageW delivers those timers.
+        if (g_inModalLoop)
+        {
+            // Inside modal drag/resize — just pump messages (timer does rendering)
+            MSG msg;
+            GetMessageW(&msg, nullptr, 0, 0); // block until a message arrives
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            if (msg.message == WM_QUIT)
+                running = false;
+            continue;
+        }
+
         if (!app.isProcessing())
         {
             // Sleep until any user-input message arrives, or 500ms timeout
@@ -638,24 +688,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
             CreateRenderTarget();
         }
 
-        // ImGui frame
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-
-        app.render();
-
-        ImGui::Render();
-        g_pd3dCtx->OMSetRenderTargets(1, &g_pRTV, nullptr);
-        g_pd3dCtx->ClearRenderTargetView(g_pRTV, clearColor);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-        HRESULT hr = g_pSwapChain->Present(1, 0); // VSync on
-        g_swapOccluded = (hr == DXGI_STATUS_OCCLUDED);
+        RenderOneFrame(app);
 
         if (app.wantQuit())
             break;
     }
+
+    g_appPtr = nullptr;
 
     // Cleanup
     ImGui_ImplDX11_Shutdown();
@@ -667,4 +706,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
     UnregisterClassW(wc.lpszClassName, hInstance);
 
     return 0;
+}
+
+// ── Render a single ImGui frame (shared by main loop and WM_TIMER) ──────────
+
+static void RenderOneFrame(sh::App &app)
+{
+    static const float clearColor[4] = {0.06f, 0.06f, 0.08f, 1.00f};
+
+    // Handle swap chain occlusion (minimized)
+    if (g_swapOccluded && g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)
+        return;
+    g_swapOccluded = false;
+
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    app.render();
+
+    ImGui::Render();
+    g_pd3dCtx->OMSetRenderTargets(1, &g_pRTV, nullptr);
+    g_pd3dCtx->ClearRenderTargetView(g_pRTV, clearColor);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    HRESULT hr = g_pSwapChain->Present(1, 0); // VSync on
+    g_swapOccluded = (hr == DXGI_STATUS_OCCLUDED);
 }

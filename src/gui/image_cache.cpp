@@ -23,6 +23,22 @@ namespace sm
 
     ImageCache::~ImageCache()
     {
+        // Signal all detached download threads to stop touching our members.
+        shuttingDown_.store(true);
+
+        // Wait for in-flight download threads to finish (they check shuttingDown_
+        // and bail before locking any mutex). WinHTTP has a built-in timeout so
+        // this won't block forever — typically < 10 seconds worst case.
+        int waitMs = 0;
+        while (activeDownloads_.load() > 0 && waitMs < 10000)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            waitMs += 10;
+        }
+        if (activeDownloads_.load() > 0)
+            spdlog::warn("[ImageCache] {} downloads still in-flight at destruction",
+                         activeDownloads_.load());
+
         // clear() queues textures for deletion; process them now.
         // Destructor runs on the main (GL) thread during app teardown.
         clear();
@@ -108,13 +124,16 @@ namespace sm
                             try {
                                 downloadAndDecode(url);
                             } catch (const std::exception& e) {
-                                spdlog::error("[ImageCache] download exception: {}", e.what());
-                                std::lock_guard lock(mutex_);
-                                auto it = cache_.find(url);
-                                if (it != cache_.end())
-                                    it->second.state = State::Failed;
+                                if (!shuttingDown_.load()) {
+                                    spdlog::error("[ImageCache] download exception: {}", e.what());
+                                    std::lock_guard lock(mutex_);
+                                    auto it = cache_.find(url);
+                                    if (it != cache_.end())
+                                        it->second.state = State::Failed;
+                                }
                             } catch (...) {
-                                spdlog::error("[ImageCache] unknown download exception");
+                                if (!shuttingDown_.load())
+                                    spdlog::error("[ImageCache] unknown download exception");
                             }
                             activeDownloads_.fetch_sub(1); })
                 .detach();
@@ -383,6 +402,8 @@ namespace sm
 
             if (data.empty())
             {
+                if (shuttingDown_.load())
+                    return;
                 std::lock_guard lock(mutex_);
                 auto it = cache_.find(url);
                 if (it != cache_.end())
@@ -402,6 +423,8 @@ namespace sm
             {
                 if (pixels)
                     stbi_image_free(pixels);
+                if (shuttingDown_.load())
+                    return;
                 std::lock_guard lock(mutex_);
                 auto it = cache_.find(url);
                 if (it != cache_.end())
@@ -419,6 +442,10 @@ namespace sm
             upload.height = h;
             upload.pixels.assign(pixels, pixels + (w * h * 4));
             stbi_image_free(pixels);
+
+            // Bail if the cache is being destroyed — don't touch any mutexes
+            if (shuttingDown_.load())
+                return;
 
             {
                 std::lock_guard lock(uploadMutex_);

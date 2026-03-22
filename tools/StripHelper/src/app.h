@@ -47,6 +47,7 @@ namespace sh
     {
     public:
         App();
+        ~App();
         void render(); // called each ImGui frame
         bool wantQuit() const { return quit_; }
         bool isProcessing() const { return running_.load(); }

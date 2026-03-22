@@ -23,6 +23,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
+#include <thread>
+#include <algorithm>
+#include <spdlog/spdlog.h>
 
 struct GLFWwindow;
 
@@ -327,6 +330,59 @@ namespace sm
         double lastInputTime_ = 0.0;            // glfwGetTime() of last user input
         std::atomic<bool> guiDirty_{true};      // set by bot threads to wake GUI
         std::atomic<bool> shuttingDown_{false}; // set when close requested, prevents glfwPostEmptyEvent after teardown
+
+        // Tracked background tasks — safeDetach spawns these, drainBackgroundTasks() joins them
+        std::mutex bgTaskMutex_;
+        std::vector<std::thread> bgTasks_;
+        void drainBackgroundTasks();
+
+        // ── Tracked background task launcher ────────────────────────
+        // Replaces fire-and-forget std::thread::detach() with tracked
+        // threads that are joined during shutdown. Prevents UAF crashes
+        // from detached threads outliving GuiApp members.
+        template <typename Fn>
+        void safeDetach(Fn &&fn, const char *ctx = "background")
+        {
+            auto task = [f = std::forward<Fn>(fn), ctx, this]() {
+                if (shuttingDown_.load())
+                    return;
+                try
+                {
+                    f();
+                }
+                catch (const std::exception &e)
+                {
+                    spdlog::error("[{}] thread exception: {}", ctx, e.what());
+                }
+                catch (...)
+                {
+                    spdlog::error("[{}] unknown thread exception", ctx);
+                }
+            };
+            std::lock_guard lk(bgTaskMutex_);
+            // Reap finished threads before adding a new one
+            bgTasks_.erase(
+                std::remove_if(bgTasks_.begin(), bgTasks_.end(),
+                               [](std::thread &t)
+                               {
+                                   if (t.joinable())
+                                   {
+#ifdef _WIN32
+                                       DWORD ret = WaitForSingleObject(t.native_handle(), 0);
+                                       if (ret == WAIT_OBJECT_0)
+                                       {
+                                           t.join();
+                                           return true;
+                                       }
+#endif
+                                       return false;
+                                   }
+                                   return true;
+                               }),
+                bgTasks_.end());
+            bgTasks_.emplace_back(std::move(task));
+        }
+
         static void glfwCursorPosCallback(GLFWwindow *w, double, double);
         static void glfwMouseButtonCallback(GLFWwindow *w, int, int, int);
         static void glfwScrollCallback(GLFWwindow *w, double, double);

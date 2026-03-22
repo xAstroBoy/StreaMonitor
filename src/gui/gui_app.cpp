@@ -73,29 +73,15 @@ static LRESULT CALLBACK minimizeSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPA
 namespace sm
 {
 
-    // ─────────────────────────────────────────────────────────────────
-    // Safe detached thread helper — wraps lambda in try/catch to
-    // prevent std::terminate() from unhandled exceptions on
-    // background threads (the #1 cause of silent crashes).
-    // ─────────────────────────────────────────────────────────────────
-    template <typename Fn>
-    static void safeDetach(Fn &&fn, const char *ctx = "background")
+    void GuiApp::drainBackgroundTasks()
     {
-        std::thread([f = std::forward<Fn>(fn), ctx]()
-                    {
-            try
-            {
-                f();
-            }
-            catch (const std::exception &e)
-            {
-                spdlog::error("[{}] thread exception: {}", ctx, e.what());
-            }
-            catch (...)
-            {
-                spdlog::error("[{}] unknown thread exception", ctx);
-            } })
-            .detach();
+        std::lock_guard lk(bgTaskMutex_);
+        for (auto &t : bgTasks_)
+        {
+            if (t.joinable())
+                t.join();
+        }
+        bgTasks_.clear();
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -1413,6 +1399,10 @@ namespace sm
         // ── Orderly shutdown — prevent callbacks touching GLFW ──
         shuttingDown_.store(true);
         manager_.setEventCallback(nullptr);
+
+        // Wait for all background tasks (move/resync/start/stop/etc.)
+        // to finish before destroying GuiApp members they reference.
+        drainBackgroundTasks();
 
 #ifdef _WIN32
         tray_.shutdown();

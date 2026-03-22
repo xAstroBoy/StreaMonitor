@@ -97,6 +97,10 @@ namespace sm
 
         // Concurrency limiter for download threads
         std::atomic<int> activeDownloads_{0};
+
+        // Shutdown flag — set before destruction to prevent detached threads
+        // from accessing destroyed mutexes / members after ImageCache dies.
+        std::atomic<bool> shuttingDown_{false};
     };
 
 } // namespace sm
