@@ -7,12 +7,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      create_release:
-        description: 'Create a release with latest commits'
-        required: false
-        default: false
-        type: boolean
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -70,7 +64,7 @@ jobs:
           path: dist/
 
       - name: Upload Windows release archive
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: StreaMonitor-Windows-x64-release
@@ -120,17 +114,17 @@ jobs:
           path: dist/
 
       - name: Upload Linux release archive
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: StreaMonitor-Linux-x64-release
           path: 'StreaMonitor-Linux*.tar.gz'
 
   # ═══════════════════════════════════════════
-  # Create GitHub Release on tag push or manual trigger
+  # Create GitHub Release — every push to main, tag, or manual trigger
   # ═══════════════════════════════════════════
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+    if: github.event_name != 'pull_request'
     needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
 
@@ -142,7 +136,7 @@ jobs:
       - name: Get version from CMakeLists.txt
         id: version
         run: |
-          VERSION=$(grep -oP 'SM_VERSION "\K[^"]+' CMakeLists.txt)
+          VERSION=$(grep -oP 'project\(StreaMonitor\s+VERSION\s+\K[0-9.]+' CMakeLists.txt)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
@@ -158,10 +152,10 @@ jobs:
           name: StreaMonitor-Linux-x64-release
           path: release/
 
-      - name: Create Release
+      - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.version.outputs.version) }}
+          tag_name: v${{ steps.version.outputs.version }}
           name: "StreaMonitor v${{ steps.version.outputs.version }}"
           generate_release_notes: true
           files: release/*
