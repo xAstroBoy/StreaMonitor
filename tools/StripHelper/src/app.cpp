@@ -194,6 +194,12 @@ namespace sh
                 thumbnailRows_ = j["thumbnailRows"].get<int>();
             if (j.contains("autoClose"))
                 autoClose_ = j["autoClose"].get<bool>();
+            if (j.contains("useCuda"))
+                useCuda_ = j["useCuda"].get<bool>();
+
+            // Apply encoder mode to global
+            g_encoderMode.store(useCuda_ ? EncoderMode::CUDA : EncoderMode::CPU,
+                                std::memory_order_relaxed);
 
             // Clamp
             threads_ = std::clamp(threads_, 1, 32);
@@ -228,6 +234,7 @@ namespace sh
             j["thumbnailColumns"] = thumbnailColumns_;
             j["thumbnailRows"] = thumbnailRows_;
             j["autoClose"] = autoClose_;
+            j["useCuda"] = useCuda_;
 
             fs::create_directories(SETTINGS_PATH.parent_path());
             std::ofstream f(SETTINGS_PATH);
@@ -286,18 +293,21 @@ namespace sh
 
         // ── Calculate right-side width dynamically ────────────────────
         const auto &sty = ImGui::GetStyle();
-        float sp     = sty.ItemSpacing.x;                                    // default SameLine gap
-        float fp2    = sty.FramePadding.x * 2.0f;                           // button horizontal padding
-        float cbPad  = ImGui::GetFrameHeight() + sty.ItemInnerSpacing.x;    // checkbox square + inner gap
+        float sp = sty.ItemSpacing.x;                                   // default SameLine gap
+        float fp2 = sty.FramePadding.x * 2.0f;                          // button horizontal padding
+        float cbPad = ImGui::GetFrameHeight() + sty.ItemInnerSpacing.x; // checkbox square + inner gap
 
-        float rightW = sp + (ImGui::CalcTextSize(" Browse ").x + fp2)       // Browse button
-                      + sp + 55.0f                                           // thread input
-                      + sp + ImGui::CalcTextSize("threads").x               // "threads" label
-                      + 16.0f + (cbPad + ImGui::CalcTextSize("Symlinks").x) // Symlinks checkbox
-                      + 12.0f + (cbPad + ImGui::CalcTextSize("PTS fix").x)  // PTS fix checkbox
-                      + 16.0f + 80.0f                                       // Start/Stop button
-                      + 8.0f  + (ImGui::CalcTextSize(" Settings ").x + fp2) // Settings button
-                      + sp;                                                  // trailing pad
+        // Measure the encoder toggle text dynamically
+        const char *encLabel = useCuda_ ? " CUDA " : " CPU ";
+        float rightW = sp + (ImGui::CalcTextSize(" Browse ").x + fp2)        // Browse button
+                       + sp + 55.0f                                          // thread input
+                       + sp + ImGui::CalcTextSize("threads").x               // "threads" label
+                       + 16.0f + (cbPad + ImGui::CalcTextSize("Symlinks").x) // Symlinks checkbox
+                       + 12.0f + (cbPad + ImGui::CalcTextSize("PTS fix").x)  // PTS fix checkbox
+                       + 12.0f + (ImGui::CalcTextSize(encLabel).x + fp2)     // CPU/CUDA toggle
+                       + 16.0f + 80.0f                                       // Start/Stop button
+                       + 8.0f + ImGui::GetFrameHeight()                      // Settings gear button
+                       + sp;                                                 // trailing pad
 
         // ── Path input (stretches to fill) ──────────────────────────
         ImGui::SetNextItemWidth(std::max(200.0f, ImGui::GetContentRegionAvail().x - rightW));
@@ -327,6 +337,30 @@ namespace sh
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Repair broken PTS in .ts files (slower).\nUncheck to skip for faster processing.");
 
+        // ── CPU / CUDA toggle ───────────────────────────────────────
+        ImGui::SameLine(0, 12);
+        if (useCuda_)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.50f, 0.15f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.60f, 0.20f, 1.0f));
+        }
+        else
+        {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.18f, 0.18f, 0.22f, 1.0f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
+        }
+        if (ImGui::Button(useCuda_ ? " CUDA " : " CPU ", ImVec2(0, 0)))
+        {
+            useCuda_ = !useCuda_;
+            g_encoderMode.store(useCuda_ ? EncoderMode::CUDA : EncoderMode::CPU,
+                                std::memory_order_relaxed);
+        }
+        ImGui::PopStyleColor(2);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Encoder: %s\nClick to switch to %s.",
+                              useCuda_ ? "CUDA (NVENC GPU)" : "CPU (libx264/x265)",
+                              useCuda_ ? "CPU" : "CUDA");
+
         // ── Start / Stop (green / red accent) ───────────────────────
         ImGui::SameLine(0, 16);
         bool busy = running_.load();
@@ -347,13 +381,18 @@ namespace sh
             ImGui::PopStyleColor(2);
         }
 
-        // ── Settings (accent button) ────────────────────────────────
+        // ── Settings (gear button) ──────────────────────────────────
         ImGui::SameLine(0, 8);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.18f, 0.18f, 0.22f, 1.0f});
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
-        if (ImGui::Button(" Settings ", ImVec2(0, 0)))
-            showSettings_ = true;
-        ImGui::PopStyleColor(2);
+        {
+            float h = ImGui::GetFrameHeight();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.18f, 0.18f, 0.22f, 1.0f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
+            if (ImGui::Button("\xE2\x9A\x99", ImVec2(h, h))) // UTF-8 gear ⚙
+                showSettings_ = true;
+            ImGui::PopStyleColor(2);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Settings");
+        }
 
         ImGui::PopStyleVar(2);
     }
@@ -537,6 +576,11 @@ namespace sh
                     renderSettingsGeneral();
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("I/O"))
+                {
+                    renderSettingsIO();
+                    ImGui::EndTabItem();
+                }
                 if (ImGui::BeginTabItem("Video / Audio"))
                 {
                     renderSettingsVideo();
@@ -638,6 +682,46 @@ namespace sh
         ImGui::SetNextItemWidth(inputW);
         ImGui::InputInt("##failedTsMB", &failedTsMaxMB_, 10, 50);
         failedTsMaxMB_ = std::clamp(failedTsMaxMB_, 0, 10000);
+    }
+
+    void App::renderSettingsIO()
+    {
+        ImGui::Spacing();
+        ImGui::SeparatorText("Encoder Mode");
+        ImGui::Spacing();
+
+        ImGui::TextWrapped("Choose the encoder used for re-encode operations "
+                           "(PTS repair, salvage, concat re-encode). "
+                           "Stream-copy operations (normal concat/remux) are always lossless and unaffected.");
+        ImGui::Spacing();
+
+        int mode = useCuda_ ? 1 : 0;
+        if (ImGui::RadioButton("CPU  (libx264 / libx265)", &mode, 0))
+        {
+            useCuda_ = false;
+            g_encoderMode.store(EncoderMode::CPU, std::memory_order_relaxed);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Use software encoding (CPU).\nUniversally compatible, no driver needed.\nSlower but always works.");
+        if (ImGui::RadioButton("CUDA  (NVENC h264/hevc/av1)", &mode, 1))
+        {
+            useCuda_ = true;
+            g_encoderMode.store(EncoderMode::CUDA, std::memory_order_relaxed);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Use NVIDIA GPU hardware encoding.\nMuch faster, requires an NVIDIA GPU.\nFalls back to CPU if GPU fails.");
+
+        ImGui::Spacing();
+        ImGui::TextColored(COL_TEXT_DIM, "Current: %s", useCuda_ ? "CUDA (NVENC GPU)" : "CPU (libx264/x265)");
+        ImGui::TextColored(COL_TEXT_DIM, "Tip: You can also toggle this with the CPU/CUDA button in the top bar.");
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Concat Strategy");
+        ImGui::Spacing();
+
+        ImGui::TextWrapped("Concatenation always uses stream-copy (no re-encoding) by default. "
+                           "Re-encoding only happens as a last resort when files have "
+                           "incompatible codecs or broken timestamps that prevent direct copy.");
     }
 
     void App::renderSettingsVideo()
@@ -1412,7 +1496,7 @@ namespace sh
                         // Embed thumbnail as cover art inside the MKV
                         if (fs::exists(thumbPath))
                         {
-                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), logCb, g_mkvpropedit, false);
+                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), logCb, g_mkvpropedit, true);
 
                             // Delete .thumb.jpg after successful embed
                             std::error_code ec;

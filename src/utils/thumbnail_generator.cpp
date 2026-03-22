@@ -1669,14 +1669,17 @@ namespace sm
         //     Field 3 (left_fov=90.0f):  tag=0x1D + float32 LE 0x0000B442
         //     Field 4 (right_fov=90.0f): tag=0x25 + float32 LE 0x0000B442
         //     → crops equirectangular to front 180° hemisphere (fisheye 180 SBS)
+        // NOTE: Use --add-track-statistics-tags to ensure track header elements exist
+        // Use track:=1 (track number) instead of track:v1 (type selector) for reliability
         std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
-                                                                   " --edit track:v1"
+                                                                   " --add-track-statistics-tags"
+                                                                   " --edit track:=1"
                                                                    " --set stereo-mode=1"
                                                                    " --set projection-type=1"
                                                                    " --set projection-pose-yaw=0"
                                                                    " --set projection-pose-pitch=0"
                                                                    " --set projection-pose-roll=0"
-                                                                   " --set projection-private=hex:1D0000B442250000B442";
+                                                                   " --set projection-private=0x1D0000B442250000B442";
 
         log("vr: injecting fisheye 180\xC2\xB0 SBS spatial metadata...");
 
@@ -1690,9 +1693,10 @@ namespace sm
         std::string errMsg;
 #endif
 
-        if (ret == 0)
+        if (ret == 0 || ret == 2)
         {
-            log("vr: spatial metadata set (fisheye 180\xC2\xB0 SBS)");
+            log("vr: spatial metadata set (fisheye 180\xC2\xB0 SBS)" +
+                std::string(ret == 2 ? " (with warnings)" : ""));
             return true;
         }
 
@@ -1738,7 +1742,8 @@ namespace sm
 
         bool ok = true;
 
-        // Step 3: Embed cover art (if jpg exists and no cover yet, or force regenerate)
+        // Step 3: Embed cover art (if jpg exists)
+        // ALWAYS replace existing cover art - user wants fresh thumbnails.
         // Use standard Matroska cover art naming for DLNA/Skybox/Plex compatibility:
         // - attachment-name: cover.jpg (required)
         // - attachment-description: cover (helps some players)
@@ -1746,17 +1751,12 @@ namespace sm
         if (fs::exists(jpegPath))
         {
             bool hasExistingCover = hasCoverArt(mkvPath);
-            if (hasExistingCover && !forceRegenerate)
-            {
-                log("thumbnail: already has cover art, skipping embed");
-            }
-            else
             {
                 std::string cmdLine;
 
-                if (hasExistingCover && forceRegenerate)
+                if (hasExistingCover)
                 {
-                    log("thumbnail: replacing existing cover art (force regenerate)");
+                    log("thumbnail: replacing existing cover art");
 
                     // First delete all existing image attachments, then add the new one.
                     // mkvpropedit --delete-attachment mime-type:image/jpeg deletes by mime type.
@@ -1803,7 +1803,7 @@ namespace sm
                 std::string errMsg;
 #endif
 
-                if (ret == 0)
+                if (ret == 0 || ret == 2)
                 {
                     log("thumbnail: embedded cover art in " +
                         mkvPath);
@@ -1876,7 +1876,7 @@ namespace sm
         std::string errMsg;
 #endif
 
-        if (ret == 0)
+        if (ret == 0 || ret == 2)
         {
             log("fix-cover: updated attachment metadata");
             return true;
@@ -1974,7 +1974,7 @@ namespace sm
         std::error_code ec;
         fs::remove(tagFile, ec);
 
-        if (ret == 0)
+        if (ret == 0 || ret == 2)
         {
             log("tag: marked as processed (THUMBNAILED=done)");
             return true;

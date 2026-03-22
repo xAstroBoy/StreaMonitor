@@ -80,6 +80,7 @@ namespace sh
 
         // Settings tab renderers
         void renderSettingsGeneral();
+        void renderSettingsIO();
         void renderSettingsVideo();
         void renderSettingsPaths();
         void renderSettingsThumbnails();
@@ -115,6 +116,7 @@ namespace sh
 
         // Configurable thresholds (persisted in settings.json)
         bool repairPts_ = true; // run PTS repair on .ts files
+        bool useCuda_ = false;  // encoder mode: false=CPU, true=CUDA
         bool deleteTs_ = DELETE_TS_AFTER_REMUX;
         int failedTsMaxMB_ = (int)(FAILED_TS_DELETE_MAX_BYTES / (1024 * 1024));
         int targetFps_ = DEFAULT_TARGET_FPS;

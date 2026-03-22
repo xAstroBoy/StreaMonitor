@@ -3,12 +3,21 @@
 // Port of striphelper/pipeline.py + validators.py
 
 #include "subprocess.h"
+#include <atomic>
 #include <nlohmann/json.hpp>
 
 namespace sh
 {
 
-    // ── Encoder ladder (hardware-first) ─────────────────────────────────────────
+    // ── Encoder mode (CPU vs CUDA) ──────────────────────────────────────────────
+    enum class EncoderMode
+    {
+        CPU,
+        CUDA
+    };
+    extern std::atomic<EncoderMode> g_encoderMode; // default = CPU
+
+    // ── Encoder ladder ──────────────────────────────────────────────────────────
     struct EncoderArgs
     {
         std::vector<std::string> args;

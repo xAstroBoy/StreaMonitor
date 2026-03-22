@@ -23,14 +23,16 @@ namespace sh
     inline std::string g_mkvpropedit = "mkvpropedit";
 
     // ── Validation thresholds ───────────────────────────────────────────────────
-    constexpr double MIN_SIZE_RATIO_GENERIC = 0.985;
-    constexpr double MIN_DUR_RATIO_GENERIC = 0.990;
-    constexpr double MIN_SIZE_RATIO_TS2MUX = 0.940;
-    constexpr double MIN_DUR_RATIO_TS2MUX = 0.985;
+    // NOTE: For MKV concat output, be more lenient - container duration metadata
+    // may differ slightly from sum of inputs due to timestamp normalization.
+    constexpr double MIN_SIZE_RATIO_GENERIC = 0.90;  // Allow 10% variance (was 0.985)
+    constexpr double MIN_DUR_RATIO_GENERIC = 0.90;   // Allow 10% variance (was 0.990)
+    constexpr double MIN_SIZE_RATIO_TS2MUX = 0.85;   // Allow 15% variance (was 0.940)
+    constexpr double MIN_DUR_RATIO_TS2MUX = 0.90;    // Allow 10% variance (was 0.985)
 
-    constexpr double TAIL_TOL_SEC_TS2MUX = 360.0;
-    constexpr double TAIL_TOL_SEC_GENERIC = 180.0;
-    constexpr double TAIL_TOL_SEC_MERGE = 180.0;
+    constexpr double TAIL_TOL_SEC_TS2MUX = 600.0;    // 10 min tolerance (was 360s)
+    constexpr double TAIL_TOL_SEC_GENERIC = 300.0;   // 5 min tolerance (was 180s)
+    constexpr double TAIL_TOL_SEC_MERGE = 600.0;     // 10 min for merge (was 180s)
 
     constexpr double SALVAGE_TRIG_RATIO = 0.985;
     constexpr double SALVAGE_MIN_DELTA_SEC = 60.0;

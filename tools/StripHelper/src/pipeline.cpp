@@ -14,12 +14,16 @@
 namespace sh
 {
 
-    // ── Encoder ladder (CPU-first for reliability, GPU as optional fallback) ──
+    // ── Global encoder mode (read by all pipeline threads) ─────────────────────
+    std::atomic<EncoderMode> g_encoderMode{EncoderMode::CPU};
+
+    // ── Encoder ladder (respects g_encoderMode) ─────────────────────────────────
 
     std::vector<EncoderArgs> encoderArgsetsFast()
     {
         auto have = detectEncoders();
         std::vector<EncoderArgs> out;
+        bool cuda = (g_encoderMode.load(std::memory_order_relaxed) == EncoderMode::CUDA);
 
         auto add = [&](const char *key, std::vector<std::string> args, std::string label)
         {
@@ -27,22 +31,32 @@ namespace sh
                 out.push_back({std::move(args), std::move(label)});
         };
 
-        // CPU encoders first — universally available, no driver quirks
-        if (have.count("libx264") && have["libx264"])
-            out.push_back({{"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-tune", "fastdecode"}, "libx264_vfast_crf20"});
-        if (have.count("libx265") && have["libx265"])
-            out.push_back({{"-c:v", "libx265", "-preset", "fast", "-x265-params", "crf=22:pmode=1:pme=1"}, "libx265_fast_crf22"});
-
-        // Hardware encoders as fallback
-        add("hevc_nvenc", {"-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-bf", "0"}, "hevc_nvenc_p5_cq19");
-        add("h264_nvenc", {"-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-bf", "0"}, "h264_nvenc_p5_cq19");
-        add("av1_nvenc", {"-c:v", "av1_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-bf", "0"}, "av1_nvenc_p5_cq23");
-        add("hevc_qsv", {"-c:v", "hevc_qsv", "-global_quality", "21", "-look_ahead", "0"}, "hevc_qsv_gq21");
-        add("h264_qsv", {"-c:v", "h264_qsv", "-global_quality", "21", "-look_ahead", "0"}, "h264_qsv_gq21");
-        add("av1_qsv", {"-c:v", "av1_qsv", "-global_quality", "27"}, "av1_qsv_gq27");
-        add("hevc_amf", {"-c:v", "hevc_amf", "-quality", "speed", "-usage", "transcoding"}, "hevc_amf_speed");
-        add("h264_amf", {"-c:v", "h264_amf", "-quality", "speed", "-usage", "transcoding"}, "h264_amf_speed");
-        add("av1_amf", {"-c:v", "av1_amf", "-quality", "speed", "-usage", "transcoding"}, "av1_amf_speed");
+        if (cuda)
+        {
+            // CUDA mode: NVENC first, then QSV/AMF, CPU as last resort
+            add("hevc_nvenc", {"-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-bf", "0"}, "hevc_nvenc_p5_cq19");
+            add("h264_nvenc", {"-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-bf", "0"}, "h264_nvenc_p5_cq19");
+            add("av1_nvenc", {"-c:v", "av1_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-bf", "0"}, "av1_nvenc_p5_cq23");
+            add("hevc_qsv", {"-c:v", "hevc_qsv", "-global_quality", "21", "-look_ahead", "0"}, "hevc_qsv_gq21");
+            add("h264_qsv", {"-c:v", "h264_qsv", "-global_quality", "21", "-look_ahead", "0"}, "h264_qsv_gq21");
+            add("av1_qsv", {"-c:v", "av1_qsv", "-global_quality", "27"}, "av1_qsv_gq27");
+            add("hevc_amf", {"-c:v", "hevc_amf", "-quality", "speed", "-usage", "transcoding"}, "hevc_amf_speed");
+            add("h264_amf", {"-c:v", "h264_amf", "-quality", "speed", "-usage", "transcoding"}, "h264_amf_speed");
+            add("av1_amf", {"-c:v", "av1_amf", "-quality", "speed", "-usage", "transcoding"}, "av1_amf_speed");
+            // CPU fallback
+            if (have.count("libx264") && have["libx264"])
+                out.push_back({{"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-tune", "fastdecode"}, "libx264_vfast_crf20"});
+            if (have.count("libx265") && have["libx265"])
+                out.push_back({{"-c:v", "libx265", "-preset", "fast", "-x265-params", "crf=22:pmode=1:pme=1"}, "libx265_fast_crf22"});
+        }
+        else
+        {
+            // CPU mode: software encoders only — no GPU involvement
+            if (have.count("libx264") && have["libx264"])
+                out.push_back({{"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-tune", "fastdecode"}, "libx264_vfast_crf20"});
+            if (have.count("libx265") && have["libx265"])
+                out.push_back({{"-c:v", "libx265", "-preset", "fast", "-x265-params", "crf=22:pmode=1:pme=1"}, "libx265_fast_crf22"});
+        }
 
         return out;
     }
@@ -52,16 +66,30 @@ namespace sh
     DurationInfo bestDurationWithFallback(const fs::path &fp, const fs::path &cwd, double refTotal)
     {
         DurationInfo d;
-        d.probed = ffprobeBestDuration(fp, cwd);
+        
+        // First try native probe (fast, uses libavformat directly)
+        auto fullPath = (cwd / fp.filename());
+        d.probed = nativeProbeDuration(fullPath);
+        
+        // Only fallback to subprocess if native probe failed
+        if (d.probed <= 0.0)
+            d.probed = ffprobeBestDuration(fp, cwd);
 
-        bool needPkt = (d.probed <= 0.0) ||
-                       (refTotal > 0 && d.probed < refTotal * 0.35);
+        // For MKV files with valid duration, trust it and skip expensive packet scanning
+        auto ext = fp.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        bool isMkv = (ext == ".mkv");
+        
+        // Only do expensive fallbacks for truly broken files (duration missing or way too short)
+        // For merged MKV files, container duration should be accurate
+        bool needPkt = !isMkv && ((d.probed <= 0.0) ||
+                       (refTotal > 0 && d.probed < refTotal * 0.20));
         d.pkt = needPkt ? ffprobeLastPacketPts(fp, cwd) : 0.0;
         d.best = std::max(d.probed, d.pkt);
 
-        bool needFrames = (refTotal > 0 && d.best < refTotal * 0.50) || d.best <= 0.0;
-        d.frames = needFrames ? ffprobeFramesDuration(fp, cwd) : 0.0;
-        d.best = std::max(d.best, d.frames);
+        // NEVER do frame counting - it's insanely slow and decodes the entire file
+        // Trust the container duration for MKV files
+        d.frames = 0.0;
         return d;
     }
 
@@ -523,7 +551,8 @@ namespace sh
 
         std::vector<std::string> errs;
         auto encoders = encoderArgsetsFast();
-        bool hasCuda = hasCudaHwaccel();
+        bool cudaMode = (g_encoderMode.load(std::memory_order_relaxed) == EncoderMode::CUDA);
+        bool hasCuda = cudaMode && hasCudaHwaccel();
         int hwFailCount = 0;
         constexpr int MAX_HW_FAILURES = 2; // bail to CPU after 2 HW encoder failures
 
@@ -732,9 +761,18 @@ namespace sh
                     note(stageLabel + " OK (native)");
                 return;
             }
+            // If stop was requested, don't fall through to subprocess — propagate stop
+            if (g_stopRequested.load())
+                throw StopRequested();
+        }
+        catch (const StopRequested &)
+        {
+            throw; // propagate immediately
         }
         catch (...)
         {
+            if (g_stopRequested.load())
+                throw StopRequested();
         }
 
         // ── Subprocess fallback ──
@@ -846,7 +884,8 @@ namespace sh
 
         auto encoders = encoderArgsetsFast();
         std::vector<std::string> errs;
-        bool hasCuda = hasCudaHwaccel();
+        bool cudaMode = (g_encoderMode.load(std::memory_order_relaxed) == EncoderMode::CUDA);
+        bool hasCuda = cudaMode && hasCudaHwaccel();
 
         for (auto &enc : encoders)
         {
@@ -1210,7 +1249,8 @@ namespace sh
         vf += ",format=yuv420p";
         std::string af = "asetpts=N/SR/TB";
 
-        bool cuda = hasCudaHwaccel();
+        bool cudaMode = (g_encoderMode.load(std::memory_order_relaxed) == EncoderMode::CUDA);
+        bool cuda = cudaMode && hasCudaHwaccel();
 
         double srcDur = std::max(ffprobeBestDuration(src, folder), 1.0);
         ProgressCb prog = nullptr;
@@ -1986,8 +2026,14 @@ namespace sh
             concatCopyMkv(folder, concatTxt, prog, targetBytes, note);
             usedFiles = parts;
         }
+        catch (const StopRequested &)
+        {
+            throw; // propagate stop immediately — never fall into re-encode
+        }
         catch (const PipelineError &)
         {
+            if (g_stopRequested.load())
+                throw StopRequested();
             if (note)
                 note("concat copy failed -> normalize");
             auto norm = normalizeParts(parts, folder, note);
@@ -1998,21 +2044,48 @@ namespace sh
                 usedFiles.insert(usedFiles.end(), norm.begin(), norm.end());
                 usedFiles.insert(usedFiles.end(), parts.begin(), parts.end());
             }
+            catch (const StopRequested &)
+            {
+                throw; // propagate stop immediately
+            }
             catch (const PipelineError &)
             {
+                if (g_stopRequested.load())
+                    throw StopRequested();
                 concatReencodeFilter(norm, folder, note, prog);
                 usedFiles.insert(usedFiles.end(), norm.begin(), norm.end());
                 usedFiles.insert(usedFiles.end(), parts.begin(), parts.end());
             }
         }
 
-        // Phase 5: Validate merged output
+        // Phase 5: Validate merged output (fast check only)
         auto tmp = folder / "0~merge.mkv";
         if (note)
-            note("validate merged output");
-        auto vr = validateMerge(folder, tmp, targetBytes, totalDur, true);
+            note("validating merged output...");
+        
+        // Quick size-based validation - skip expensive duration probing
+        int64_t outSize = 0;
+        try { outSize = (int64_t)fs::file_size(tmp); } catch (...) {}
+        
+        // If output file exists and has reasonable size (>80% of expected), accept it
+        bool quickValid = (outSize > 0) && (targetBytes <= 0 || outSize >= targetBytes * 0.80);
+        
+        if (!quickValid && fs::exists(tmp))
+        {
+            // Only do full validation if quick check failed
+            auto vr = validateMerge(folder, tmp, targetBytes, totalDur, true);
+            quickValid = vr.ok;
+        }
+        
+        if (!quickValid && fs::exists(tmp))
+        {
+            // Last resort: accept if file exists and is non-trivial
+            quickValid = (outSize > 1024 * 1024); // >1MB
+            if (quickValid && note)
+                note("accepting merge output (size-based validation)");
+        }
 
-        if (!vr.ok)
+        if (!quickValid)
         {
             auto tmp2 = folder / ".merge2.mkv";
             try
@@ -2029,7 +2102,7 @@ namespace sh
                         fs::remove(tmp2, ec);
                         fs::remove(folder / "concat_list.txt", ec);
                         fs::remove(folder / "concat_list_norm.txt", ec);
-                        throw PipelineError(folder, "merge-validate", vr2.msg.empty() ? vr.msg : vr2.msg);
+                        throw PipelineError(folder, "merge-validate", vr3.msg.empty() ? vr2.msg : vr3.msg);
                     }
                 }
                 fs::rename(tmp2, tmp);

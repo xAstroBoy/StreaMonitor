@@ -1295,10 +1295,14 @@ namespace sm
 #ifdef _WIN32
                     {
                         static const ImWchar glyphRanges[] = {
-                            0x0020, 0x00FF,
-                            0x2600, 0x26FF,
-                            0x2700, 0x27BF,
-                            0x25A0, 0x25FF,
+                            0x0020,
+                            0x00FF,
+                            0x2600,
+                            0x26FF,
+                            0x2700,
+                            0x27BF,
+                            0x25A0,
+                            0x25FF,
                             0,
                         };
                         const char *systemFonts[] = {
@@ -1312,7 +1316,11 @@ namespace sm
                             {
                                 fontCfg2.GlyphRanges = glyphRanges;
                                 ImFont *f = ioRef.Fonts->AddFontFromFileTTF(fontPath, newFontSize, &fontCfg2);
-                                if (f) { rebuildLoaded = true; break; }
+                                if (f)
+                                {
+                                    rebuildLoaded = true;
+                                    break;
+                                }
                             }
                         }
                     }
