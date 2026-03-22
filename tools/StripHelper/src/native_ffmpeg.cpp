@@ -8,6 +8,7 @@
 #include <fstream>
 #include <cmath>
 #include <unordered_map>
+#include <mutex>
 
 extern "C"
 {
@@ -22,6 +23,9 @@ extern "C"
 
 namespace sh
 {
+    // Mutex for current_path operations (concat demuxer needs relative path resolution)
+    static std::mutex g_cwdMutex;
+
     // ── RAII helpers ─────────────────────────────────────────────────
     namespace
     {
@@ -306,16 +310,19 @@ namespace sh
 
     bool nativeConcat(const fs::path &concatListFile, const fs::path &output,
                       const fs::path &workDir,
-                      NativeProgressCb progress)
+                      NativeProgressCb progress,
+                      NativeCancelCb cancelCb)
     {
         // Use FFmpeg's built-in concat demuxer
         FmtCtxIn ifmt;
-        std::string listPath = concatListFile.string();
+        
+        // Build full path to concat list file.
+        // The concat demuxer resolves relative paths in the list relative to the list file's directory.
+        std::string listPath = (workDir / concatListFile.filename()).string();
 
         AVDictionary *opts = nullptr;
         av_dict_set(&opts, "safe", "0", 0);
 
-        // The concat demuxer needs the working directory for relative paths
         const AVInputFormat *concatFmt = av_find_input_format("concat");
         if (!concatFmt)
         {
@@ -323,7 +330,8 @@ namespace sh
             return false;
         }
 
-        // Change to work directory for relative paths in concat list
+        // Use mutex to protect current_path changes - concat demuxer needs cwd for relative paths
+        std::unique_lock<std::mutex> cwdLock(g_cwdMutex);
         auto prevDir = fs::current_path();
         fs::current_path(workDir);
 
@@ -341,12 +349,15 @@ namespace sh
             return false;
         }
 
+        // Restore cwd immediately after opening - files are now open, no more relative path lookups
+        fs::current_path(prevDir);
+        cwdLock.unlock();
+
         // Create output
         FmtCtxOut ofmt;
         std::string outPath = output.string();
         if (avformat_alloc_output_context2(&ofmt.ctx, nullptr, "matroska", outPath.c_str()) < 0)
         {
-            fs::current_path(prevDir);
             return false;
         }
 
@@ -361,7 +372,6 @@ namespace sh
                 AVStream *outStream = avformat_new_stream(ofmt.ctx, nullptr);
                 if (!outStream)
                 {
-                    fs::current_path(prevDir);
                     return false;
                 }
                 avcodec_parameters_copy(outStream->codecpar, ifmt.ctx->streams[i]->codecpar);
@@ -375,7 +385,6 @@ namespace sh
         {
             if (avio_open(&ofmt.ctx->pb, outPath.c_str(), AVIO_FLAG_WRITE) < 0)
             {
-                fs::current_path(prevDir);
                 return false;
             }
             ofmt.pbOpened = true;
@@ -388,7 +397,6 @@ namespace sh
         if (avformat_write_header(ofmt.ctx, &outOpts) < 0)
         {
             av_dict_free(&outOpts);
-            fs::current_path(prevDir);
             return false;
         }
         av_dict_free(&outOpts);
@@ -400,9 +408,17 @@ namespace sh
         // Copy packets
         AVPacket *pkt = av_packet_alloc();
         int64_t bytesWritten = 0;
+        int pktCount = 0;
 
         while (av_read_frame(ifmt.ctx, pkt) >= 0)
         {
+            // Check for cancellation every ~100 packets to avoid excessive overhead
+            if (cancelCb && (++pktCount % 100) == 0 && cancelCb())
+            {
+                av_packet_free(&pkt);
+                return false;
+            }
+
             int srcIdx = pkt->stream_index;
             // Use streamMap.size() for bounds — the concat demuxer can
             // dynamically add streams from later segments, growing
@@ -456,7 +472,6 @@ namespace sh
         av_packet_free(&pkt);
         av_write_trailer(ofmt.ctx);
 
-        fs::current_path(prevDir);
         return true;
     }
 

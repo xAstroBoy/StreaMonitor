@@ -49,12 +49,17 @@ namespace sh
                      const fs::path &workDir,
                      NativeProgressCb progress = nullptr);
 
+    // Cancel callback type for stop checking
+    using NativeCancelCb = std::function<bool()>;
+
     // ── Native concat (stream copy) ─────────────────────────────────
     // Concatenate multiple files into one MKV via the concat demuxer.
     // Equivalent to: ffmpeg -f concat -safe 0 -i list.txt -c copy out.mkv
+    // cancelCb: if provided and returns true, abort the operation
     bool nativeConcat(const fs::path &concatListFile, const fs::path &output,
                       const fs::path &workDir,
-                      NativeProgressCb progress = nullptr);
+                      NativeProgressCb progress = nullptr,
+                      NativeCancelCb cancelCb = nullptr);
 
     // ── PTS analysis ─────────────────────────────────────────────────
     // Detect the maximum PTS jump/discontinuity in a file.

@@ -714,7 +714,9 @@ namespace sh
                     prog(timeSec, written, target > 0 ? target : targetBytes);
                 };
             }
-            if (nativeConcat(folder / concatTxt.filename(), tmp, folder, nProg))
+            NativeCancelCb cancelCb = []()
+            { return g_stopRequested.load(); };
+            if (nativeConcat(folder / concatTxt.filename(), tmp, folder, nProg, cancelCb))
             {
                 if (note)
                     note(stageLabel + " OK (native)");
