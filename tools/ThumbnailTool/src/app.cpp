@@ -1352,13 +1352,14 @@ namespace tt
                                      ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
                                      ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
 
-            if (ImGui::BeginTable("##InProgressTable", 8, tFlags, ImGui::GetContentRegionAvail()))
+            if (ImGui::BeginTable("##InProgressTable", 9, tFlags, ImGui::GetContentRegionAvail()))
             {
                 // Dynamic layout: fixed columns for compact data, stretch columns for text
                 ImGui::TableSetupColumn("##", ImGuiTableColumnFlags_WidthFixed, 30.0f);
                 ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 90.0f);
                 ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthStretch, 2.0f);
                 ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("Written", ImGuiTableColumnFlags_WidthFixed, 80.0f);
                 ImGui::TableSetupColumn("Speed", ImGuiTableColumnFlags_WidthFixed, 110.0f);
                 ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 80.0f);
                 ImGui::TableSetupColumn("Elapsed", ImGuiTableColumnFlags_WidthFixed, 80.0f);
@@ -1450,6 +1451,26 @@ namespace tt
                         ImGui::TextUnformatted(formatSize(fsize).c_str());
                     else
                         ImGui::TextColored(COL_DIM, "-");
+
+                    // Written column (live output size during remux)
+                    ImGui::TableNextColumn();
+                    if (isActive && bytesProcessed > 0)
+                    {
+                        // Show percentage of original when both are known
+                        if (fsize > 0)
+                        {
+                            int pct = (int)((double)bytesProcessed * 100.0 / (double)fsize);
+                            ImGui::Text("%s (%d%%)", formatSize(bytesProcessed).c_str(), pct);
+                        }
+                        else
+                        {
+                            ImGui::TextUnformatted(formatSize(bytesProcessed).c_str());
+                        }
+                    }
+                    else
+                    {
+                        ImGui::TextColored(COL_DIM, "-");
+                    }
 
                     // Speed column (MB/s)
                     ImGui::TableNextColumn();
