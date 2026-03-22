@@ -75,13 +75,19 @@ namespace sm
 
     void GuiApp::drainBackgroundTasks()
     {
-        std::lock_guard lk(bgTaskMutex_);
-        for (auto &t : bgTasks_)
+        // Move threads out before joining — a task may call safeDetach()
+        // during its execution, which would deadlock if we held the lock.
+        std::vector<std::thread> tasks;
+        {
+            std::lock_guard lk(bgTaskMutex_);
+            tasks = std::move(bgTasks_);
+            bgTasks_.clear();
+        }
+        for (auto &t : tasks)
         {
             if (t.joinable())
                 t.join();
         }
-        bgTasks_.clear();
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -5359,7 +5365,14 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::renderBotDetailPanel()
     {
-        const auto &bot = cachedStates_[selectedBot_];
+        // Bounds check — selectedBot_ may be stale after bot removal
+        if (selectedBot_ < 0 || selectedBot_ >= (int)cachedStates_.size())
+        {
+            showBotDetail_ = false;
+            return;
+        }
+        // Copy by VALUE (not reference) — vector may reallocate during frame
+        const auto bot = cachedStates_[selectedBot_];
         std::string title = bot.username + " [" + bot.siteName + "]###BotDetail";
 
         ImGui::SetNextWindowSize({540 * dpiScale_, 500 * dpiScale_}, ImGuiCond_Appearing);

@@ -10,6 +10,9 @@
 #include <functional>
 #include <set>
 #include <unordered_map>
+#ifdef _WIN32
+#include <Windows.h>
+#endif
 
 namespace sm
 {
@@ -171,6 +174,10 @@ namespace sm
 
         {
             std::lock_guard lock(mutex_);
+            // Clear callbacks FIRST to prevent UAF from threads invoking
+            // callbacks into this (already-shutting-down) BotManager.
+            for (auto &entry : bots_)
+                entry.plugin->setStateCallback(nullptr);
             // Stop all groups first
             for (auto &g : groups_)
                 g->requestQuit();
@@ -300,7 +307,21 @@ namespace sm
         restartThreads_.erase(
             std::remove_if(restartThreads_.begin(), restartThreads_.end(),
                            [](std::thread &t)
-                           { return !t.joinable(); }),
+                           {
+                               if (t.joinable())
+                               {
+#ifdef _WIN32
+                                   DWORD ret = WaitForSingleObject(t.native_handle(), 0);
+                                   if (ret == WAIT_OBJECT_0)
+                                   {
+                                       t.join();
+                                       return true;
+                                   }
+#endif
+                                   return false;
+                               }
+                               return true;
+                           }),
             restartThreads_.end());
         restartThreads_.emplace_back([this, u, s]()
                                      {
@@ -485,8 +506,19 @@ namespace sm
             std::remove_if(restartThreads_.begin(), restartThreads_.end(),
                            [](std::thread &t)
                            {
-                               // Can't check if done without joining, so skip non-joinable
-                               return !t.joinable();
+                               if (t.joinable())
+                               {
+#ifdef _WIN32
+                                   DWORD ret = WaitForSingleObject(t.native_handle(), 0);
+                                   if (ret == WAIT_OBJECT_0)
+                                   {
+                                       t.join();
+                                       return true;
+                                   }
+#endif
+                                   return false;
+                               }
+                               return true; // already joined/detached
                            }),
             restartThreads_.end());
         restartThreads_.emplace_back([this, u, s]()

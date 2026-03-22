@@ -289,7 +289,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
 
     auto narrowArg = [](LPCWSTR w) -> std::string
     {
-        char buf[2048];
+        char buf[2048] = {};
         WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, sizeof(buf), nullptr, nullptr);
         return std::string(buf);
     };

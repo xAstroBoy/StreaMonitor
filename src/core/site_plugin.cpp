@@ -396,8 +396,9 @@ namespace sm
         pumpPreviewQueue_();
         if (previewVersion_ <= lastVersion || pendingPreview_.empty())
             return false;
-        // Copy (not move) — multiple consumers may read independently
-        out.pixels = pendingPreview_.pixels;
+        // Move pixels to consumer — avoids ~8MB copy per frame (~30fps).
+        // pendingPreview_ is reset when the next frame arrives via pushPreviewFrame.
+        out.pixels = std::move(pendingPreview_.pixels);
         out.width = pendingPreview_.width;
         out.height = pendingPreview_.height;
         lastVersion = previewVersion_;
@@ -415,7 +416,7 @@ namespace sm
             pumpPreviewQueue_();
             if (previewVersion_ > lastVersion && !pendingPreview_.empty())
             {
-                out.pixels = pendingPreview_.pixels;
+                out.pixels = std::move(pendingPreview_.pixels);
                 out.width = pendingPreview_.width;
                 out.height = pendingPreview_.height;
                 lastVersion = previewVersion_;

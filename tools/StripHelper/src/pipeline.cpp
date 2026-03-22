@@ -1017,7 +1017,7 @@ namespace sh
 
     // ── Symlink creation ────────────────────────────────────────────────────────
 
-    static std::once_flag g_purgeToProcessOnce;
+    static std::atomic<bool> g_purgedToProcess{false};
 
     void purgeToProcessDir()
     {
@@ -1036,15 +1036,15 @@ namespace sh
 
     void resetToProcessPurge()
     {
-        // Reconstruct the once_flag so next makeSymlink call will purge again
-        g_purgeToProcessOnce.~once_flag();
-        new (&g_purgeToProcessOnce) std::once_flag();
+        g_purgedToProcess.store(false);
     }
 
     void makeSymlink(const fs::path &folder, const nlohmann::json &cfg)
     {
-        // Wipe To Process once per run
-        std::call_once(g_purgeToProcessOnce, purgeToProcessDir);
+        // Wipe To Process once per run (atomic CAS — thread-safe, no UB)
+        bool expected = false;
+        if (g_purgedToProcess.compare_exchange_strong(expected, true))
+            purgeToProcessDir();
         try
         {
             auto src = folder / "0.mkv";

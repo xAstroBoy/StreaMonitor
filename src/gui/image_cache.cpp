@@ -75,9 +75,12 @@ namespace sm
                     auto age = std::chrono::steady_clock::now() - it->second.loadedAt;
                     if (std::chrono::duration_cast<std::chrono::seconds>(age).count() >= 30)
                     {
-                        // Stale — delete texture and re-fetch
+                        // Stale — queue texture deletion and re-fetch
                         if (it->second.textureId)
-                            glDeleteTextures(1, &it->second.textureId);
+                        {
+                            std::lock_guard dlock(deleteMutex_);
+                            pendingDeletes_.push_back(it->second.textureId);
+                        }
                         cache_.erase(it);
                         // Fall through to start a new download below
                     }
@@ -240,8 +243,12 @@ namespace sm
         if (fullUrl.size() > 2 && fullUrl[0] == '/' && fullUrl[1] == '/')
             fullUrl = "https:" + fullUrl;
 
-        // Parse URL
-        std::wstring wurl(fullUrl.begin(), fullUrl.end());
+        // Parse URL — proper UTF-8 → UTF-16 conversion
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, fullUrl.c_str(), -1, nullptr, 0);
+        if (wlen <= 0)
+            return false;
+        std::wstring wurl(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, fullUrl.c_str(), -1, wurl.data(), wlen);
 
         URL_COMPONENTS urlComp = {};
         urlComp.dwStructSize = sizeof(urlComp);
@@ -455,6 +462,8 @@ namespace sm
         catch (const std::exception &e)
         {
             spdlog::error("[ImageCache] downloadAndDecode('{}') exception: {}", url.substr(0, 80), e.what());
+            if (shuttingDown_.load())
+                return;
             std::lock_guard lock(mutex_);
             auto it = cache_.find(url);
             if (it != cache_.end())

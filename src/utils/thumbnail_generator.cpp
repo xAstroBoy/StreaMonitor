@@ -584,6 +584,11 @@ namespace sm
 
         CodecCtx decCtx;
         decCtx.ctx = avcodec_alloc_context3(decoder);
+        if (!decCtx.ctx)
+        {
+            log("thumbnail: failed to allocate decoder context");
+            return false;
+        }
         avcodec_parameters_to_context(decCtx.ctx, codecpar);
 
         if (useCuda)
@@ -655,8 +660,14 @@ namespace sm
         int totalW = effectiveWidth;
 
         // ── 5. Allocate composite image (RGB24) ─────────────────────────
-        int stride = totalW * 3;
-        std::vector<uint8_t> image(stride * totalH, 0); // black background
+        size_t stride = (size_t)totalW * 3;
+        size_t imageBytes = stride * (size_t)totalH;
+        if (imageBytes > 500 * 1024 * 1024) // 500 MB sanity limit
+        {
+            log("thumbnail: composite image too large (" + std::to_string(imageBytes / (1024 * 1024)) + " MB)");
+            return false;
+        }
+        std::vector<uint8_t> image(imageBytes, 0); // black background
 
         // Dark-grey header background
         fillRect(image.data(), stride, totalW, totalH,
@@ -686,9 +697,20 @@ namespace sm
 
         // ── 8. Extract frames and compose grid ──────────────────────────
         Frame decFrame;
+        if (!decFrame.f)
+        {
+            log("thumbnail: failed to allocate decode frame");
+            return false;
+        }
         Frame swFrame; // for GPU→CPU transfer when using CUDA
+        if (!swFrame.f)
+        {
+            log("thumbnail: failed to allocate SW frame");
+            return false;
+        }
         int thumbBufSize = thumbW * thumbH * 3;
         std::vector<uint8_t> thumbBuf(thumbBufSize);
+        AVPixelFormat lastSwsFmt = AV_PIX_FMT_NONE; // track format changes for sws_scale safety
 
         int framesExtracted = 0;
         for (int i = 0; i < totalFrames; ++i)
@@ -738,17 +760,27 @@ namespace sm
                 srcFrame = swFrame.f;
             }
 
-            // Lazy SWS init — pixel format known only after first decode
-            if (!thumbSws.ctx)
+            // Lazy SWS init — pixel format known only after first decode.
+            // Recreate if frame dimensions or pixel format changed (can happen
+            // after seeking in videos with timestamp discontinuities).
+            AVPixelFormat frameFmt = (AVPixelFormat)srcFrame->format;
+            if (!thumbSws.ctx ||
+                srcFrame->width != srcW || srcFrame->height != srcH ||
+                frameFmt != lastSwsFmt)
             {
-                thumbSws.ctx = sws_getContext(srcW, srcH, (AVPixelFormat)srcFrame->format,
+                if (thumbSws.ctx)
+                    sws_freeContext(thumbSws.ctx);
+                srcW = srcFrame->width;
+                srcH = srcFrame->height;
+                lastSwsFmt = frameFmt;
+                thumbSws.ctx = sws_getContext(srcW, srcH, frameFmt,
                                               thumbW, thumbH, AV_PIX_FMT_RGB24,
                                               SWS_BICUBIC, nullptr, nullptr, nullptr);
                 if (!thumbSws.ctx)
                 {
                     log("thumbnail: failed to create scaler");
                     av_frame_unref(decFrame.f);
-                    return false;
+                    continue; // skip this frame, try next
                 }
             }
 

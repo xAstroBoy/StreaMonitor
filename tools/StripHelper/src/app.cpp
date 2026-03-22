@@ -271,7 +271,7 @@ namespace sh
                     PWSTR path = nullptr;
                     if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &path)))
                     {
-                        char narrow[1024];
+                        char narrow[1024] = {};
                         WideCharToMultiByte(CP_UTF8, 0, path, -1, narrow, sizeof(narrow), nullptr, nullptr);
                         std::strncpy(pathBuf_, narrow, sizeof(pathBuf_) - 1);
                         CoTaskMemFree(path);
@@ -940,7 +940,7 @@ namespace sh
                         PWSTR path = nullptr;
                         if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &path)))
                         {
-                            char narrow[1024];
+                            char narrow[1024] = {};
                             WideCharToMultiByte(CP_UTF8, 0, path, -1, narrow, sizeof(narrow), nullptr, nullptr);
                             std::strncpy(importPathBuf, narrow, sizeof(importPathBuf) - 1);
                             CoTaskMemFree(path);
@@ -1280,7 +1280,10 @@ namespace sh
 
         addLog("Found " + std::to_string(folders.size()) + " folders. Starting " + std::to_string(threads_) + " workers...");
 
-        // Launch worker threads
+        // Join any leftover workers from a previous batch before clearing
+        for (auto &w : workers_)
+            if (w.joinable())
+                w.join();
         workers_.clear();
         int t = std::min(threads_, (int)folders.size());
         for (int i = 0; i < t; ++i)

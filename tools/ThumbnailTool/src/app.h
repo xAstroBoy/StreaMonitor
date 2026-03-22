@@ -92,7 +92,7 @@ namespace tt
 
         // Actions
         void startScan();  // launches scanWorker on background thread
-        void scanWorker(); // actual scan logic (runs off GUI thread)
+        void scanWorker(const std::string &rootStr); // actual scan logic (runs off GUI thread)
         void startGeneration();
         void workerFunc(int threadIdx);
         void addLog(const std::string &line);

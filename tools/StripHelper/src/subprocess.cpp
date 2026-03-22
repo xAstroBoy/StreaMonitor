@@ -560,11 +560,13 @@ namespace sh
 
     // ── Encoder detection ───────────────────────────────────────────────────────
 
+    static std::mutex g_encoderMtx;
     static std::map<std::string, bool> g_encoderCache;
     static int g_aacMf = -1; // -1=unknown, 0=no, 1=yes
 
     std::map<std::string, bool> detectEncoders()
     {
+        std::lock_guard lk(g_encoderMtx);
         if (!g_encoderCache.empty())
             return g_encoderCache;
 
@@ -596,8 +598,9 @@ namespace sh
 
     bool hasAacMf()
     {
-        if (g_aacMf < 0)
-            detectEncoders();
+        // detectEncoders() already guards g_aacMf under g_encoderMtx
+        detectEncoders();
+        std::lock_guard lk(g_encoderMtx);
         return g_aacMf == 1;
     }
 
@@ -608,14 +611,21 @@ namespace sh
 
     // ── Hardware acceleration detection ─────────────────────────────────────────
 
+    static std::mutex g_cudaMtx;
     bool hasCudaHwaccel()
     {
-        static int cached = -1;
-        if (cached >= 0)
-            return cached == 1;
+        static std::atomic<int> cached{-1};
+        int val = cached.load(std::memory_order_acquire);
+        if (val >= 0)
+            return val == 1;
+        std::lock_guard lk(g_cudaMtx);
+        val = cached.load(std::memory_order_relaxed); // re-check under lock
+        if (val >= 0)
+            return val == 1;
         auto r = runProcess({g_ffmpeg, "-hide_banner", "-hwaccels"}, fs::current_path(), false);
-        cached = (r.output.find("cuda") != std::string::npos) ? 1 : 0;
-        return cached == 1;
+        val = (r.output.find("cuda") != std::string::npos) ? 1 : 0;
+        cached.store(val, std::memory_order_release);
+        return val == 1;
     }
 
     // ── PTS continuity analysis ─────────────────────────────────────────────────

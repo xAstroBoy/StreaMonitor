@@ -222,13 +222,15 @@ namespace tt
         scanning_.store(true);
 
         // Launch background thread — GUI stays responsive
+        // Pass rootStr by value to avoid reading shared rootDir_ from bg thread
         scanThread_ = std::jthread([this, rootStr]()
-                                   { scanWorker(); });
+                                   { scanWorker(rootStr); });
     }
 
-    void App::scanWorker()
+    void App::scanWorker(const std::string &rootStr)
     {
-        fs::path root(rootDir_);
+     try {
+        fs::path root(rootStr);
 
         int count = 0;
         int wThumb = 0;
@@ -322,7 +324,7 @@ namespace tt
                       {
                           if (a.container != b.container)
                               return (int)a.container < (int)b.container; // MKV first
-                          return a.fileSize > b.fileSize; // largest first
+                          return a.fileSize > b.fileSize;                 // largest first
                       });
         }
 
@@ -336,6 +338,13 @@ namespace tt
         addLog("[OK] Found " + std::to_string(count) + " videos (" +
                std::to_string(wThumb) + " with thumbnails, " +
                std::to_string(woThumb) + " missing)");
+     } catch (const std::exception &e) {
+        addLog("[ERROR] Scan failed: " + std::string(e.what()));
+        scanning_.store(false);
+     } catch (...) {
+        addLog("[ERROR] Scan failed: unknown error");
+        scanning_.store(false);
+     }
     }
 
     // ── Generation (multi-threaded) ─────────────────────────────────
@@ -427,6 +436,7 @@ namespace tt
 
     void App::workerFunc(int threadIdx)
     {
+     try { // Top-level exception safety — prevents std::terminate on uncaught throw
         // Build sorted work queue: MKV first (no remux needed = stable I/O),
         // then other containers. Within each group, sort by file size DESCENDING
         // (largest first → better thread utilization, finishes big files early,
@@ -459,7 +469,7 @@ namespace tt
                   {
                       if (a.container != b.container)
                           return (int)a.container < (int)b.container; // MKV first
-                      return a.fileSize > b.fileSize; // largest first
+                      return a.fileSize > b.fileSize;                 // largest first
                   });
 
         std::vector<size_t> indices;
@@ -820,6 +830,18 @@ namespace tt
             threadProgress_[threadIdx].fileSize = 0;
         }
 
+        // End of top-level try-catch — prevent std::terminate on uncaught throw
+        threadProgress_[threadIdx].active.store(false);
+     } catch (const std::exception &e) {
+        addLog("[ERROR] Worker " + std::to_string(threadIdx + 1) + " crashed: " + e.what());
+        errors_.fetch_add(1);
+        threadProgress_[threadIdx].active.store(false);
+     } catch (...) {
+        addLog("[ERROR] Worker " + std::to_string(threadIdx + 1) + " crashed: unknown error");
+        errors_.fetch_add(1);
+        threadProgress_[threadIdx].active.store(false);
+     }
+
         // Last worker to exit handles completion/cleanup
         int rem = activeWorkers_.fetch_sub(1) - 1;
         if (rem == 0)
@@ -899,7 +921,7 @@ namespace tt
         {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.05f, 0.05f, 0.07f, 1.0f));
             ImGui::BeginChild("##Header", {w, ImGui::GetFrameHeight() + 16}, false,
-                             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::SetCursorPos({12, 8});
             ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
             ImGui::Text("ThumbnailTool");
@@ -914,7 +936,7 @@ namespace tt
         {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
             ImGui::BeginChild("##Toolbar", {w, ImGui::GetFrameHeight() + 14}, false,
-                             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::SetCursorPos({12, 6});
 
             ImGui::SetNextItemWidth(w * 0.45f);
@@ -1092,7 +1114,7 @@ namespace tt
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.08f, 0.12f, 1.0f));
             float statsH = ImGui::GetFrameHeight() * 2 + 14;
             ImGui::BeginChild("##ProcessingStats", {w, statsH}, false,
-                             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::SetCursorPos({12, 4});
 
             // Load atomic values for display
@@ -1176,14 +1198,14 @@ namespace tt
             contentH = 100;
 
         ImGui::BeginChild("##Content", {w, contentH}, false,
-                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         {
             float tableH = showLog_ ? contentH * splitRatio_ : contentH;
             float logH = showLog_ ? contentH - tableH - 4 : 0;
 
             // Table panel
             ImGui::BeginChild("##TablePanel", {w, tableH}, false,
-                             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             renderTable();
             ImGui::EndChild();
 
@@ -1203,7 +1225,7 @@ namespace tt
                 ImGui::PopStyleColor(3);
 
                 ImGui::BeginChild("##LogPanel", {w, logH}, false,
-                                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
                 renderLogPanel();
                 ImGui::EndChild();
             }
