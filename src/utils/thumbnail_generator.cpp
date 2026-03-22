@@ -1661,14 +1661,20 @@ namespace sm
         if (mkv_exe.empty())
             return false;
 
-        // Set Matroska native VR track elements via mkvpropedit:
+        // Set Matroska native VR track elements via mkvpropedit
+        // (Google Spherical Video V2 / Matroska Projection spec):
         //   stereo-mode=1              → side-by-side (left eye first)
         //   projection-type=1          → equirectangular
         //   projection-pose-*=0        → no rotation
-        //   projection-private          → protobuf EquirectProjection with FOV bounds:
-        //     Field 3 (left_fov=90.0f):  tag=0x1D + float32 LE 0x0000B442
-        //     Field 4 (right_fov=90.0f): tag=0x25 + float32 LE 0x0000B442
-        //     → crops equirectangular to front 180° hemisphere (fisheye 180 SBS)
+        //   projection-private         → ISOBMFF EquirectangularProjection ('equi') box
+        //     (box size/fourcc excluded, FullBox version+flags included per spec)
+        //     Bytes [ 0.. 3]: version=0, flags=0           → 00000000
+        //     Bytes [ 4.. 7]: bounds_top    = 0            → 00000000
+        //     Bytes [ 8..11]: bounds_bottom = 0            → 00000000
+        //     Bytes [12..15]: bounds_left   = 0.25 (0.32 FP) → 40000000  (90°/360°)
+        //     Bytes [16..19]: bounds_right  = 0.25 (0.32 FP) → 40000000  (90°/360°)
+        //     → tells VR players (Skybox, DeoVR, HereSphere) the frame covers
+        //       only the front 180° hemisphere of the equirectangular sphere.
         // NOTE: Use --add-track-statistics-tags to ensure track header elements exist
         // Use track:=1 (track number) instead of track:v1 (type selector) for reliability
         std::string cmdLine = "\"" + mkv_exe + "\" \"" + mkvPath + "\""
@@ -1679,9 +1685,9 @@ namespace sm
                                                                    " --set projection-pose-yaw=0"
                                                                    " --set projection-pose-pitch=0"
                                                                    " --set projection-pose-roll=0"
-                                                                   " --set projection-private=0x1D0000B442250000B442";
+                                                                   " --set projection-private=0x0000000000000000000000004000000040000000";
 
-        log("vr: injecting fisheye 180\xC2\xB0 SBS spatial metadata...");
+        log("vr: injecting equirectangular 180\xC2\xB0 SBS spatial metadata...");
 
         int ret;
 #ifdef _WIN32
@@ -1695,7 +1701,7 @@ namespace sm
 
         if (ret == 0 || ret == 2)
         {
-            log("vr: spatial metadata set (fisheye 180\xC2\xB0 SBS)" +
+            log("vr: spatial metadata set (equirectangular 180\xC2\xB0 SBS)" +
                 std::string(ret == 2 ? " (with warnings)" : ""));
             return true;
         }
