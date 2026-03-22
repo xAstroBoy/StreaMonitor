@@ -206,8 +206,10 @@ namespace sh
         // Write header with MKV-friendly options
         // avoid_negative_ts: let the muxer handle truly negative timestamps
         // (preserves HEVC B-frame CTO instead of manual clamping)
+        // Use flush_packets=1 to write immediately (faster finalization)
         AVDictionary *outOpts = nullptr;
         av_dict_set(&outOpts, "max_interleave_delta", "0", 0);
+        av_dict_set(&outOpts, "flush_packets", "1", 0);
         ofmt.ctx->avoid_negative_ts = AVFMT_AVOID_NEG_TS_MAKE_ZERO;
         if (avformat_write_header(ofmt.ctx, &outOpts) < 0)
         {
@@ -299,6 +301,10 @@ namespace sh
 
         av_packet_free(&pkt);
 
+        // Signal finalization stage (-1 = writing MKV index)
+        if (progress)
+            progress(-1.0, bytesWritten, totalSize);
+
         if (av_write_trailer(ofmt.ctx) < 0)
             return false;
 
@@ -377,8 +383,10 @@ namespace sh
         }
 
         // Write header with timestamp normalization
+        // Use flush_packets=1 to write immediately (faster finalization)
         AVDictionary *outOpts = nullptr;
         av_dict_set(&outOpts, "max_interleave_delta", "0", 0);
+        av_dict_set(&outOpts, "flush_packets", "1", 0);
         ofmt.ctx->avoid_negative_ts = AVFMT_AVOID_NEG_TS_MAKE_ZERO;
         if (avformat_write_header(ofmt.ctx, &outOpts) < 0)
         {
