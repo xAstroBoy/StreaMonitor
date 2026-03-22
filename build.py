@@ -413,15 +413,21 @@ def deploy(args):
     sm_exe = f"StreaMonitor{exe_ext}"
     src_exe = dist / sm_exe
 
-    if not src_exe.exists():
-        print(f"[X] Built exe not found: {src_exe}")
+    # Check what's actually available — don't require everything for single-tool builds
+    has_sm = src_exe.exists()
+    tool_names = [f"StripHelper{exe_ext}", f"ThumbnailTool{exe_ext}", f"Sorter{exe_ext}"]
+    has_tools = any((dist / t).exists() for t in tool_names)
+
+    if not has_sm and not has_tools:
+        print(f"[X] No built executables found in: {dist}")
         sys.exit(1)
 
     print(f"\n{'='*60}")
     print(f"  DEPLOYING")
-    print(f"  StreaMonitor  → {runtime_dir}")
-    if IS_WINDOWS:
-        print(f"  Tools         → C:\\AstroTools\\StripHelperCpp\\")
+    if has_sm:
+        print(f"  StreaMonitor  -> {runtime_dir}")
+    if IS_WINDOWS and has_tools:
+        print(f"  Tools         -> C:\\AstroTools\\StripHelperCpp\\")
     print(f"{'='*60}")
 
     # ── Step 1: Kill running processes ──
@@ -444,29 +450,32 @@ def deploy(args):
     time.sleep(1.5)
 
     # ── Step 2: Copy StreaMonitor to runtime directory ──
-    print("[2/4] Copying StreaMonitor to runtime directory...")
-    dest_exe = runtime_dir / sm_exe
-    try:
-        shutil.copy2(src_exe, dest_exe)
-        print(f"  [OK] {sm_exe}")
-    except PermissionError:
-        # Still locked — wait longer and retry once
-        print(f"  [!] {sm_exe} is still locked, waiting...")
-        time.sleep(3)
+    if has_sm:
+        print("[2/4] Copying StreaMonitor to runtime directory...")
+        dest_exe = runtime_dir / sm_exe
         try:
             shutil.copy2(src_exe, dest_exe)
-            print(f"  [OK] {sm_exe} (retry succeeded)")
-        except Exception as e:
-            print(f"  [X] Could not copy {sm_exe}: {e}")
-            print(f"      You may need to close StreaMonitor manually.")
-            sys.exit(1)
+            print(f"  [OK] {sm_exe}")
+        except PermissionError:
+            # Still locked — wait longer and retry once
+            print(f"  [!] {sm_exe} is still locked, waiting...")
+            time.sleep(3)
+            try:
+                shutil.copy2(src_exe, dest_exe)
+                print(f"  [OK] {sm_exe} (retry succeeded)")
+            except Exception as e:
+                print(f"  [X] Could not copy {sm_exe}: {e}")
+                print(f"      You may need to close StreaMonitor manually.")
+                sys.exit(1)
 
-    # Copy web dashboard
-    web_src = dist / "web"
-    if web_src.is_dir():
-        web_dst = runtime_dir / "web"
-        shutil.copytree(web_src, web_dst, dirs_exist_ok=True)
-        print(f"  [OK] web/ dashboard")
+        # Copy web dashboard
+        web_src = dist / "web"
+        if web_src.is_dir():
+            web_dst = runtime_dir / "web"
+            shutil.copytree(web_src, web_dst, dirs_exist_ok=True)
+            print(f"  [OK] web/ dashboard")
+    else:
+        print("[2/4] StreaMonitor not found in dist, skipping...")
 
     # ── Step 3: Copy tools to AstroTools directory ──
     if IS_WINDOWS:
@@ -493,27 +502,32 @@ def deploy(args):
     else:
         print("[3/4] Tool deployment skipped (non-Windows)")
 
-    # ── Step 4: Launch the new version ──
-    print("[4/4] Launching new StreaMonitor...")
-    if IS_WINDOWS:
-        # Use START to detach the process from this console
-        subprocess.Popen(
-            [str(dest_exe)],
-            cwd=str(runtime_dir),
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-            close_fds=True,
-        )
+    # ── Step 4: Launch the new version (only if SM was deployed) ──
+    if has_sm:
+        dest_exe = runtime_dir / sm_exe
+        print("[4/4] Launching new StreaMonitor...")
+        if IS_WINDOWS:
+            # Use START to detach the process from this console
+            subprocess.Popen(
+                [str(dest_exe)],
+                cwd=str(runtime_dir),
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                [str(dest_exe)],
+                cwd=str(runtime_dir),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        print(f"\n[OK] StreaMonitor deployed and launched from {runtime_dir}")
     else:
-        subprocess.Popen(
-            [str(dest_exe)],
-            cwd=str(runtime_dir),
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        print("[4/4] StreaMonitor not built, skipping launch")
+        print(f"\n[OK] Tools deployed")
 
-    print(f"\n[OK] StreaMonitor deployed and launched from {runtime_dir}")
-    if IS_WINDOWS:
+    if IS_WINDOWS and has_tools:
         print(f"[OK] Tools deployed to C:\\AstroTools\\StripHelperCpp\\")
 
 
@@ -643,6 +657,8 @@ def main():
                         help="Don't auto-increment version before building")
     parser.add_argument("--no-deploy", action="store_true",
                         help="Don't deploy to runtime directory after build")
+    parser.add_argument("--deploy-only", action="store_true",
+                        help="Skip build/package, just deploy existing dist/ binaries")
     parser.add_argument("--install", action="store_true",
                         help="Install context menu entries for StripHelper + ThumbnailTool (HKCU)")
     parser.add_argument("--uninstall", action="store_true",
@@ -657,6 +673,11 @@ def main():
         return
     if args.uninstall:
         uninstall_context_menu()
+        return
+
+    # Deploy-only mode: just deploy what's already built (no cmake/build)
+    if args.deploy_only:
+        deploy(args)
         return
 
     # Package-only mode: just package what's already built

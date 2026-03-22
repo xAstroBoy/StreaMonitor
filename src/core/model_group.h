@@ -122,9 +122,11 @@ namespace sm
                                    CancellationToken &token);
         void sleepInterruptible(int seconds);
         void updateGroupState();
+        void emitStateChange(); // thread-safe: copies callback+state under lock, invokes outside
 
         std::string groupName_;
         std::vector<GroupPairing> pairings_;
+        const AppConfig *lastConfig_ = nullptr; // remembered for restart after pairing changes
 
         std::unique_ptr<std::jthread> thread_;
         std::atomic<bool> running_{false};

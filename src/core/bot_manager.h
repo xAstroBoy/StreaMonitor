@@ -59,6 +59,9 @@ namespace sm
         bool addBot(const std::string &username, const std::string &site,
                     bool autoStart = true);
         bool removeBot(const std::string &username, const std::string &site = "");
+        // Deferred removal: posts removeBot on a tracked background thread.
+        // Safe to call from a bot's own thread (avoids self-join deadlock).
+        void deferRemoveBot(const std::string &username, const std::string &site = "");
         bool startBot(const std::string &username, const std::string &site = "");
         bool stopBot(const std::string &username, const std::string &site = "");
         bool restartBot(const std::string &username, const std::string &site = "");
@@ -154,12 +157,13 @@ namespace sm
     private:
         struct BotEntry
         {
-            std::unique_ptr<SitePlugin> plugin;
+            std::shared_ptr<SitePlugin> plugin;
             bool autoStart = true;
         };
 
         SitePlugin *findBot(const std::string &username, const std::string &site = "");
         const SitePlugin *findBot(const std::string &username, const std::string &site = "") const;
+        std::shared_ptr<SitePlugin> findBotShared(const std::string &username, const std::string &site = "");
         void emitEvent(ManagerEvent::Type type, const std::string &botId,
                        const std::string &msg = "");
 

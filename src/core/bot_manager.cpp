@@ -131,19 +131,31 @@ namespace sm
 
     void BotManager::stopAll()
     {
-        std::lock_guard lock(mutex_);
-        for (auto &entry : bots_)
+        // Collect shared_ptrs under lock, then stop OUTSIDE lock
+        // to avoid deadlock if threads try to acquire mutex_ during join
+        std::vector<std::shared_ptr<SitePlugin>> toStop;
         {
-            if (entry.plugin->isRunning())
-                entry.plugin->stop();
+            std::lock_guard lock(mutex_);
+            for (auto &entry : bots_)
+            {
+                if (entry.plugin->isRunning())
+                    toStop.push_back(entry.plugin);
+            }
         }
-        // Persist running=false for all bots
-        for (const auto &entry : bots_)
+        for (auto &bot : toStop)
+            bot->stop();
+        toStop.clear();
+
         {
-            auto state = entry.plugin->getState();
-            configStore_.updateRunning(state.username, state.siteSlug, false);
+            std::lock_guard lock(mutex_);
+            // Persist running=false for all bots
+            for (const auto &entry : bots_)
+            {
+                auto state = entry.plugin->getState();
+                configStore_.updateRunning(state.username, state.siteSlug, false);
+            }
+            configStore_.save();
         }
-        configStore_.save();
         spdlog::info("Stopped all bots");
     }
 
@@ -167,11 +179,20 @@ namespace sm
         }
         // Give recording threads time to write trailers
         std::this_thread::sleep_for(std::chrono::seconds(4));
+
+        // Move bots/groups out under lock, destroy OUTSIDE the lock
+        // so ~SitePlugin/~ModelGroup thread joins don't deadlock
+        std::vector<BotEntry> botsToDestroy;
+        std::vector<std::unique_ptr<ModelGroup>> groupsToDestroy;
         {
             std::lock_guard lock(mutex_);
+            botsToDestroy = std::move(bots_);
+            groupsToDestroy = std::move(groups_);
+            bots_.clear();
             groups_.clear();
-            bots_.clear(); // destructors join threads
         }
+        groupsToDestroy.clear(); // join group threads outside lock
+        botsToDestroy.clear();   // join bot threads outside lock
         spdlog::info("Bot manager shut down");
     }
 
@@ -234,28 +255,68 @@ namespace sm
 
     bool BotManager::removeBot(const std::string &username, const std::string &site)
     {
-        std::lock_guard lock(mutex_);
+        std::shared_ptr<SitePlugin> pluginToDestroy; // destroy OUTSIDE the lock
+        std::string slug;
 
-        auto it = std::find_if(bots_.begin(), bots_.end(),
-                               [&](const BotEntry &e)
-                               {
-                                   return e.plugin->username() == username &&
-                                          (site.empty() || e.plugin->siteName() == site ||
-                                           e.plugin->siteSlug() == site);
-                               });
+        {
+            std::lock_guard lock(mutex_);
 
-        if (it == bots_.end())
-            return false;
+            auto it = std::find_if(bots_.begin(), bots_.end(),
+                                   [&](const BotEntry &e)
+                                   {
+                                       return e.plugin->username() == username &&
+                                              (site.empty() || e.plugin->siteName() == site ||
+                                               e.plugin->siteSlug() == site);
+                                   });
 
-        it->plugin->requestQuit();
-        std::string slug = it->plugin->siteSlug();
-        bots_.erase(it);
+            if (it == bots_.end())
+                return false;
 
-        configStore_.remove(username, site);
-        configStore_.save();
+            it->plugin->requestQuit();
+            slug = it->plugin->siteSlug();
+            pluginToDestroy = std::move(it->plugin); // take ownership
+            bots_.erase(it);
+
+            configStore_.remove(username, site);
+            configStore_.save();
+        }
+        // ~SitePlugin (thread join) happens here, OUTSIDE the lock
+        pluginToDestroy.reset();
 
         emitEvent(ManagerEvent::BotRemoved, username + "_" + slug, username);
         return true;
+    }
+
+    void BotManager::deferRemoveBot(const std::string &username, const std::string &site)
+    {
+        // Post removal on a tracked background thread.
+        // This is safe to call from the bot's own thread — the actual
+        // removeBot() (which joins the bot thread) runs on a separate thread,
+        // so no self-join deadlock occurs.  (Fixes issue #48)
+        std::string u = username;
+        std::string s = site;
+        std::lock_guard rlock(restartMutex_);
+        // Clean up finished threads
+        restartThreads_.erase(
+            std::remove_if(restartThreads_.begin(), restartThreads_.end(),
+                           [](std::thread &t)
+                           { return !t.joinable(); }),
+            restartThreads_.end());
+        restartThreads_.emplace_back([this, u, s]()
+                                     {
+            try {
+                // Brief delay to let the calling thread exit its main loop
+                for (int i = 0; i < 20; ++i) {
+                    if (isShutdown_.load()) return;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                if (isShutdown_.load()) return;
+                removeBot(u, s);
+            } catch (const std::exception &e) {
+                spdlog::error("deferRemoveBot({}, {}) exception: {}", u, s, e.what());
+            } catch (...) {
+                spdlog::error("deferRemoveBot({}, {}) unknown exception", u, s);
+            } });
     }
 
     bool BotManager::startBot(const std::string &username, const std::string &site)
@@ -280,17 +341,28 @@ namespace sm
 
     bool BotManager::stopBot(const std::string &username, const std::string &site)
     {
-        std::lock_guard lock(mutex_);
-        auto *bot = findBot(username, site);
-        if (!bot || !bot->isRunning())
-            return false;
-        bot->stop();
+        std::shared_ptr<SitePlugin> botRef;
+        std::string slug;
 
-        // Persist stopped state so bot does NOT auto-start on next launch
-        std::string slug = bot->siteSlug();
-        configStore_.updateRunning(username, slug, false);
-        configStore_.updateStatus(username, slug, bot->getState().status, false);
-        configStore_.save();
+        {
+            std::lock_guard lock(mutex_);
+            auto *bot = findBot(username, site);
+            if (!bot || !bot->isRunning())
+                return false;
+            slug = bot->siteSlug();
+            botRef = findBotShared(username, site);
+        }
+        // stop() joins the thread — do it OUTSIDE the lock to avoid deadlock
+        // if the thread is in autoRemoveModel() trying to acquire mutex_
+        botRef->stop();
+
+        {
+            std::lock_guard lock(mutex_);
+            // Persist stopped state so bot does NOT auto-start on next launch
+            configStore_.updateRunning(username, slug, false);
+            configStore_.updateStatus(username, slug, botRef->getState().status, false);
+            configStore_.save();
+        }
 
         return true;
     }
@@ -298,96 +370,104 @@ namespace sm
     bool BotManager::editBot(const std::string &oldUsername, const std::string &oldSite,
                              const std::string &newUsername, const std::string &newSite)
     {
-        std::lock_guard lock(mutex_);
+        std::shared_ptr<SitePlugin> oldPluginToDestroy; // destroy OUTSIDE the lock
 
-        // Find existing bot
-        auto it = std::find_if(bots_.begin(), bots_.end(),
-                               [&](const BotEntry &e)
-                               {
-                                   return e.plugin->username() == oldUsername &&
-                                          (oldSite.empty() || e.plugin->siteName() == oldSite ||
-                                           e.plugin->siteSlug() == oldSite);
-                               });
-        if (it == bots_.end())
-            return false;
-
-        bool wasRunning = it->plugin->isRunning();
-        std::string oldSlug = it->plugin->siteSlug();
-
-        // If site changed, we need to recreate the plugin entirely
-        bool siteChanged = !newSite.empty() && newSite != it->plugin->siteName() && newSite != it->plugin->siteSlug();
-        bool usernameChanged = !newUsername.empty() && newUsername != oldUsername;
-
-        if (siteChanged)
         {
-            // Stop old bot
-            if (wasRunning)
-                it->plugin->requestQuit();
+            std::lock_guard lock(mutex_);
 
-            // Remove old config entry
-            configStore_.remove(oldUsername, oldSlug);
-
-            // Erase old bot
-            bots_.erase(it);
-
-            // Create new bot with new site
-            std::string finalUser = usernameChanged ? newUsername : oldUsername;
-            auto plugin = SiteRegistry::instance().create(newSite, finalUser);
-            if (!plugin)
+            // Find existing bot
+            auto it = std::find_if(bots_.begin(), bots_.end(),
+                                   [&](const BotEntry &e)
+                                   {
+                                       return e.plugin->username() == oldUsername &&
+                                              (oldSite.empty() || e.plugin->siteName() == oldSite ||
+                                               e.plugin->siteSlug() == oldSite);
+                                   });
+            if (it == bots_.end())
                 return false;
 
-            plugin->setStateCallback([this](const BotState &state)
-                                     { emitEvent(ManagerEvent::BotStatusChanged, state.username + "_" + state.siteSlug); });
+            bool wasRunning = it->plugin->isRunning();
+            std::string oldSlug = it->plugin->siteSlug();
 
-            ModelConfig mc;
-            mc.site = newSite;
-            mc.username = finalUser;
-            mc.running = wasRunning;
-            configStore_.add(mc);
-            configStore_.save();
+            // If site changed, we need to recreate the plugin entirely
+            bool siteChanged = !newSite.empty() && newSite != it->plugin->siteName() && newSite != it->plugin->siteSlug();
+            bool usernameChanged = !newUsername.empty() && newUsername != oldUsername;
 
-            BotEntry entry;
-            entry.plugin = std::move(plugin);
-            entry.autoStart = wasRunning;
-            if (wasRunning)
-                entry.plugin->start(config_);
-            bots_.push_back(std::move(entry));
+            if (siteChanged)
+            {
+                // Stop old bot
+                if (wasRunning)
+                    it->plugin->requestQuit();
+
+                // Remove old config entry
+                configStore_.remove(oldUsername, oldSlug);
+
+                // Take old plugin out, erase from vector
+                oldPluginToDestroy = std::move(it->plugin);
+                bots_.erase(it);
+
+                // Create new bot with new site
+                std::string finalUser = usernameChanged ? newUsername : oldUsername;
+                auto plugin = SiteRegistry::instance().create(newSite, finalUser);
+                if (!plugin)
+                    return false;
+
+                plugin->setStateCallback([this](const BotState &state)
+                                         { emitEvent(ManagerEvent::BotStatusChanged, state.username + "_" + state.siteSlug); });
+
+                ModelConfig mc;
+                mc.site = newSite;
+                mc.username = finalUser;
+                mc.running = wasRunning;
+                configStore_.add(mc);
+                configStore_.save();
+
+                BotEntry entry;
+                entry.plugin = std::move(plugin);
+                entry.autoStart = wasRunning;
+                if (wasRunning)
+                    entry.plugin->start(config_);
+                bots_.push_back(std::move(entry));
+            }
+            else if (usernameChanged)
+            {
+                // Same site, just update username
+                if (wasRunning)
+                    it->plugin->requestQuit();
+
+                configStore_.remove(oldUsername, oldSlug);
+
+                // Create new plugin with new username (simpler than trying to rename in-place)
+                auto plugin = SiteRegistry::instance().create(it->plugin->siteName(), newUsername);
+                if (!plugin)
+                    return false;
+
+                plugin->setStateCallback([this](const BotState &state)
+                                         { emitEvent(ManagerEvent::BotStatusChanged, state.username + "_" + state.siteSlug); });
+
+                ModelConfig mc;
+                mc.site = plugin->siteName();
+                mc.username = newUsername;
+                mc.running = wasRunning;
+                configStore_.add(mc);
+                configStore_.save();
+
+                BotEntry newEntry;
+                newEntry.plugin = std::move(plugin);
+                newEntry.autoStart = wasRunning;
+                if (wasRunning)
+                    newEntry.plugin->start(config_);
+
+                oldPluginToDestroy = std::move(it->plugin);
+                *it = std::move(newEntry);
+            }
+            else
+            {
+                return false; // Nothing changed
+            }
         }
-        else if (usernameChanged)
-        {
-            // Same site, just update username
-            if (wasRunning)
-                it->plugin->stop();
-
-            configStore_.remove(oldUsername, oldSlug);
-
-            // Create new plugin with new username (simpler than trying to rename in-place)
-            auto plugin = SiteRegistry::instance().create(it->plugin->siteName(), newUsername);
-            if (!plugin)
-                return false;
-
-            plugin->setStateCallback([this](const BotState &state)
-                                     { emitEvent(ManagerEvent::BotStatusChanged, state.username + "_" + state.siteSlug); });
-
-            ModelConfig mc;
-            mc.site = plugin->siteName();
-            mc.username = newUsername;
-            mc.running = wasRunning;
-            configStore_.add(mc);
-            configStore_.save();
-
-            BotEntry newEntry;
-            newEntry.plugin = std::move(plugin);
-            newEntry.autoStart = wasRunning;
-            if (wasRunning)
-                newEntry.plugin->start(config_);
-
-            *it = std::move(newEntry);
-        }
-        else
-        {
-            return false; // Nothing changed
-        }
+        // ~SitePlugin (thread join) happens here, OUTSIDE the lock
+        oldPluginToDestroy.reset();
 
         emitEvent(ManagerEvent::BotStatusChanged, newUsername + "_" + SiteRegistry::instance().nameToSlug(newSite.empty() ? oldSite : newSite));
         return true;
@@ -1464,11 +1544,11 @@ namespace sm
     bool BotManager::waitForPreview(const std::string &username, const std::string &site,
                                     PreviewFrame &out, uint64_t &lastVersion, int timeoutMs)
     {
-        // Find the bot under lock, then release lock before waiting
-        SitePlugin *bot = nullptr;
+        // Hold a shared_ptr so the bot can't be destroyed while we wait
+        std::shared_ptr<SitePlugin> bot;
         {
             std::lock_guard lock(mutex_);
-            bot = findBot(username, site);
+            bot = findBotShared(username, site);
         }
         if (!bot)
             return false;
@@ -1519,6 +1599,19 @@ namespace sm
                 (site.empty() || entry.plugin->siteName() == site ||
                  entry.plugin->siteSlug() == site))
                 return entry.plugin.get();
+        }
+        return nullptr;
+    }
+
+    std::shared_ptr<SitePlugin> BotManager::findBotShared(const std::string &username,
+                                                          const std::string &site)
+    {
+        for (auto &entry : bots_)
+        {
+            if (entry.plugin->username() == username &&
+                (site.empty() || entry.plugin->siteName() == site ||
+                 entry.plugin->siteSlug() == site))
+                return entry.plugin;
         }
         return nullptr;
     }

@@ -218,16 +218,18 @@ namespace sm
         thread_.reset();
 
         StateChangeCallback cb;
+        BotState stateCopy;
         {
             std::lock_guard lock(stateMutex_);
             state_.running = false;
             state_.status = Status::NotRunning;
             state_.recording = false;
             cb = stateCallback_; // copy under lock
+            stateCopy = state_;
         }
 
         if (cb)
-            cb(state_);
+            cb(stateCopy);
         logger_->info("Stopped monitoring");
     }
 
@@ -269,25 +271,40 @@ namespace sm
 
     void SitePlugin::setState(Status status)
     {
-        std::lock_guard lock(stateMutex_);
-        bool statusChanged = (state_.status != status);
-        state_.prevStatus = state_.status;
-        state_.status = status;
-        // Only update lastStatusChange when status actually changes
-        if (statusChanged)
-            state_.lastStatusChange = Clock::now();
-        // Preview comes from the actual stream (captured by HLS recorder).
-        // We no longer use site API preview URLs.
-        if (statusChanged && stateCallback_)
-            stateCallback_(state_);
+        StateChangeCallback cb;
+        BotState stateCopy;
+        {
+            std::lock_guard lock(stateMutex_);
+            bool statusChanged = (state_.status != status);
+            state_.prevStatus = state_.status;
+            state_.status = status;
+            // Only update lastStatusChange when status actually changes
+            if (statusChanged)
+                state_.lastStatusChange = Clock::now();
+            // Preview comes from the actual stream (captured by HLS recorder).
+            // We no longer use site API preview URLs.
+            if (statusChanged)
+            {
+                cb = stateCallback_;
+                stateCopy = state_;
+            }
+        }
+        if (cb)
+            cb(stateCopy);
     }
 
     void SitePlugin::setRecording(bool rec)
     {
-        std::lock_guard lock(stateMutex_);
-        state_.recording = rec;
-        if (stateCallback_)
-            stateCallback_(state_);
+        StateChangeCallback cb;
+        BotState stateCopy;
+        {
+            std::lock_guard lock(stateMutex_);
+            state_.recording = rec;
+            cb = stateCallback_;
+            stateCopy = state_;
+        }
+        if (cb)
+            cb(stateCopy);
     }
 
     void SitePlugin::setMobile(bool mobile)
@@ -1023,8 +1040,12 @@ namespace sm
         if (manager_)
         {
             logger_->warn("Auto-removing {} model [{} ] {}", reason, siteSlug_, username_);
-            manager_->removeBot(username_, siteName_);
-            logger_->info("Successfully auto-removed {} model", reason);
+            // Use deferred removal — calling removeBot() from the bot's own
+            // thread would destroy `this` and self-join, causing a deadlock/crash.
+            // deferRemoveBot() posts the removal on a tracked background thread
+            // that runs after this thread has exited. (Fixes issue #48)
+            manager_->deferRemoveBot(username_, siteName_);
+            logger_->info("Queued deferred auto-removal of {} model", reason);
         }
         else
         {
@@ -1228,14 +1249,18 @@ namespace sm
             }
 
             // Cleanup
+            StateChangeCallback exitCb;
+            BotState exitState;
             {
                 std::lock_guard lock(stateMutex_);
                 state_.running = false;
                 state_.recording = false;
                 state_.status = Status::NotRunning;
+                exitCb = stateCallback_;
+                exitState = state_;
             }
-            if (stateCallback_)
-                stateCallback_(state_);
+            if (exitCb)
+                exitCb(exitState);
             logger_->info("Thread exiting for {}", username_);
         }
         catch (const std::exception &e)

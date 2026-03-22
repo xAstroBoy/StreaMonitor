@@ -36,6 +36,12 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     bool ModelGroup::addPairing(const std::string &site, const std::string &username)
     {
+        // If the cycling thread is running, stop it first so we don't
+        // mutate pairings_ while the thread is iterating. (Fixes #48)
+        bool wasRunning = running_.load();
+        if (wasRunning)
+            stop();
+
         // Don't add dupes
         for (const auto &p : pairings_)
         {
@@ -59,11 +65,22 @@ namespace sm
 
         updateGroupState();
         spdlog::info("[Group:{}] Added pairing: {} [{}]", groupName_, username, site);
+
+        // Restart cycling if it was running before
+        if (wasRunning && lastConfig_)
+            start(*lastConfig_);
+
         return true;
     }
 
     bool ModelGroup::removePairing(const std::string &site, const std::string &username)
     {
+        // If the cycling thread is running, stop it first so we don't
+        // mutate pairings_ while the thread is iterating. (Fixes #48)
+        bool wasRunning = running_.load();
+        if (wasRunning)
+            stop();
+
         auto it = std::find_if(pairings_.begin(), pairings_.end(),
                                [&](const GroupPairing &p)
                                {
@@ -77,11 +94,21 @@ namespace sm
 
         pairings_.erase(it);
         updateGroupState();
+
+        // Restart cycling if it was running before and pairings remain
+        if (wasRunning && lastConfig_ && !pairings_.empty())
+            start(*lastConfig_);
+
         return true;
     }
 
     bool ModelGroup::setPrimaryPairing(size_t index)
     {
+        // If the cycling thread is running, stop it first so we don't
+        // mutate pairings_ while the thread is iterating. (Fixes #48)
+        bool wasRunning = running_.load();
+        if (wasRunning)
+            stop();
         if (index == 0 || index >= pairings_.size())
             return false;
         auto pairing = std::move(pairings_[index]);
@@ -90,6 +117,11 @@ namespace sm
         updateGroupState();
         spdlog::info("[Group:{}] Set primary: {} [{}]", groupName_,
                      pairings_[0].username, pairings_[0].site);
+
+        // Restart cycling if it was running before
+        if (wasRunning && lastConfig_)
+            start(*lastConfig_);
+
         return true;
     }
 
@@ -100,6 +132,7 @@ namespace sm
     {
         if (running_.load())
             return;
+
         if (pairings_.empty())
         {
             spdlog::warn("[Group:{}] No pairings, nothing to start", groupName_);
@@ -109,6 +142,8 @@ namespace sm
         // Configure all plugins (HTTP setup, no thread)
         for (auto &p : pairings_)
             p.plugin->configure(config);
+
+        lastConfig_ = &config; // remember for restart after pairing changes
 
         running_.store(true);
         quitting_.store(false);
@@ -131,6 +166,16 @@ namespace sm
         cancelToken_.cancel();
         sleepCv_.notify_all(); // Instant wake from sleepInterruptible
 
+        // Wait for the cycling thread to fully finish before touching state.
+        // Without this, the thread continues accessing pairings_/state_ after
+        // stop() returns, causing use-after-free on destruction. (Fixes #48)
+        if (thread_ && thread_->joinable())
+        {
+            thread_->request_stop();
+            thread_->join();
+        }
+        thread_.reset();
+
         {
             std::lock_guard lock(stateMutex_);
             state_.running = false;
@@ -139,8 +184,7 @@ namespace sm
             state_.activePairingIdx = -1;
         }
 
-        if (stateCallback_)
-            stateCallback_(state_);
+        emitStateChange();
 
         spdlog::info("[Group:{}] Stopped", groupName_);
     }
@@ -197,6 +241,19 @@ namespace sm
             ps.mobile = p.lastMobile;
             state_.pairings.push_back(std::move(ps));
         }
+    }
+
+    void ModelGroup::emitStateChange()
+    {
+        GroupStateCallback cb;
+        ModelGroupState stateCopy;
+        {
+            std::lock_guard lock(stateMutex_);
+            cb = stateCallback_;
+            stateCopy = state_;
+        }
+        if (cb)
+            cb(stateCopy);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -264,8 +321,7 @@ namespace sm
                             state_.pairings[i].mobile = pairing.lastMobile;
                         }
                     }
-                    if (stateCallback_)
-                        stateCallback_(state_);
+                    emitStateChange();
 
                     spdlog::debug("[Group:{}] {} [{}] → {}",
                                   groupName_, pairing.username, pairing.site,
@@ -354,8 +410,7 @@ namespace sm
                             std::lock_guard lock(stateMutex_);
                             state_.recording = true;
                         }
-                        if (stateCallback_)
-                            stateCallback_(state_);
+                        emitStateChange();
 
                         // Download from this pairing (blocks until stream ends or error)
                         downloadFrom(pairing, config);
@@ -364,8 +419,7 @@ namespace sm
                             std::lock_guard lock(stateMutex_);
                             state_.recording = false;
                         }
-                        if (stateCallback_)
-                            stateCallback_(state_);
+                        emitStateChange();
 
                         // ── Mobile→PC transition ────────────────────────
                         // After download ends, re-check mobile status. If the
@@ -441,8 +495,7 @@ namespace sm
                         state_.activePairingIdx = -1;
                         state_.activeStatus = Status::Offline;
                     }
-                    if (stateCallback_)
-                        stateCallback_(state_);
+                    emitStateChange();
 
                     spdlog::debug("[Group:{}] All pairings offline, sleeping {}s",
                                   groupName_, sleepAllOffline_);
@@ -458,8 +511,7 @@ namespace sm
                 state_.activeStatus = Status::NotRunning;
                 state_.activePairingIdx = -1;
             }
-            if (stateCallback_)
-                stateCallback_(state_);
+            emitStateChange();
 
             spdlog::info("[Group:{}] Cycling thread exiting", groupName_);
         }
