@@ -196,6 +196,22 @@ def configure(args, vcpkg: Path | None):
         # Use static-md for static deps with dynamic CRT (more compatible)
         cmake_args.append("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL")
 
+    # ── sccache: auto-detect and use if available ──
+    # Massively speeds up CI rebuilds by caching compiled .obj files.
+    # When active, force /Z7 (embedded debug info) instead of /Zi (shared PDB)
+    # to avoid fatal error C1041 (parallel cl.exe PDB contention).
+    sccache = shutil.which("sccache")
+    if sccache:
+        print(f"[+] sccache detected: {sccache}")
+        cmake_args.append(f"-DCMAKE_C_COMPILER_LAUNCHER={sccache}")
+        cmake_args.append(f"-DCMAKE_CXX_COMPILER_LAUNCHER={sccache}")
+        if IS_WINDOWS:
+            # /Z7 embeds debug info in each .obj — no shared .pdb file contention
+            cmake_args.append("-DCMAKE_C_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Z7")
+            cmake_args.append("-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Z7")
+            cmake_args.append("-DCMAKE_C_FLAGS_DEBUG=/Od /Z7 /RTC1")
+            cmake_args.append("-DCMAKE_CXX_FLAGS_DEBUG=/Od /Z7 /RTC1")
+
     run(cmake_args)
 
 

@@ -65,24 +65,8 @@ jobs:
         with:
           arch: x64
 
-      - name: Configure (Ninja + sccache)
-        run: |
-          cmake -S . -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DSM_STATIC_LINK=ON `
-            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
-            -DVCPKG_HOST_TRIPLET=x64-windows-static-md `
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL" `
-            "-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded" `
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-
-      - name: Build
-        run: cmake --build build --parallel $env:NUMBER_OF_PROCESSORS
-
-      - name: Package
-        run: python build.py --package-only --no-deploy
+      - name: Build & Package
+        run: python build.py --no-deploy
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -126,20 +110,8 @@ jobs:
             libxkbcommon-dev libwayland-dev \
             libnghttp2-dev
 
-      - name: Configure
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DSM_USE_SYSTEM_LIBS=ON \
-            -DSM_USE_SYSTEM_FFMPEG=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-
-      - name: Build
-        run: cmake --build build --parallel $(nproc)
-
-      - name: Package
-        run: python3 build.py --package-only --system-libs --no-deploy
+      - name: Build & Package
+        run: python3 build.py --system-libs --no-deploy
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
