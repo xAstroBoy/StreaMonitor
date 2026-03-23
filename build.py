@@ -205,12 +205,8 @@ def configure(args, vcpkg: Path | None):
         print(f"[+] sccache detected: {sccache}")
         cmake_args.append(f"-DCMAKE_C_COMPILER_LAUNCHER={sccache}")
         cmake_args.append(f"-DCMAKE_CXX_COMPILER_LAUNCHER={sccache}")
-        if IS_WINDOWS:
-            # /Z7 embeds debug info in each .obj — no shared .pdb file contention
-            cmake_args.append("-DCMAKE_C_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Z7")
-            cmake_args.append("-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Z7")
-            cmake_args.append("-DCMAKE_C_FLAGS_DEBUG=/Od /Z7 /RTC1")
-            cmake_args.append("-DCMAKE_CXX_FLAGS_DEBUG=/Od /Z7 /RTC1")
+        # CMakeLists.txt detects sccache and switches from /Zi to /Z7
+        # to avoid fatal error C1041 (parallel PDB contention)
 
     run(cmake_args)
 

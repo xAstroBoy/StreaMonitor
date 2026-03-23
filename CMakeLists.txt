@@ -10,8 +10,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # This enables meaningful stack traces in crash reports.
 # ──────────────────────────────────────────────
 if(MSVC)
-    # /Zi  = full PDB,  /Zo = enhanced optimized debug info
-    add_compile_options(/Zi /Zo)
+    if(CMAKE_C_COMPILER_LAUNCHER MATCHES "sccache")
+        # /Z7 = embed debug info in .obj (no shared PDB file)
+        # Avoids fatal error C1041 when sccache runs parallel cl.exe
+        add_compile_options(/Z7 /Zo)
+    else()
+        # /Zi = full PDB,  /Zo = enhanced optimized debug info
+        add_compile_options(/Zi /Zo)
+    endif()
     # Emit PDB alongside the .exe (not just the .obj PDB)
     add_link_options(/DEBUG /OPT:REF /OPT:ICF)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
