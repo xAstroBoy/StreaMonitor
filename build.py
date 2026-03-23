@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-StreaMonitor C++ — Cross-Platform Build & Package Script
-=========================================================
+StreaMonitor C++ — Cross-Platform Build & Package Script  (Ninja)
+==================================================================
+Requires: CMake, Ninja, MSVC (Windows) or GCC/Clang (Linux/macOS).
+On Windows, run from a Developer Command Prompt so cl.exe is in PATH.
+
 Usage:
     python build.py                  # Build static single exe (Release)
     python build.py --debug          # Build in Debug mode
@@ -11,8 +14,6 @@ Usage:
     python build.py --system-libs    # Use system libraries (Linux)
     python build.py --package-only   # Skip build, just package existing binaries
     python build.py --dist-dir DIR   # Override output directory (default: ./dist)
-
-Supports: Windows, Linux, macOS
 
 Default: Static linking produces single portable executables.
 """
@@ -153,12 +154,29 @@ def configure(args, vcpkg: Path | None):
     triplet = get_triplet(args)
     config = "Debug" if args.debug else "Release"
 
+    # ── Require Ninja ──
+    if not shutil.which("ninja"):
+        print("[X] Ninja not found!  Install it:")
+        print("      pip install ninja          (easiest)")
+        print("      choco install ninja         (Windows)")
+        print("      apt install ninja-build     (Linux)")
+        print("      brew install ninja          (macOS)")
+        sys.exit(1)
+    if IS_WINDOWS and not shutil.which("cl"):
+        print("[X] MSVC cl.exe not in PATH!")
+        print("    Run build.py from a Developer Command Prompt / PowerShell")
+        print("    or use: vsdevcmd.bat / vcvarsall.bat x64")
+        sys.exit(1)
+
     cmake_args = [
         "cmake",
+        "-G", "Ninja",
         "-S", str(ROOT),
         "-B", str(BUILD_DIR),
+        f"-DCMAKE_BUILD_TYPE={config}",
     ]
-    
+    print(f"[+] Ninja {config} build")
+
     # vcpkg integration (optional on Linux with system libs)
     if vcpkg and not args.system_libs:
         cmake_args.extend([
@@ -176,39 +194,21 @@ def configure(args, vcpkg: Path | None):
         cmake_args.append(f"-DVCPKG_HOST_TRIPLET={triplet}")
         cmake_args.append("-DSM_STATIC_LINK=ON")
         # Use static-md for static deps with dynamic CRT (more compatible)
-        cmake_args.append("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-    
-    # Use Ninja if available for faster builds (much faster than MSBuild/Make)
-    # On Windows, only use Ninja if running from Developer Command Prompt (has cl.exe)
-    use_ninja = False
-    if shutil.which("ninja"):
-        if IS_WINDOWS:
-            # Check if cl.exe is in PATH (Developer Command Prompt)
-            if shutil.which("cl"):
-                use_ninja = True
-                print(f"[+] Using Ninja generator for faster builds")
-        else:
-            use_ninja = True
-            print(f"[+] Using Ninja generator for faster builds")
-    
-    if use_ninja:
-        cmake_args.extend(["-G", "Ninja"])
+        cmake_args.append("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL")
 
     run(cmake_args)
 
 
 def build(args):
-    config = "Debug" if args.debug else "Release"
     cpus = os.cpu_count() or 4
 
     # Build web dashboard if source is newer than output
     build_web_dashboard()
 
-    print(f"\n[+] Building with {cpus} parallel jobs...")
+    print(f"\n[+] Building with Ninja ({cpus} parallel jobs)...")
 
     run([
         "cmake", "--build", str(BUILD_DIR),
-        "--config", config,
         "--parallel", str(cpus),
     ])
 
@@ -261,10 +261,8 @@ def package(args):
     config = "Debug" if args.debug else "Release"
     dist = Path(args.dist_dir) if args.dist_dir else DIST_DIR
     
-    # Build output location varies by generator
-    src = BUILD_DIR / config  # MSVC multi-config
-    if not src.exists():
-        src = BUILD_DIR  # Ninja/Make single-config
+    # Ninja single-config: output directly in BUILD_DIR
+    src = BUILD_DIR
     
     if not src.exists():
         print(f"[X] Build output not found: {src}")
@@ -297,15 +295,11 @@ def package(args):
         f"Sorter{exe_ext}",
     ]
 
-    # Search locations: build/Release (MSVC), build/ (Ninja), tool subdirs
+    # Search locations: Ninja puts everything in build/ and tools subdirs
     search_dirs = [
         src,
-        BUILD_DIR,
-        BUILD_DIR / "tools" / "StripHelper" / "Release",
         BUILD_DIR / "tools" / "StripHelper",
-        BUILD_DIR / "tools" / "ThumbnailTool" / "Release",
         BUILD_DIR / "tools" / "ThumbnailTool",
-        BUILD_DIR / "tools" / "Sorter" / "Release",
         BUILD_DIR / "tools" / "Sorter",
     ]
 

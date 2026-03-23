@@ -4,6 +4,7 @@
 // ─────────────────────────────────────────────────────────────────
 
 #include "utils/thumbnail_generator.h"
+#include "utils/mkv_edit.h"
 #include <vector>
 #include <string>
 #include <cmath>
@@ -27,8 +28,6 @@ extern "C"
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libavutil/hwcontext.h>
-#include <libavutil/stereo3d.h>
-#include <libavutil/spherical.h>
 }
 
 namespace sm
@@ -1165,318 +1164,9 @@ namespace sm
         }
 
         // ── Native MKV metadata edit engine ─────────────────────────────
-        // Replaces ALL mkvpropedit subprocess calls with a single
-        // stream-copy remux that applies metadata/attachment/VR changes.
-        // No external tool needed.
-        struct MkvEditOpts
-        {
-            std::string coverJpegPath;    // if non-empty, add/replace cover art
-            bool setVR180SBS = false;     // inject VR 180° SBS spatial metadata
-            bool writeProcessedTag = false; // set THUMBNAILED=done global tag
-            bool fixCoverMeta = false;    // update existing cover attachment metadata
-        };
-
-        static bool nativeRemuxWithEdits(
-            const std::string &mkvPath,
-            const MkvEditOpts &opts,
-            std::function<void(const std::string &)> logCb)
-        {
-            namespace fs = std::filesystem;
-            auto log = [&](const std::string &msg)
-            { if (logCb) logCb(msg); };
-
-            if (!fs::exists(mkvPath))
-            {
-                log("mkvedit: file not found: " + mkvPath);
-                return false;
-            }
-
-            // Open input
-            AVFormatContext *inCtx = nullptr;
-            if (avformat_open_input(&inCtx, mkvPath.c_str(), nullptr, nullptr) < 0)
-            {
-                log("mkvedit: failed to open input: " + mkvPath);
-                return false;
-            }
-            if (avformat_find_stream_info(inCtx, nullptr) < 0)
-            {
-                avformat_close_input(&inCtx);
-                log("mkvedit: failed to read stream info");
-                return false;
-            }
-
-            // Temp output path
-            auto stem = fs::path(mkvPath).stem().string();
-            auto dir = fs::path(mkvPath).parent_path();
-            std::string tmpPath = (dir / (stem + "~edit.mkv")).string();
-
-            // Create output
-            AVFormatContext *outCtx = nullptr;
-            if (avformat_alloc_output_context2(&outCtx, nullptr, "matroska", tmpPath.c_str()) < 0)
-            {
-                avformat_close_input(&inCtx);
-                log("mkvedit: failed to create output context");
-                return false;
-            }
-
-            // ── Stream mapping ──
-            // Copy all streams; optionally skip existing cover art if replacing
-            bool replacingCover = !opts.coverJpegPath.empty() && fs::exists(opts.coverJpegPath);
-            std::vector<int> streamMap(inCtx->nb_streams, -1);
-            int outIdx = 0;
-            int videoTrackIdx = -1; // first video stream (for VR metadata)
-
-            for (unsigned i = 0; i < inCtx->nb_streams; ++i)
-            {
-                auto *inSt = inCtx->streams[i];
-                auto *par = inSt->codecpar;
-
-                // Skip existing cover art streams when replacing
-                if (replacingCover &&
-                    (inSt->disposition & AV_DISPOSITION_ATTACHED_PIC))
-                {
-                    log("mkvedit: removing old cover art attachment");
-                    continue; // skip — we'll add the new one
-                }
-
-                // Also skip MJPEG/PNG attachment streams (Matroska cover art)
-                if (replacingCover &&
-                    par->codec_type == AVMEDIA_TYPE_VIDEO &&
-                    (par->codec_id == AV_CODEC_ID_MJPEG ||
-                     par->codec_id == AV_CODEC_ID_PNG) &&
-                    par->width > 0 && par->height > 0 &&
-                    (inSt->nb_frames <= 1 || inSt->duration <= 1))
-                {
-                    log("mkvedit: removing old image attachment stream");
-                    continue;
-                }
-
-                AVStream *outSt = avformat_new_stream(outCtx, nullptr);
-                if (!outSt)
-                {
-                    avformat_close_input(&inCtx);
-                    avformat_free_context(outCtx);
-                    return false;
-                }
-                avcodec_parameters_copy(outSt->codecpar, par);
-                outSt->codecpar->codec_tag = 0;
-                outSt->time_base = inSt->time_base;
-                outSt->disposition = inSt->disposition;
-
-                // Copy stream metadata (and fix cover metadata if requested)
-                av_dict_copy(&outSt->metadata, inSt->metadata, 0);
-                if (opts.fixCoverMeta &&
-                    (inSt->disposition & AV_DISPOSITION_ATTACHED_PIC))
-                {
-                    av_dict_set(&outSt->metadata, "filename", "cover.jpg", 0);
-                    av_dict_set(&outSt->metadata, "title", "cover", 0);
-                    av_dict_set(&outSt->metadata, "mimetype", "image/jpeg", 0);
-                }
-
-                // Track first real video stream for VR metadata
-                if (par->codec_type == AVMEDIA_TYPE_VIDEO &&
-                    !(inSt->disposition & AV_DISPOSITION_ATTACHED_PIC) &&
-                    videoTrackIdx < 0)
-                {
-                    videoTrackIdx = outIdx;
-                }
-
-                // Copy attached_pic packet if this is an attachment stream
-                if (inSt->disposition & AV_DISPOSITION_ATTACHED_PIC)
-                {
-                    av_packet_ref(&outSt->attached_pic, &inSt->attached_pic);
-                    outSt->disposition |= AV_DISPOSITION_ATTACHED_PIC;
-                }
-
-                streamMap[i] = outIdx++;
-            }
-
-            // ── Add new cover art attachment ──
-            int coverStreamIdx = -1;
-            if (replacingCover)
-            {
-                // Read JPEG file
-                std::ifstream jpegFile(opts.coverJpegPath, std::ios::binary);
-                std::vector<uint8_t> jpegData(
-                    (std::istreambuf_iterator<char>(jpegFile)),
-                    std::istreambuf_iterator<char>());
-                jpegFile.close();
-
-                if (!jpegData.empty())
-                {
-                    AVStream *covSt = avformat_new_stream(outCtx, nullptr);
-                    if (covSt)
-                    {
-                        covSt->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
-                        covSt->codecpar->codec_id = AV_CODEC_ID_MJPEG;
-                        // Don't need accurate w/h — muxer reads from JPEG SOF marker
-                        covSt->codecpar->width = 0;
-                        covSt->codecpar->height = 0;
-                        covSt->disposition = AV_DISPOSITION_ATTACHED_PIC;
-
-                        av_dict_set(&covSt->metadata, "filename", "cover.jpg", 0);
-                        av_dict_set(&covSt->metadata, "mimetype", "image/jpeg", 0);
-                        av_dict_set(&covSt->metadata, "title", "cover", 0);
-
-                        // Create attached_pic packet from JPEG data
-                        AVPacket covPkt;
-                        memset(&covPkt, 0, sizeof(covPkt));
-                        av_new_packet(&covPkt, (int)jpegData.size());
-                        memcpy(covPkt.data, jpegData.data(), jpegData.size());
-                        covPkt.stream_index = outIdx;
-                        covPkt.flags = AV_PKT_FLAG_KEY;
-                        av_packet_move_ref(&covSt->attached_pic, &covPkt);
-
-                        coverStreamIdx = outIdx++;
-                        log("mkvedit: adding cover art (" +
-                            std::to_string(jpegData.size()) + " bytes)");
-                    }
-                }
-            }
-
-            // ── VR 180° SBS metadata on video track ──
-            if (opts.setVR180SBS && videoTrackIdx >= 0)
-            {
-                auto *par = outCtx->streams[videoTrackIdx]->codecpar;
-
-                // Stereo3D: side-by-side, left eye first
-                auto *sd = av_packet_side_data_new(
-                    &par->coded_side_data, &par->nb_coded_side_data,
-                    AV_PKT_DATA_STEREO3D, sizeof(AVStereo3D), 0);
-                if (sd)
-                {
-                    auto *stereo = reinterpret_cast<AVStereo3D *>(sd->data);
-                    stereo->type = AV_STEREO3D_SIDEBYSIDE;
-                    stereo->flags = 0; // left eye first (no invert)
-                    stereo->view = AV_STEREO3D_VIEW_PACKED;
-                }
-
-                // Spherical: equirectangular 180° (front hemisphere only)
-                size_t sphSize;
-                AVSphericalMapping *spherical = av_spherical_alloc(&sphSize);
-                if (spherical)
-                {
-                    spherical->projection = AV_SPHERICAL_EQUIRECTANGULAR_TILE;
-                    spherical->yaw = 0;
-                    spherical->pitch = 0;
-                    spherical->roll = 0;
-                    // 0.25 in 0.32 fixed point = 0x40000000 → 90°/360°
-                    spherical->bound_left = 0x40000000;
-                    spherical->bound_right = 0x40000000;
-                    spherical->bound_top = 0;
-                    spherical->bound_bottom = 0;
-                    av_packet_side_data_add(
-                        &par->coded_side_data, &par->nb_coded_side_data,
-                        AV_PKT_DATA_SPHERICAL, spherical, sphSize, 0);
-                }
-                log("mkvedit: set VR 180\xC2\xB0 SBS spatial metadata");
-            }
-
-            // ── Global metadata (copy existing + add new tags) ──
-            av_dict_copy(&outCtx->metadata, inCtx->metadata, 0);
-            if (opts.writeProcessedTag)
-            {
-                av_dict_set(&outCtx->metadata, "THUMBNAILED", "done", 0);
-                log("mkvedit: set THUMBNAILED=done tag");
-            }
-
-            // Open output file
-            if (!(outCtx->oformat->flags & AVFMT_NOFILE))
-            {
-                if (avio_open(&outCtx->pb, tmpPath.c_str(), AVIO_FLAG_WRITE) < 0)
-                {
-                    avformat_close_input(&inCtx);
-                    avformat_free_context(outCtx);
-                    log("mkvedit: failed to open output file");
-                    return false;
-                }
-            }
-
-            // Write header
-            if (avformat_write_header(outCtx, nullptr) < 0)
-            {
-                avformat_close_input(&inCtx);
-                if (outCtx->pb)
-                    avio_closep(&outCtx->pb);
-                avformat_free_context(outCtx);
-                std::error_code ec;
-                fs::remove(tmpPath, ec);
-                log("mkvedit: failed to write header");
-                return false;
-            }
-
-            // ── Copy all packets ──
-            AVPacket *pkt = av_packet_alloc();
-            bool ok = true;
-            while (av_read_frame(inCtx, pkt) >= 0)
-            {
-                int srcIdx = pkt->stream_index;
-                if (srcIdx < 0 || srcIdx >= (int)streamMap.size() || streamMap[srcIdx] < 0)
-                {
-                    av_packet_unref(pkt);
-                    continue;
-                }
-                int dstIdx = streamMap[srcIdx];
-                auto *inSt = inCtx->streams[srcIdx];
-                auto *outSt = outCtx->streams[dstIdx];
-                pkt->stream_index = dstIdx;
-                av_packet_rescale_ts(pkt, inSt->time_base, outSt->time_base);
-                if (av_interleaved_write_frame(outCtx, pkt) < 0)
-                {
-                    av_packet_unref(pkt);
-                    // Non-fatal: some packets may fail on DTS reorder
-                    continue;
-                }
-            }
-            av_packet_free(&pkt);
-
-            ok = (av_write_trailer(outCtx) >= 0);
-            avformat_close_input(&inCtx);
-            if (outCtx->pb)
-                avio_closep(&outCtx->pb);
-            avformat_free_context(outCtx);
-
-            if (!ok)
-            {
-                std::error_code ec;
-                fs::remove(tmpPath, ec);
-                log("mkvedit: write trailer failed");
-                return false;
-            }
-
-            // Verify output before replacing original
-            {
-                std::error_code ec;
-                auto tmpSz = fs::file_size(tmpPath, ec);
-                auto origSz = fs::file_size(mkvPath, ec);
-                // Edited file should be roughly same size (cover art is small)
-                if (tmpSz == 0 || (origSz > 1024 * 1024 && tmpSz < origSz / 4))
-                {
-                    fs::remove(tmpPath, ec);
-                    log("mkvedit: output too small (" +
-                        std::to_string(tmpSz) + " vs " + std::to_string(origSz) + "), aborting");
-                    return false;
-                }
-            }
-
-            // Replace original with edited file
-            std::error_code ec;
-            fs::remove(mkvPath, ec);
-            if (ec)
-            {
-                log("mkvedit: failed to remove original: " + ec.message());
-                fs::remove(tmpPath, ec);
-                return false;
-            }
-            fs::rename(tmpPath, mkvPath, ec);
-            if (ec)
-            {
-                log("mkvedit: failed to rename: " + ec.message());
-                return false;
-            }
-
-            return true;
-        }
+        // All in-place EBML editing moved to mkv_edit.cpp.
+        // nativeRemuxWithEdits() has been removed — metadata changes are
+        // now instant binary patches instead of full-file remux.
 
     } // anonymous namespace
 
@@ -1885,7 +1575,7 @@ namespace sm
     // Kept as stub for any external callers that pass a path.
     // All MKV editing is now done natively via libavformat.
 
-    // ── VR spatial metadata injection (native) ───────────────────────
+    // ── VR spatial metadata injection (in-place EBML edit) ─────────
     bool injectVRSpatialMetadata(
         const std::string &mkvPath,
         std::function<void(const std::string &)> logCb,
@@ -1906,12 +1596,10 @@ namespace sm
             return false;
         }
 
-        MkvEditOpts opts;
-        opts.setVR180SBS = true;
-        return nativeRemuxWithEdits(mkvPath, opts, logCb);
+        return mkv::setVR180SBS(mkvPath, logCb);
     }
 
-    // ── Embed thumbnail + VR metadata (native) ────────────────────────
+    // ── Embed thumbnail + VR metadata (in-place EBML edit) ──────────
     bool embedThumbnailInMKV(
         const std::string &videoPath,
         const std::string &jpegPath,
@@ -1934,29 +1622,35 @@ namespace sm
             return false;
         }
 
-        // Step 2: Build native edit options
-        MkvEditOpts opts;
+        // Step 2: In-place edits
+        bool didSomething = false;
 
         // Cover art
         if (fs::exists(jpegPath))
-            opts.coverJpegPath = jpegPath;
+        {
+            log("thumbnail: embedding cover art in " + mkvPath + " (in-place)...");
+            if (mkv::setCoverArt(mkvPath, jpegPath, logCb))
+                didSomething = true;
+            else
+                log("thumbnail: cover art embedding failed");
+        }
 
         // VR detection
         if (isVRFromPath(videoPath))
         {
-            log("thumbnail: VR content detected, will inject spatial metadata");
-            opts.setVR180SBS = true;
+            log("thumbnail: VR content detected, injecting spatial metadata (in-place)...");
+            if (mkv::setVR180SBS(mkvPath, logCb))
+                didSomething = true;
+            else
+                log("thumbnail: VR metadata injection failed");
         }
 
-        // Only proceed if there's something to do
-        if (opts.coverJpegPath.empty() && !opts.setVR180SBS)
+        if (!didSomething && !fs::exists(jpegPath))
         {
             log("thumbnail: nothing to embed");
-            return true;
         }
 
-        log("thumbnail: embedding cover + metadata in " + mkvPath + " (native)...");
-        return nativeRemuxWithEdits(mkvPath, opts, logCb);
+        return true;
     }
 
     bool fixCoverAttachmentMetadata(
@@ -1978,11 +1672,8 @@ namespace sm
         if (!hasCoverArt(mkvPath))
             return false;
 
-        log("fix-cover: updating attachment metadata in " + mkvPath + " (native)...");
-
-        MkvEditOpts opts;
-        opts.fixCoverMeta = true;
-        return nativeRemuxWithEdits(mkvPath, opts, logCb);
+        log("fix-cover: patching attachment metadata in " + mkvPath + " (in-place)...");
+        return mkv::fixCoverMeta(mkvPath, logCb);
     }
 
     std::string ensureRealMKV(
@@ -2027,16 +1718,14 @@ namespace sm
         if (!fs::exists(mkvPath) || !isRealMatroska(mkvPath))
             return false;
 
-        log("tag: writing THUMBNAILED=done in " + mkvPath + " (native)...");
+        log("tag: writing THUMBNAILED=done in " + mkvPath + " (in-place)...");
 
-        MkvEditOpts opts;
-        opts.writeProcessedTag = true;
-        if (nativeRemuxWithEdits(mkvPath, opts, logCb))
+        if (mkv::writeTag(mkvPath, "THUMBNAILED", "done", logCb))
         {
             log("tag: marked as processed (THUMBNAILED=done)");
             return true;
         }
-        log("tag: native remux failed");
+        log("tag: in-place edit failed");
         return false;
     }
 

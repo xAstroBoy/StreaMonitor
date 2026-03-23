@@ -229,122 +229,127 @@ namespace tt
 
     void App::scanWorker(const std::string &rootStr)
     {
-     try {
-        fs::path root(rootStr);
-
-        int count = 0;
-        int wThumb = 0;
-        int woThumb = 0;
-
-        for (auto &entry : fs::recursive_directory_iterator(root,
-                                                            fs::directory_options::skip_permission_denied))
+        try
         {
-            if (!entry.is_regular_file())
-                continue;
-            if (!isVideoFile(entry.path()))
-                continue;
+            fs::path root(rootStr);
 
-            // Skip temp remux files
-            auto fname = entry.path().stem().string();
-            if (fname.size() > 8 && fname.substr(fname.size() - 8) == "~remuxed")
-                continue;
-            auto fnameExt = entry.path().filename().string();
-            if (fnameExt.find(".remux.mkv") != std::string::npos)
-                continue;
+            int count = 0;
+            int wThumb = 0;
+            int woThumb = 0;
 
-            VideoEntry ve;
-            ve.videoPath = entry.path();
-            ve.thumbPath = thumbPathForVideo(entry.path());
-            ve.relDisplay = fs::relative(entry.path(), root).string();
-            ve.hasThumb = fs::exists(ve.thumbPath);
-
-            // Verify actual container type — don't trust the extension!
-            auto ext = entry.path().extension().string();
-            for (auto &c : ext)
-                c = (char)std::tolower((unsigned char)c);
-            if (ext == ".mkv")
+            for (auto &entry : fs::recursive_directory_iterator(root,
+                                                                fs::directory_options::skip_permission_denied))
             {
-                ve.container = sm::isRealMatroska(entry.path().string())
-                                   ? ContainerType::RealMKV
-                                   : ContainerType::FakeMKV;
-            }
-            else
-            {
-                ve.container = ContainerType::Other;
+                if (!entry.is_regular_file())
+                    continue;
+                if (!isVideoFile(entry.path()))
+                    continue;
+
+                // Skip temp remux files
+                auto fname = entry.path().stem().string();
+                if (fname.size() > 8 && fname.substr(fname.size() - 8) == "~remuxed")
+                    continue;
+                auto fnameExt = entry.path().filename().string();
+                if (fnameExt.find(".remux.mkv") != std::string::npos)
+                    continue;
+
+                VideoEntry ve;
+                ve.videoPath = entry.path();
+                ve.thumbPath = thumbPathForVideo(entry.path());
+                ve.relDisplay = fs::relative(entry.path(), root).string();
+                ve.hasThumb = fs::exists(ve.thumbPath);
+
+                // Verify actual container type — don't trust the extension!
+                auto ext = entry.path().extension().string();
+                for (auto &c : ext)
+                    c = (char)std::tolower((unsigned char)c);
+                if (ext == ".mkv")
+                {
+                    ve.container = sm::isRealMatroska(entry.path().string())
+                                       ? ContainerType::RealMKV
+                                       : ContainerType::FakeMKV;
+                }
+                else
+                {
+                    ve.container = ContainerType::Other;
+                }
+
+                // For Real MKV files, check if cover art is already embedded
+                // This is fast (metadata only) and needed to detect already-processed files
+                if (ve.container == ContainerType::RealMKV)
+                {
+                    ve.hasCoverEmbed = sm::hasCoverArt(entry.path().string());
+                    ve.coverProbed = true;
+                    // Check for the definitive THUMBNAILED metadata tag
+                    ve.hasTag = sm::hasProcessedTag(entry.path().string());
+                }
+                else
+                {
+                    ve.hasCoverEmbed = false;
+                    ve.coverProbed = false;
+                    ve.hasTag = false;
+                }
+
+                // Collect file size (fast — cached in directory entry on Windows)
+                try
+                {
+                    ve.fileSize = (int64_t)entry.file_size();
+                }
+                catch (...)
+                {
+                    ve.fileSize = 0;
+                }
+
+                count++;
+                // Count as "with thumbnail" if the processed tag is present, or sidecar .jpg exists, or cover is embedded
+                if (ve.hasTag || ve.hasThumb || ve.hasCoverEmbed)
+                    wThumb++;
+                else
+                    woThumb++;
+
+                // Push into shared list (GUI reads this for live table updates)
+                {
+                    std::lock_guard lock(videosMutex_);
+                    videos_.push_back(std::move(ve));
+                }
+
+                // Update live progress for the toolbar
+                scanProgress_.store(count);
             }
 
-            // For Real MKV files, check if cover art is already embedded
-            // This is fast (metadata only) and needed to detect already-processed files
-            if (ve.container == ContainerType::RealMKV)
-            {
-                ve.hasCoverEmbed = sm::hasCoverArt(entry.path().string());
-                ve.coverProbed = true;
-                // Check for the definitive THUMBNAILED metadata tag
-                ve.hasTag = sm::hasProcessedTag(entry.path().string());
-            }
-            else
-            {
-                ve.hasCoverEmbed = false;
-                ve.coverProbed = false;
-                ve.hasTag = false;
-            }
-
-            // Collect file size (fast — cached in directory entry on Windows)
-            try
-            {
-                ve.fileSize = (int64_t)entry.file_size();
-            }
-            catch (...)
-            {
-                ve.fileSize = 0;
-            }
-
-            count++;
-            // Count as "with thumbnail" if the processed tag is present, or sidecar .jpg exists, or cover is embedded
-            if (ve.hasTag || ve.hasThumb || ve.hasCoverEmbed)
-                wThumb++;
-            else
-                woThumb++;
-
-            // Push into shared list (GUI reads this for live table updates)
+            // Finalize — sort: MKV first, then by filesize descending (matches work queue order)
             {
                 std::lock_guard lock(videosMutex_);
-                videos_.push_back(std::move(ve));
+                std::sort(videos_.begin(), videos_.end(),
+                          [](const VideoEntry &a, const VideoEntry &b)
+                          {
+                              if (a.container != b.container)
+                                  return (int)a.container < (int)b.container; // MKV first
+                              return a.fileSize > b.fileSize;                 // largest first
+                          });
             }
 
-            // Update live progress for the toolbar
-            scanProgress_.store(count);
-        }
+            // Set counters so render() picks them up
+            totalVideos_ = count;
+            withThumb_ = wThumb;
+            withoutThumb_ = woThumb;
+            scanned_ = true;
+            scanning_.store(false);
 
-        // Finalize — sort: MKV first, then by filesize descending (matches work queue order)
+            addLog("[OK] Found " + std::to_string(count) + " videos (" +
+                   std::to_string(wThumb) + " with thumbnails, " +
+                   std::to_string(woThumb) + " missing)");
+        }
+        catch (const std::exception &e)
         {
-            std::lock_guard lock(videosMutex_);
-            std::sort(videos_.begin(), videos_.end(),
-                      [](const VideoEntry &a, const VideoEntry &b)
-                      {
-                          if (a.container != b.container)
-                              return (int)a.container < (int)b.container; // MKV first
-                          return a.fileSize > b.fileSize;                 // largest first
-                      });
+            addLog("[ERROR] Scan failed: " + std::string(e.what()));
+            scanning_.store(false);
         }
-
-        // Set counters so render() picks them up
-        totalVideos_ = count;
-        withThumb_ = wThumb;
-        withoutThumb_ = woThumb;
-        scanned_ = true;
-        scanning_.store(false);
-
-        addLog("[OK] Found " + std::to_string(count) + " videos (" +
-               std::to_string(wThumb) + " with thumbnails, " +
-               std::to_string(woThumb) + " missing)");
-     } catch (const std::exception &e) {
-        addLog("[ERROR] Scan failed: " + std::string(e.what()));
-        scanning_.store(false);
-     } catch (...) {
-        addLog("[ERROR] Scan failed: unknown error");
-        scanning_.store(false);
-     }
+        catch (...)
+        {
+            addLog("[ERROR] Scan failed: unknown error");
+            scanning_.store(false);
+        }
     }
 
     // ── Generation (multi-threaded) ─────────────────────────────────
@@ -436,411 +441,416 @@ namespace tt
 
     void App::workerFunc(int threadIdx)
     {
-     try { // Top-level exception safety — prevents std::terminate on uncaught throw
-        // Build sorted work queue: MKV first (no remux needed = stable I/O),
-        // then other containers. Within each group, sort by file size DESCENDING
-        // (largest first → better thread utilization, finishes big files early,
-        // avoids the "one huge file left at the end" stall).
-        struct WorkItem
-        {
-            size_t idx;
-            int64_t fileSize;
-            ContainerType container;
-        };
-        std::vector<WorkItem> workItems;
-        {
-            std::lock_guard lock(videosMutex_);
-            for (size_t i = 0; i < videos_.size(); i++)
+        try
+        { // Top-level exception safety — prevents std::terminate on uncaught throw
+            // Build sorted work queue: MKV first (no remux needed = stable I/O),
+            // then other containers. Within each group, sort by file size DESCENDING
+            // (largest first → better thread utilization, finishes big files early,
+            // avoids the "one huge file left at the end" stall).
+            struct WorkItem
             {
-                auto &v = videos_[i];
-                // Skip already processed
-                if (v.processed)
-                    continue;
-                // Skip if has processed tag (unless queued for regen)
-                if (v.hasTag && !v.regenQueued)
-                    continue;
-                workItems.push_back({i, v.fileSize, v.container});
-            }
-        }
-        // Sort: RealMKV first (container=0), then FakeMKV (1), then Other (2).
-        // Within each group, largest files first (descending by size).
-        std::sort(workItems.begin(), workItems.end(),
-                  [](const WorkItem &a, const WorkItem &b)
-                  {
-                      if (a.container != b.container)
-                          return (int)a.container < (int)b.container; // MKV first
-                      return a.fileSize > b.fileSize;                 // largest first
-                  });
-
-        std::vector<size_t> indices;
-        indices.reserve(workItems.size());
-        for (auto &wi : workItems)
-            indices.push_back(wi.idx);
-
-        // Helper to update thread progress
-        auto setProgress = [this, threadIdx](const std::string &file, const std::string &action, const std::string &sub = "", int64_t fsize = 0)
-        {
-            std::lock_guard lock(threadProgress_[threadIdx].mtx);
-            threadProgress_[threadIdx].filePath = file;
-            threadProgress_[threadIdx].action = action;
-            threadProgress_[threadIdx].subAction = sub;
-            if (fsize > 0)
-            {
-                threadProgress_[threadIdx].fileSize = fsize;
-                threadProgress_[threadIdx].startTime = std::chrono::steady_clock::now();
-            }
-        };
-
-        // Mark thread as active
-        threadProgress_[threadIdx].active.store(true);
-
-        // ═══════════════════════════════════════════════════════════════
-        // PIPELINE PER VIDEO:
-        //   1. Not MKV? → Remux to .mkv  (stream copy, fixes ALL playback)
-        //      Fake MKV? → Remux in-place (stream copy, fixes ALL playback)
-        //   2. Is MKV → Timestamps broken? → Remux in-place (fixes playback)
-        //   3. Has thumbnail? → No → Generate contact sheet
-        //   4. Embed cover art in MKV (if not already embedded)
-        //   5. Is VR? → Has fisheye 180° SBS metadata? → No → Inject it!
-        // ═══════════════════════════════════════════════════════════════
-
-        // Helper to check cancel and exit early
-        auto shouldCancel = [this]()
-        { return cancelWork_.load(); };
-
-        // Helper to check if this thread should exit (thread count reduced)
-        auto shouldExitThread = [this, threadIdx]()
-        {
-            return threadIdx >= threadCount.load();
-        };
-
-        while (!shouldCancel())
-        {
-            // Check if thread count was reduced - if so, exit gracefully BETWEEN files
-            if (shouldExitThread())
-            {
-                addLog("[INFO] Thread " + std::to_string(threadIdx + 1) + " exiting (thread count reduced)");
-                break;
-            }
-
-            int myIdx = nextIdx_.fetch_add(1);
-            if (myIdx >= (int)indices.size())
-                break;
-
-            // Read settings FRESH for each file (allows live config changes)
-            sm::ThumbnailConfig tc;
-            tc.width = thumbnailWidth.load();
-            tc.columns = thumbnailColumns.load();
-            tc.rows = thumbnailRows.load();
-            bool doEmbed = embedInVideo.load();
-
-            size_t idx = indices[myIdx];
-            std::string videoStr, thumbStr, origVideoStr;
-            int64_t fsize = 0;
-            bool alreadyHasJpg = false;
-            ContainerType origContainer;
+                size_t idx;
+                int64_t fileSize;
+                ContainerType container;
+            };
+            std::vector<WorkItem> workItems;
             {
                 std::lock_guard lock(videosMutex_);
-                videoStr = videos_[idx].videoPath.string();
-                thumbStr = videos_[idx].thumbPath.string();
-                alreadyHasJpg = videos_[idx].hasThumb;
-                fsize = videos_[idx].fileSize;
-                origContainer = videos_[idx].container;
-            }
-            origVideoStr = videoStr; // keep original path for VR folder detection
-
-            // Update thread progress
-            setProgress(videoStr, "Starting", formatSize(fsize), fsize);
-
-            {
-                std::lock_guard lock(currentFileMutex_);
-                currentFile_ = videoStr;
-            }
-
-            auto logCb = [this](const std::string &msg)
-            { addLog("  " + msg); };
-
-            // Progress callback for I/O tracking during remux
-            auto progressCb = [this, threadIdx](int64_t bytesWritten)
-            { threadProgress_[threadIdx].bytesProcessed.store(bytesWritten); };
-
-            addLog("[INFO] Processing: " + videoStr +
-                   " (" + formatSize(fsize) + ")");
-
-            bool tsFixed = false;
-            bool wasRemuxed = false;
-
-            // ── STEP 1: Ensure real Matroska container ──────────────────
-            // Not MKV? → Remux automatically to .mkv (stream copy, fixes ALL playback)
-            // Fake MKV (MP4 inside)? → Remux in-place (stream copy, fixes ALL playback)
-            // Real MKV? → Already good, continue to timestamp check
-            if (shouldCancel())
-                break; // Early exit check
-            if (origContainer != ContainerType::RealMKV)
-            {
-                setProgress(videoStr, "Remuxing", "Converting to MKV...");
-                threadProgress_[threadIdx].bytesProcessed.store(0); // Reset for new remux
-                addLog("[INFO] Remuxing to MKV: " + videoStr);
-                std::string mkvPath = sm::ensureRealMKV(videoStr, logCb, shouldCancel, progressCb);
-                if (mkvPath.empty())
+                for (size_t i = 0; i < videos_.size(); i++)
                 {
-                    // Clean up orphaned temp and thumbnail files
-                    {
-                        std::error_code ec;
-                        auto stem = fs::path(videoStr).stem().string();
-                        auto dir = fs::path(videoStr).parent_path();
-                        fs::path tmpPath = dir / (stem + "~remuxed.mkv");
-                        if (fs::exists(tmpPath))
-                            fs::remove(tmpPath, ec);
-                        if (fs::exists(thumbStr))
-                            fs::remove(thumbStr, ec);
-                    }
-                    {
-                        std::lock_guard lock(videosMutex_);
-                        videos_[idx].processed = true;
-                        videos_[idx].failed = true;
-                        videos_[idx].errorMsg = "Remux failed";
-                    }
-                    errors_.fetch_add(1);
-                    addLog("[ERROR] " + videoStr +
-                           " — remux failed, cleaned up temp files");
-                    processedCount_.fetch_add(1);
-                    bytesProcessed_.fetch_add(fsize);
-                    continue;
+                    auto &v = videos_[i];
+                    // Skip already processed
+                    if (v.processed)
+                        continue;
+                    // Skip if has processed tag (unless queued for regen)
+                    if (v.hasTag && !v.regenQueued)
+                        continue;
+                    workItems.push_back({i, v.fileSize, v.container});
                 }
-                wasRemuxed = true;
-                tsFixed = true; // remux inherently fixes timestamps (DTS/PTS normalised)
-                remuxedCount_.fetch_add(1);
-                setProgress(videoStr, "Remuxed", "Done");
+            }
+            // Sort: RealMKV first (container=0), then FakeMKV (1), then Other (2).
+            // Within each group, largest files first (descending by size).
+            std::sort(workItems.begin(), workItems.end(),
+                      [](const WorkItem &a, const WorkItem &b)
+                      {
+                          if (a.container != b.container)
+                              return (int)a.container < (int)b.container; // MKV first
+                          return a.fileSize > b.fileSize;                 // largest first
+                      });
 
-                // Update paths if extension changed (e.g. .mp4 → .mkv)
-                if (mkvPath != videoStr)
+            std::vector<size_t> indices;
+            indices.reserve(workItems.size());
+            for (auto &wi : workItems)
+                indices.push_back(wi.idx);
+
+            // Helper to update thread progress
+            auto setProgress = [this, threadIdx](const std::string &file, const std::string &action, const std::string &sub = "", int64_t fsize = 0)
+            {
+                std::lock_guard lock(threadProgress_[threadIdx].mtx);
+                threadProgress_[threadIdx].filePath = file;
+                threadProgress_[threadIdx].action = action;
+                threadProgress_[threadIdx].subAction = sub;
+                if (fsize > 0)
                 {
-                    auto newThumb = thumbPathForVideo(fs::path(mkvPath));
+                    threadProgress_[threadIdx].fileSize = fsize;
+                    threadProgress_[threadIdx].startTime = std::chrono::steady_clock::now();
+                }
+            };
+
+            // Mark thread as active
+            threadProgress_[threadIdx].active.store(true);
+
+            // ═══════════════════════════════════════════════════════════════
+            // PIPELINE PER VIDEO:
+            //   1. Not MKV? → Remux to .mkv  (stream copy, fixes ALL playback)
+            //      Fake MKV? → Remux in-place (stream copy, fixes ALL playback)
+            //   2. Is MKV → Timestamps broken? → Remux in-place (fixes playback)
+            //   3. Has thumbnail? → No → Generate contact sheet
+            //   4. Embed cover art in MKV (if not already embedded)
+            //   5. Is VR? → Has fisheye 180° SBS metadata? → No → Inject it!
+            // ═══════════════════════════════════════════════════════════════
+
+            // Helper to check cancel and exit early
+            auto shouldCancel = [this]()
+            { return cancelWork_.load(); };
+
+            // Helper to check if this thread should exit (thread count reduced)
+            auto shouldExitThread = [this, threadIdx]()
+            {
+                return threadIdx >= threadCount.load();
+            };
+
+            while (!shouldCancel())
+            {
+                // Check if thread count was reduced - if so, exit gracefully BETWEEN files
+                if (shouldExitThread())
+                {
+                    addLog("[INFO] Thread " + std::to_string(threadIdx + 1) + " exiting (thread count reduced)");
+                    break;
+                }
+
+                int myIdx = nextIdx_.fetch_add(1);
+                if (myIdx >= (int)indices.size())
+                    break;
+
+                // Read settings FRESH for each file (allows live config changes)
+                sm::ThumbnailConfig tc;
+                tc.width = thumbnailWidth.load();
+                tc.columns = thumbnailColumns.load();
+                tc.rows = thumbnailRows.load();
+                bool doEmbed = embedInVideo.load();
+
+                size_t idx = indices[myIdx];
+                std::string videoStr, thumbStr, origVideoStr;
+                int64_t fsize = 0;
+                bool alreadyHasJpg = false;
+                ContainerType origContainer;
+                {
                     std::lock_guard lock(videosMutex_);
-                    videos_[idx].videoPath = mkvPath;
-                    videos_[idx].thumbPath = newThumb;
-                    videos_[idx].container = ContainerType::RealMKV;
-                    videos_[idx].remuxed = true;
-                    videoStr = mkvPath;
-                    thumbStr = newThumb.string();
+                    videoStr = videos_[idx].videoPath.string();
+                    thumbStr = videos_[idx].thumbPath.string();
+                    alreadyHasJpg = videos_[idx].hasThumb;
+                    fsize = videos_[idx].fileSize;
+                    origContainer = videos_[idx].container;
                 }
-                else
-                {
-                    std::lock_guard lock(videosMutex_);
-                    videos_[idx].container = ContainerType::RealMKV;
-                    videos_[idx].remuxed = true;
-                }
-            }
+                origVideoStr = videoStr; // keep original path for VR folder detection
 
-            // ── STEP 2: Is MKV → Timestamps/frames broken? → Remux ─────
-            // Only check if we didn't just remux (fresh remux = already fixed)
-            if (shouldCancel())
-                break; // Early exit check
-            if (!wasRemuxed)
-            {
-                setProgress(videoStr, "Checking", "Analyzing timestamps...");
-                if (sm::hasTimestampIssues(videoStr, logCb))
+                // Update thread progress
+                setProgress(videoStr, "Starting", formatSize(fsize), fsize);
+
                 {
-                    setProgress(videoStr, "Fixing TS", "Remuxing to fix timestamps...");
+                    std::lock_guard lock(currentFileMutex_);
+                    currentFile_ = videoStr;
+                }
+
+                auto logCb = [this](const std::string &msg)
+                { addLog("  " + msg); };
+
+                // Progress callback for I/O tracking during remux
+                auto progressCb = [this, threadIdx](int64_t bytesWritten)
+                { threadProgress_[threadIdx].bytesProcessed.store(bytesWritten); };
+
+                addLog("[INFO] Processing: " + videoStr +
+                       " (" + formatSize(fsize) + ")");
+
+                bool tsFixed = false;
+                bool wasRemuxed = false;
+
+                // ── STEP 1: Ensure real Matroska container ──────────────────
+                // Not MKV? → Remux automatically to .mkv (stream copy, fixes ALL playback)
+                // Fake MKV (MP4 inside)? → Remux in-place (stream copy, fixes ALL playback)
+                // Real MKV? → Already good, continue to timestamp check
+                if (shouldCancel())
+                    break; // Early exit check
+                if (origContainer != ContainerType::RealMKV)
+                {
+                    setProgress(videoStr, "Remuxing", "Converting to MKV...");
                     threadProgress_[threadIdx].bytesProcessed.store(0); // Reset for new remux
-                    addLog("[INFO] Timestamps broken → remuxing to fix: " +
-                           videoStr);
-                    if (sm::fixTimestamps(videoStr, logCb, shouldCancel, progressCb))
+                    addLog("[INFO] Remuxing to MKV: " + videoStr);
+                    std::string mkvPath = sm::ensureRealMKV(videoStr, logCb, shouldCancel, progressCb);
+                    if (mkvPath.empty())
                     {
-                        tsFixed = true;
-                        wasRemuxed = true;
-                        remuxedCount_.fetch_add(1);
+                        // Clean up orphaned temp and thumbnail files
+                        {
+                            std::error_code ec;
+                            auto stem = fs::path(videoStr).stem().string();
+                            auto dir = fs::path(videoStr).parent_path();
+                            fs::path tmpPath = dir / (stem + "~remuxed.mkv");
+                            if (fs::exists(tmpPath))
+                                fs::remove(tmpPath, ec);
+                            if (fs::exists(thumbStr))
+                                fs::remove(thumbStr, ec);
+                        }
+                        {
+                            std::lock_guard lock(videosMutex_);
+                            videos_[idx].processed = true;
+                            videos_[idx].failed = true;
+                            videos_[idx].errorMsg = "Remux failed";
+                        }
+                        errors_.fetch_add(1);
+                        addLog("[ERROR] " + videoStr +
+                               " — remux failed, cleaned up temp files");
+                        processedCount_.fetch_add(1);
+                        bytesProcessed_.fetch_add(fsize);
+                        continue;
+                    }
+                    wasRemuxed = true;
+                    tsFixed = true; // remux inherently fixes timestamps (DTS/PTS normalised)
+                    remuxedCount_.fetch_add(1);
+                    setProgress(videoStr, "Remuxed", "Done");
+
+                    // Update paths if extension changed (e.g. .mp4 → .mkv)
+                    if (mkvPath != videoStr)
+                    {
+                        auto newThumb = thumbPathForVideo(fs::path(mkvPath));
+                        std::lock_guard lock(videosMutex_);
+                        videos_[idx].videoPath = mkvPath;
+                        videos_[idx].thumbPath = newThumb;
+                        videos_[idx].container = ContainerType::RealMKV;
+                        videos_[idx].remuxed = true;
+                        videoStr = mkvPath;
+                        thumbStr = newThumb.string();
                     }
                     else
                     {
-                        addLog("[WARNING] TS fix failed: " + videoStr);
+                        std::lock_guard lock(videosMutex_);
+                        videos_[idx].container = ContainerType::RealMKV;
+                        videos_[idx].remuxed = true;
                     }
                 }
-            }
 
-            // ── STEP 3: Has thumbnail? → No → Generate it! ─────────────
-            // Check embedded cover art first (deferred probe)
-            // If regenQueued, force regeneration regardless of existing cover
-            if (shouldCancel())
-                break; // Early exit check
-
-            bool isRegen = false;
-            bool fileHasTag = false;
-            {
-                std::lock_guard lock(videosMutex_);
-                isRegen = videos_[idx].regenQueued;
-                fileHasTag = videos_[idx].hasTag;
-            }
-
-            // If file is NOT tagged, treat it as needing full reprocessing:
-            // regenerate thumbnail + re-embed + tag. Having an existing cover
-            // without the THUMBNAILED tag means it was never fully processed.
-            if (!fileHasTag && !isRegen)
-            {
-                isRegen = true;
-                if (alreadyHasJpg)
-                    addLog("[INFO] Not tagged — reprocessing: " + videoStr);
-            }
-
-            if (isRegen)
-            {
-                // Force regeneration — pretend there's no thumbnail
-                alreadyHasJpg = false;
-                if (videos_[idx].regenQueued)
-                    addLog("[INFO] Regenerating thumbnail (user request): " + videoStr);
-            }
-            else if (!alreadyHasJpg)
-            {
-                setProgress(videoStr, "Probing", "Checking for cover art...");
-                bool probed = false;
+                // ── STEP 2: Is MKV → Timestamps/frames broken? → Remux ─────
+                // Only check if we didn't just remux (fresh remux = already fixed)
+                if (shouldCancel())
+                    break; // Early exit check
+                if (!wasRemuxed)
                 {
-                    std::lock_guard lock(videosMutex_);
-                    probed = videos_[idx].coverProbed;
-                }
-                if (!probed)
-                {
-                    bool hasCover = sm::hasCoverArt(videoStr);
-                    std::lock_guard lock(videosMutex_);
-                    videos_[idx].coverProbed = true;
-                    videos_[idx].hasCoverEmbed = hasCover;
-                    if (hasCover)
+                    setProgress(videoStr, "Checking", "Analyzing timestamps...");
+                    if (sm::hasTimestampIssues(videoStr, logCb))
                     {
-                        videos_[idx].hasThumb = true;
-                        alreadyHasJpg = true;
-                        addLog("[INFO] Already has cover art: " +
+                        setProgress(videoStr, "Fixing TS", "Remuxing to fix timestamps...");
+                        threadProgress_[threadIdx].bytesProcessed.store(0); // Reset for new remux
+                        addLog("[INFO] Timestamps broken → remuxing to fix: " +
                                videoStr);
+                        if (sm::fixTimestamps(videoStr, logCb, shouldCancel, progressCb))
+                        {
+                            tsFixed = true;
+                            wasRemuxed = true;
+                            remuxedCount_.fetch_add(1);
+                        }
+                        else
+                        {
+                            addLog("[WARNING] TS fix failed: " + videoStr);
+                        }
                     }
                 }
-            }
 
-            // Generate contact sheet if no thumbnail exists
-            bool genOk = alreadyHasJpg;
-            if (!alreadyHasJpg)
-            {
-                setProgress(videoStr, "Generating", "Creating contact sheet...");
-                addLog("[INFO] Generating thumbnail: " + videoStr);
-                genOk = sm::generateContactSheet(videoStr, thumbStr, tc, logCb, shouldCancel);
-            }
+                // ── STEP 3: Has thumbnail? → No → Generate it! ─────────────
+                // Check embedded cover art first (deferred probe)
+                // If regenQueued, force regeneration regardless of existing cover
+                if (shouldCancel())
+                    break; // Early exit check
 
-            bool anyError = false;
-            {
-                std::lock_guard lock(videosMutex_);
-                videos_[idx].tsFixed = tsFixed;
-                if (genOk)
+                bool isRegen = false;
+                bool fileHasTag = false;
                 {
-                    videos_[idx].hasThumb = true;
-                    if (!alreadyHasJpg)
-                        generated_.fetch_add(1);
+                    std::lock_guard lock(videosMutex_);
+                    isRegen = videos_[idx].regenQueued;
+                    fileHasTag = videos_[idx].hasTag;
+                }
+
+                // If file is NOT tagged, treat it as needing full reprocessing:
+                // regenerate thumbnail + re-embed + tag. Having an existing cover
+                // without the THUMBNAILED tag means it was never fully processed.
+                if (!fileHasTag && !isRegen)
+                {
+                    isRegen = true;
+                    if (alreadyHasJpg)
+                        addLog("[INFO] Not tagged — reprocessing: " + videoStr);
+                }
+
+                if (isRegen)
+                {
+                    // Force regeneration — pretend there's no thumbnail
+                    alreadyHasJpg = false;
+                    if (videos_[idx].regenQueued)
+                        addLog("[INFO] Regenerating thumbnail (user request): " + videoStr);
                 }
                 else if (!alreadyHasJpg)
                 {
-                    videos_[idx].failed = true;
-                    videos_[idx].errorMsg = "Thumbnail generation failed";
-                    errors_.fetch_add(1);
-                    anyError = true;
-                    addLog("[ERROR] Thumbnail failed: " + videoStr);
-                }
-            }
-
-            // ── STEP 4: Embed cover art + clean up external .jpg ────────
-            if (shouldCancel())
-                break; // Early exit check
-            if (genOk && doEmbed && !anyError)
-            {
-                setProgress(videoStr, "Embedding", "Checking cover art...");
-                bool wasEmbedded = sm::hasCoverArt(videoStr);
-
-                // For regeneration, force re-embed even if cover exists
-                if (isRegen && wasEmbedded && fs::exists(thumbStr))
-                {
-                    setProgress(videoStr, "Embedding", "Replacing cover art...");
-                    addLog("[INFO] Replacing cover art: " + videoStr);
-                    if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb, "", true))
+                    setProgress(videoStr, "Probing", "Checking for cover art...");
+                    bool probed = false;
                     {
-                        embeddedCount_.fetch_add(1);
-                        wasEmbedded = true;
+                        std::lock_guard lock(videosMutex_);
+                        probed = videos_[idx].coverProbed;
+                    }
+                    if (!probed)
+                    {
+                        bool hasCover = sm::hasCoverArt(videoStr);
+                        std::lock_guard lock(videosMutex_);
+                        videos_[idx].coverProbed = true;
+                        videos_[idx].hasCoverEmbed = hasCover;
+                        if (hasCover)
+                        {
+                            videos_[idx].hasThumb = true;
+                            alreadyHasJpg = true;
+                            addLog("[INFO] Already has cover art: " +
+                                   videoStr);
+                        }
                     }
                 }
-                else if (!wasEmbedded && fs::exists(thumbStr))
+
+                // Generate contact sheet if no thumbnail exists
+                bool genOk = alreadyHasJpg;
+                if (!alreadyHasJpg)
                 {
-                    setProgress(videoStr, "Embedding", "Adding cover to MKV...");
-                    addLog("[INFO] Embedding cover art: " + videoStr);
-                    if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb, "", false))
+                    setProgress(videoStr, "Generating", "Creating contact sheet...");
+                    addLog("[INFO] Generating thumbnail: " + videoStr);
+                    genOk = sm::generateContactSheet(videoStr, thumbStr, tc, logCb, shouldCancel);
+                }
+
+                bool anyError = false;
+                {
+                    std::lock_guard lock(videosMutex_);
+                    videos_[idx].tsFixed = tsFixed;
+                    if (genOk)
                     {
-                        embeddedCount_.fetch_add(1);
-                        wasEmbedded = true;
+                        videos_[idx].hasThumb = true;
+                        if (!alreadyHasJpg)
+                            generated_.fetch_add(1);
+                    }
+                    else if (!alreadyHasJpg)
+                    {
+                        videos_[idx].failed = true;
+                        videos_[idx].errorMsg = "Thumbnail generation failed";
+                        errors_.fetch_add(1);
+                        anyError = true;
+                        addLog("[ERROR] Thumbnail failed: " + videoStr);
                     }
                 }
-                else if (wasEmbedded && !isRegen)
+
+                // ── STEP 4: Embed cover art + clean up external .jpg ────────
+                if (shouldCancel())
+                    break; // Early exit check
+                if (genOk && doEmbed && !anyError)
                 {
-                    setProgress(videoStr, "Fix Meta", "Updating DLNA metadata...");
-                    // Fix existing cover attachment metadata for DLNA compatibility
-                    sm::fixCoverAttachmentMetadata(videoStr, logCb);
+                    setProgress(videoStr, "Embedding", "Checking cover art...");
+                    bool wasEmbedded = sm::hasCoverArt(videoStr);
+
+                    // For regeneration, force re-embed even if cover exists
+                    if (isRegen && wasEmbedded && fs::exists(thumbStr))
+                    {
+                        setProgress(videoStr, "Embedding", "Replacing cover art...");
+                        addLog("[INFO] Replacing cover art: " + videoStr);
+                        if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb, "", true))
+                        {
+                            embeddedCount_.fetch_add(1);
+                            wasEmbedded = true;
+                        }
+                    }
+                    else if (!wasEmbedded && fs::exists(thumbStr))
+                    {
+                        setProgress(videoStr, "Embedding", "Adding cover to MKV...");
+                        addLog("[INFO] Embedding cover art: " + videoStr);
+                        if (sm::embedThumbnailInMKV(videoStr, thumbStr, logCb, "", false))
+                        {
+                            embeddedCount_.fetch_add(1);
+                            wasEmbedded = true;
+                        }
+                    }
+                    else if (wasEmbedded && !isRegen)
+                    {
+                        setProgress(videoStr, "Fix Meta", "Updating DLNA metadata...");
+                        // Fix existing cover attachment metadata for DLNA compatibility
+                        sm::fixCoverAttachmentMetadata(videoStr, logCb);
+                    }
+                    // Cover art is inside the MKV — remove the external .jpg
+                    if (wasEmbedded && fs::exists(thumbStr))
+                    {
+                        std::error_code ec;
+                        fs::remove(thumbStr, ec);
+                        if (!ec)
+                            addLog("[INFO] Cleaned up external .jpg (embedded in MKV)");
+                    }
                 }
-                // Cover art is inside the MKV — remove the external .jpg
-                if (wasEmbedded && fs::exists(thumbStr))
+
+                // ── STEP 5: Is VR? → Has 180° SBS metadata? → Set it! ──────
+                if (shouldCancel())
+                    break; // Early exit check
+                if (sm::isVRFromPath(origVideoStr))
                 {
-                    std::error_code ec;
-                    fs::remove(thumbStr, ec);
-                    if (!ec)
-                        addLog("[INFO] Cleaned up external .jpg (embedded in MKV)");
+                    setProgress(videoStr, "VR Meta", "Injecting spatial metadata...");
+                    addLog("[INFO] VR content → ensuring fisheye 180° SBS metadata: " +
+                           videoStr);
+                    if (sm::injectVRSpatialMetadata(videoStr, logCb))
+                        vrCount_.fetch_add(1);
                 }
+
+                // ── STEP 6: Write THUMBNAILED metadata tag ──────────────────
+                if (!shouldCancel() && !anyError)
+                {
+                    setProgress(videoStr, "Tagging", "Writing metadata tag...");
+                    sm::writeProcessedTag(videoStr, logCb);
+                }
+
+                // Mark processed
+                setProgress(videoStr, "Done", "");
+                {
+                    std::lock_guard lock(videosMutex_);
+                    videos_[idx].processed = true;
+                    videos_[idx].hasTag = true;
+                    videos_[idx].regenQueued = false;
+                }
+
+                processedCount_.fetch_add(1);
+                bytesProcessed_.fetch_add(fsize);
             }
 
-            // ── STEP 5: Is VR? → Has 180° SBS metadata? → Set it! ──────
-            if (shouldCancel())
-                break; // Early exit check
-            if (sm::isVRFromPath(origVideoStr))
+            // Mark this thread as inactive
+            threadProgress_[threadIdx].active.store(false);
             {
-                setProgress(videoStr, "VR Meta", "Injecting spatial metadata...");
-                addLog("[INFO] VR content → ensuring fisheye 180° SBS metadata: " +
-                       videoStr);
-                if (sm::injectVRSpatialMetadata(videoStr, logCb))
-                    vrCount_.fetch_add(1);
+                std::lock_guard lock(threadProgress_[threadIdx].mtx);
+                threadProgress_[threadIdx].filePath.clear();
+                threadProgress_[threadIdx].action.clear();
+                threadProgress_[threadIdx].subAction.clear();
+                threadProgress_[threadIdx].fileSize = 0;
             }
 
-            // ── STEP 6: Write THUMBNAILED metadata tag ──────────────────
-            if (!shouldCancel() && !anyError)
-            {
-                setProgress(videoStr, "Tagging", "Writing metadata tag...");
-                sm::writeProcessedTag(videoStr, logCb);
-            }
-
-            // Mark processed
-            setProgress(videoStr, "Done", "");
-            {
-                std::lock_guard lock(videosMutex_);
-                videos_[idx].processed = true;
-                videos_[idx].hasTag = true;
-                videos_[idx].regenQueued = false;
-            }
-
-            processedCount_.fetch_add(1);
-            bytesProcessed_.fetch_add(fsize);
+            // End of top-level try-catch — prevent std::terminate on uncaught throw
+            threadProgress_[threadIdx].active.store(false);
         }
-
-        // Mark this thread as inactive
-        threadProgress_[threadIdx].active.store(false);
+        catch (const std::exception &e)
         {
-            std::lock_guard lock(threadProgress_[threadIdx].mtx);
-            threadProgress_[threadIdx].filePath.clear();
-            threadProgress_[threadIdx].action.clear();
-            threadProgress_[threadIdx].subAction.clear();
-            threadProgress_[threadIdx].fileSize = 0;
+            addLog("[ERROR] Worker " + std::to_string(threadIdx + 1) + " crashed: " + e.what());
+            errors_.fetch_add(1);
+            threadProgress_[threadIdx].active.store(false);
         }
-
-        // End of top-level try-catch — prevent std::terminate on uncaught throw
-        threadProgress_[threadIdx].active.store(false);
-     } catch (const std::exception &e) {
-        addLog("[ERROR] Worker " + std::to_string(threadIdx + 1) + " crashed: " + e.what());
-        errors_.fetch_add(1);
-        threadProgress_[threadIdx].active.store(false);
-     } catch (...) {
-        addLog("[ERROR] Worker " + std::to_string(threadIdx + 1) + " crashed: unknown error");
-        errors_.fetch_add(1);
-        threadProgress_[threadIdx].active.store(false);
-     }
+        catch (...)
+        {
+            addLog("[ERROR] Worker " + std::to_string(threadIdx + 1) + " crashed: unknown error");
+            errors_.fetch_add(1);
+            threadProgress_[threadIdx].active.store(false);
+        }
 
         // Last worker to exit handles completion/cleanup
         int rem = activeWorkers_.fetch_sub(1) - 1;

@@ -92,8 +92,9 @@ add_executable(StripHelper WIN32
     src/subprocess.cpp
     src/native_ffmpeg.cpp
     src/shell_integration.cpp
-    # Shared thumbnail generator from parent
+    # Shared utilities from parent
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/utils/thumbnail_generator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/utils/mkv_edit.cpp
     # Windows application icon
     res/striphelper.rc
 )

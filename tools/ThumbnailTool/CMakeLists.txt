@@ -54,8 +54,9 @@ endif()
 set(TT_SOURCES
     src/main.cpp
     src/app.cpp
-    # Shared thumbnail generator from parent
+    # Shared utilities from parent
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/utils/thumbnail_generator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/utils/mkv_edit.cpp
 )
 if(WIN32)
     list(APPEND TT_SOURCES res/thumbnailtool.rc)
