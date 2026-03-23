@@ -2773,8 +2773,25 @@ namespace sm
         std::string inputUrl = hlsUrl; // default: use remote URL directly
         bool useFeeder = false;
 
-        if (hlsUrl.find(".m3u8") != std::string::npos ||
-            hlsUrl.find(".m3u") != std::string::npos)
+        // ── Split audio/video master playlists (CB LLHLS) ───────
+        // When selectResolution() detects split audio (EXT-X-MEDIA),
+        // it writes a filtered master m3u8 to a local temp file and
+        // returns the file path.  The SegmentFeeder can only handle
+        // a SINGLE media playlist — it cannot demux a master with
+        // separate audio+video renditions.  FFmpeg's native HLS
+        // demuxer handles multi-rendition masters perfectly, so for
+        // local file paths we skip the SegmentFeeder entirely.
+        bool isLocalFile = !hlsUrl.empty() &&
+                           hlsUrl.find("://") == std::string::npos;
+        if (isLocalFile)
+        {
+            log_->info("Split audio/video master detected (local file) — "
+                       "using FFmpeg native HLS demuxer: {}", hlsUrl);
+            inputUrl = hlsUrl;
+            // useFeeder stays false — FFmpeg handles it directly
+        }
+        else if (hlsUrl.find(".m3u8") != std::string::npos ||
+                 hlsUrl.find(".m3u") != std::string::npos)
         {
             feederUa = userAgent.empty() ? config_.userAgent : userAgent;
 
@@ -2913,7 +2930,7 @@ namespace sm
                             // Probe the original remote URL — if stream is dead, stop immediately
                             // (Python logic: bot layer checks getStatus() and won't re-enter download
                             //  if the model isn't PUBLIC. We mirror that here for the inner loop.)
-                            if (!hlsUrl.empty())
+                            if (!hlsUrl.empty() && !isLocalFile)
                             {
                                 HttpClient probe;
                                 std::string ua = userAgent.empty() ? config_.userAgent : userAgent;
@@ -3453,6 +3470,14 @@ namespace sm
                                 }
                                 log_->debug("SegmentFeeder restarted for attempt {}/{}",
                                             restartCount, maxRestarts);
+                            }
+                            else if (isLocalFile)
+                            {
+                                // Split audio master: brief wait, then FFmpeg
+                                // re-opens the same temp file (URLs inside
+                                // are absolute CDN paths, still valid).
+                                for (int i = 0; i < 20 && !cancel.isCancelled(); i++)
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                             }
 
                             // Delay before restart (stall cooldown)
