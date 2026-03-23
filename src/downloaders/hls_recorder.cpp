@@ -37,6 +37,7 @@ extern "C"
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <regex>
@@ -159,6 +160,224 @@ namespace sm
         url = rewriteMediaHlsUrl(url);
         return url;
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // fMP4 box utilities for split-audio init segment merging
+    //
+    // When the SegmentFeeder handles two separate fMP4 streams (video
+    // + audio), we merge their init segments (ftyp+moov) into one
+    // that describes BOTH tracks.  Audio segments then get their
+    // moof→traf→tfhd track_id patched so FFmpeg sees a single
+    // coherent fragmented MP4 with interleaved video/audio fragments.
+    // ─────────────────────────────────────────────────────────────────
+    namespace fmp4
+    {
+        static uint32_t readU32(const uint8_t *p)
+        {
+            return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+                   (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+        }
+
+        static void writeU32(uint8_t *p, uint32_t v)
+        {
+            p[0] = uint8_t(v >> 24);
+            p[1] = uint8_t(v >> 16);
+            p[2] = uint8_t(v >> 8);
+            p[3] = uint8_t(v);
+        }
+
+        // Find a box at the current container level.
+        // Returns pointer to box start (header), or nullptr.
+        static const uint8_t *findBox(const uint8_t *data, size_t len,
+                                      const char *type, uint32_t *outSize = nullptr)
+        {
+            size_t pos = 0;
+            while (pos + 8 <= len)
+            {
+                uint32_t sz = readU32(data + pos);
+                if (sz < 8 || pos + sz > len)
+                    break;
+                if (std::memcmp(data + pos + 4, type, 4) == 0)
+                {
+                    if (outSize)
+                        *outSize = sz;
+                    return data + pos;
+                }
+                pos += sz;
+            }
+            return nullptr;
+        }
+
+        // Patch track_id in a tkhd fullbox (inside a trak container).
+        static void patchTkhdTrackId(uint8_t *trakData, uint32_t trakSize,
+                                     uint32_t newTrackId)
+        {
+            uint32_t tkhdSize = 0;
+            auto tkhd = findBox(trakData + 8, trakSize - 8, "tkhd", &tkhdSize);
+            if (!tkhd || tkhdSize < 24)
+                return;
+            auto body = const_cast<uint8_t *>(tkhd) + 8;
+            uint8_t version = body[0];
+            // v0: version+flags(4) + creation(4) + mod(4) + track_id(4)
+            // v1: version+flags(4) + creation(8) + mod(8) + track_id(4)
+            size_t off = (version == 0) ? 12 : 20;
+            if (off + 4 <= tkhdSize - 8)
+                writeU32(body + off, newTrackId);
+        }
+
+        // Patch track_id in a trex fullbox.
+        // trex body: version(1)+flags(3) + track_ID(4) + ...
+        static void patchTrexTrackId(uint8_t *trexData, uint32_t trexSize,
+                                     uint32_t newTrackId)
+        {
+            if (trexSize < 16) // 8 header + 4 version/flags + 4 track_id
+                return;
+            writeU32(trexData + 8 + 4, newTrackId);
+        }
+
+        // Patch next_track_ID in an mvhd fullbox.
+        static void patchMvhdNextTrackId(uint8_t *mvhdData, uint32_t mvhdSize,
+                                         uint32_t nextTrackId)
+        {
+            auto body = mvhdData + 8;
+            uint8_t version = body[0];
+            // next_track_ID is the last field of mvhd:
+            // v0: 4+4+4+4+4+4+2+2+8+36+24 = 96 → offset 96
+            // v1: 4+8+8+4+8+4+2+2+8+36+24 = 108 → offset 108
+            size_t off = (version == 0) ? 96 : 108;
+            if (off + 4 <= mvhdSize - 8)
+                writeU32(body + off, nextTrackId);
+        }
+
+        // Merge video + audio fMP4 init segments into one init with
+        // both tracks.  Video keeps track_id 1, audio gets audioTrackId.
+        // Returns empty string on failure.
+        static std::string mergeInitSegments(const std::string &videoInit,
+                                             const std::string &audioInit,
+                                             uint32_t audioTrackId = 2)
+        {
+            auto vData = reinterpret_cast<const uint8_t *>(videoInit.data());
+            auto aData = reinterpret_cast<const uint8_t *>(audioInit.data());
+
+            // ── Video init: ftyp + moov(mvhd, trak, mvex(trex)) ────
+            uint32_t ftypSz = 0;
+            auto ftyp = findBox(vData, videoInit.size(), "ftyp", &ftypSz);
+            if (!ftyp)
+                return {};
+
+            uint32_t vMoovSz = 0;
+            auto vMoov = findBox(vData, videoInit.size(), "moov", &vMoovSz);
+            if (!vMoov || vMoovSz < 16)
+                return {};
+
+            auto vBody = vMoov + 8;
+            auto vBodyLen = vMoovSz - 8;
+
+            uint32_t mvhdSz = 0, vTrakSz = 0, vMvexSz = 0;
+            auto mvhd = findBox(vBody, vBodyLen, "mvhd", &mvhdSz);
+            auto vTrak = findBox(vBody, vBodyLen, "trak", &vTrakSz);
+            auto vMvex = findBox(vBody, vBodyLen, "mvex", &vMvexSz);
+            if (!mvhd || !vTrak || !vMvex)
+                return {};
+
+            uint32_t vTrexSz = 0;
+            auto vTrex = findBox(vMvex + 8, vMvexSz - 8, "trex", &vTrexSz);
+            if (!vTrex)
+                return {};
+
+            // ── Audio init: moov(trak, mvex(trex)) ──────────────────
+            uint32_t aMoovSz = 0;
+            auto aMoov = findBox(aData, audioInit.size(), "moov", &aMoovSz);
+            if (!aMoov || aMoovSz < 16)
+                return {};
+
+            uint32_t aTrakSz = 0, aMvexSz = 0;
+            auto aTrak = findBox(aMoov + 8, aMoovSz - 8, "trak", &aTrakSz);
+            auto aMvex = findBox(aMoov + 8, aMoovSz - 8, "mvex", &aMvexSz);
+            if (!aTrak || !aMvex)
+                return {};
+
+            uint32_t aTrexSz = 0;
+            auto aTrex = findBox(aMvex + 8, aMvexSz - 8, "trex", &aTrexSz);
+            if (!aTrex)
+                return {};
+
+            // ── Patch copies ────────────────────────────────────────
+            // mvhd: set next_track_ID = audioTrackId + 1
+            std::string pMvhd(reinterpret_cast<const char *>(mvhd), mvhdSz);
+            patchMvhdNextTrackId(reinterpret_cast<uint8_t *>(pMvhd.data()),
+                                 mvhdSz, audioTrackId + 1);
+
+            // audio trak: set tkhd.track_id = audioTrackId
+            std::string pATrak(reinterpret_cast<const char *>(aTrak), aTrakSz);
+            patchTkhdTrackId(reinterpret_cast<uint8_t *>(pATrak.data()),
+                             aTrakSz, audioTrackId);
+
+            // audio trex: set track_id = audioTrackId
+            std::string pATrex(reinterpret_cast<const char *>(aTrex), aTrexSz);
+            patchTrexTrackId(reinterpret_cast<uint8_t *>(pATrex.data()),
+                             aTrexSz, audioTrackId);
+
+            // ── Build merged mvex ───────────────────────────────────
+            uint32_t newMvexSz = 8 + vTrexSz + uint32_t(pATrex.size());
+            std::string newMvex(newMvexSz, '\0');
+            auto mxP = reinterpret_cast<uint8_t *>(newMvex.data());
+            writeU32(mxP, newMvexSz);
+            std::memcpy(mxP + 4, "mvex", 4);
+            std::memcpy(mxP + 8, vTrex, vTrexSz);
+            std::memcpy(mxP + 8 + vTrexSz, pATrex.data(), pATrex.size());
+
+            // ── Build merged moov ───────────────────────────────────
+            uint32_t newMoovSz = 8 + uint32_t(pMvhd.size()) + vTrakSz +
+                                 uint32_t(pATrak.size()) + newMvexSz;
+            std::string newMoov(newMoovSz, '\0');
+            auto moP = reinterpret_cast<uint8_t *>(newMoov.data());
+            writeU32(moP, newMoovSz);
+            std::memcpy(moP + 4, "moov", 4);
+            size_t p = 8;
+            std::memcpy(moP + p, pMvhd.data(), pMvhd.size());
+            p += pMvhd.size();
+            std::memcpy(moP + p, vTrak, vTrakSz);
+            p += vTrakSz;
+            std::memcpy(moP + p, pATrak.data(), pATrak.size());
+            p += pATrak.size();
+            std::memcpy(moP + p, newMvex.data(), newMvex.size());
+
+            // ── Final init: ftyp + merged moov ──────────────────────
+            std::string result;
+            result.reserve(ftypSz + newMoovSz);
+            result.append(reinterpret_cast<const char *>(ftyp), ftypSz);
+            result.append(newMoov);
+            return result;
+        }
+
+        // Patch track_id in a moof+mdat segment (moof→traf→tfhd).
+        static void patchSegmentTrackId(std::string &segment,
+                                        uint32_t newTrackId)
+        {
+            auto data = reinterpret_cast<uint8_t *>(segment.data());
+
+            uint32_t moofSz = 0;
+            auto moof = findBox(data, segment.size(), "moof", &moofSz);
+            if (!moof || moofSz < 16)
+                return;
+
+            uint32_t trafSz = 0;
+            auto traf = findBox(const_cast<uint8_t *>(moof) + 8,
+                                moofSz - 8, "traf", &trafSz);
+            if (!traf || trafSz < 16)
+                return;
+
+            uint32_t tfhdSz = 0;
+            auto tfhd = findBox(const_cast<uint8_t *>(traf) + 8,
+                                trafSz - 8, "tfhd", &tfhdSz);
+            if (!tfhd || tfhdSz < 16)
+                return;
+
+            // tfhd body: version(1)+flags(3) + track_ID(4)
+            writeU32(const_cast<uint8_t *>(tfhd) + 8 + 4, newTrackId);
+        }
+    } // namespace fmp4
 
     // ─────────────────────────────────────────────────────────────────
     // Comprehensive portrait/mobile stream detection
@@ -521,6 +740,7 @@ namespace sm
                 break;
             }
         }
+        std::string videoInitData;
         if (!initUrl.empty())
         {
             auto initResp = http.get(initUrl, 15);
@@ -530,9 +750,76 @@ namespace sm
                            initResp.statusCode);
                 return false;
             }
-            feedBytes(initResp.body);
-            log->debug("SegmentFeeder: init segment downloaded ({} bytes)",
-                       initResp.body.size());
+            videoInitData = std::move(initResp.body);
+            log->debug("SegmentFeeder: video init downloaded ({} bytes)",
+                       videoInitData.size());
+        }
+
+        // ── Split audio: download audio init + merge ────────────────
+        // When audioPlaylistUrl is set (CB LLHLS), download the audio
+        // playlist and its init segment, then merge both fMP4 inits
+        // into one with two tracks (video=1, audio=2).
+        int64_t audioLastSeq = -1;
+        HLSMediaPlaylist audioPlaylist;
+        if (!audioPlaylistUrl.empty() && !videoInitData.empty())
+        {
+            auto audioResp = http.get(audioPlaylistUrl, 15);
+            if (audioResp.ok() && !audioResp.body.empty())
+            {
+                audioPlaylist = M3U8Parser::parseMedia(audioResp.body, audioPlaylistUrl);
+
+                std::string audioInitUrl;
+                for (const auto &seg : audioPlaylist.segments)
+                {
+                    if (seg.isMap)
+                    {
+                        audioInitUrl = fixSegmentUrl(audioPlaylistUrl, seg.uri);
+                        break;
+                    }
+                }
+
+                std::string audioInitData;
+                if (!audioInitUrl.empty())
+                {
+                    auto aiResp = http.get(audioInitUrl, 15);
+                    if (aiResp.ok() && !aiResp.body.empty())
+                        audioInitData = std::move(aiResp.body);
+                }
+
+                if (!audioInitData.empty())
+                {
+                    auto merged = fmp4::mergeInitSegments(videoInitData, audioInitData);
+                    if (!merged.empty())
+                    {
+                        feedBytes(merged);
+                        log->info("SegmentFeeder: merged video+audio init ({} bytes)",
+                                  merged.size());
+                    }
+                    else
+                    {
+                        log->warn("SegmentFeeder: fMP4 init merge failed — video only");
+                        feedBytes(videoInitData);
+                        audioPlaylistUrl.clear();
+                    }
+                }
+                else
+                {
+                    log->warn("SegmentFeeder: audio init download failed — video only");
+                    feedBytes(videoInitData);
+                    audioPlaylistUrl.clear();
+                }
+            }
+            else
+            {
+                log->warn("SegmentFeeder: audio playlist fetch failed — video only");
+                feedBytes(videoInitData);
+                audioPlaylistUrl.clear();
+            }
+        }
+        else if (!videoInitData.empty())
+        {
+            // No split audio — feed video init as before
+            feedBytes(videoInitData);
         }
 
         // Download the last few media segments to seed FFmpeg's probing
@@ -559,6 +846,30 @@ namespace sm
             }
         }
 
+        // Download audio seed segments (if split audio active)
+        if (!audioPlaylistUrl.empty() && !audioPlaylist.segments.empty())
+        {
+            std::vector<const HLSSegment *> audioMediaSegs;
+            for (const auto &seg : audioPlaylist.segments)
+                if (!seg.isMap)
+                    audioMediaSegs.push_back(&seg);
+
+            int aStart = std::max(0, static_cast<int>(audioMediaSegs.size()) - 3);
+            for (int i = aStart; i < static_cast<int>(audioMediaSegs.size()); i++)
+            {
+                auto url = fixSegmentUrl(audioPlaylistUrl, audioMediaSegs[i]->uri);
+                auto segResp = http.get(url, 15);
+                if (segResp.ok() && !segResp.body.empty())
+                {
+                    fmp4::patchSegmentTrackId(segResp.body, 2);
+                    feedBytes(segResp.body);
+                    audioLastSeq = audioMediaSegs[i]->sequenceNumber;
+                    log->debug("SegmentFeeder: audio seed seq={} ({} bytes)",
+                               audioLastSeq, segResp.body.size());
+                }
+            }
+        }
+
         if (lastSeq < 0)
         {
             log->error("SegmentFeeder: no segments could be downloaded");
@@ -578,7 +889,8 @@ namespace sm
 
         // ── Background thread: poll → parse → download → feed ───────
         thread = std::thread([this, playlistUrl, userAgent, decoder,
-                              lastSeqInit = lastSeq]()
+                              lastSeqInit = lastSeq,
+                              audioLastSeqInit = audioLastSeq]()
                              {
             HttpClient threadHttp;
             threadHttp.setDefaultUserAgent(userAgent);
@@ -586,6 +898,7 @@ namespace sm
                 applyProxyConfig(threadHttp, *config);
 
             int64_t lastSeq = lastSeqInit;
+            int64_t audioLastSeq = audioLastSeqInit;
             std::string lastInitUrl;
             int consecutiveErrors = 0;
             int cpaCount = 0;
@@ -743,6 +1056,40 @@ namespace sm
                             // Skip this segment but update lastSeq to avoid
                             // re-trying it on the next poll
                             lastSeq = seg.sequenceNumber;
+                        }
+                    }
+
+                    // ── Audio playlist polling (split audio) ─────────
+                    if (!audioPlaylistUrl.empty())
+                    {
+                        auto audioResp = threadHttp.get(audioPlaylistUrl, 10);
+                        if (audioResp.ok() && !audioResp.body.empty())
+                        {
+                            auto ap = M3U8Parser::parseMedia(
+                                audioResp.body, audioPlaylistUrl);
+
+                            for (const auto &seg : ap.segments)
+                            {
+                                if (seg.isMap)
+                                    continue;
+                                if (seg.sequenceNumber <= audioLastSeq)
+                                    continue;
+                                if (cancel->isCancelled() || !running.load())
+                                    break;
+
+                                auto url = fixSegmentUrl(audioPlaylistUrl, seg.uri);
+                                auto aResp = threadHttp.get(url, 15);
+                                if (aResp.ok() && !aResp.body.empty())
+                                {
+                                    fmp4::patchSegmentTrackId(aResp.body, 2);
+                                    feedBytes(aResp.body);
+                                    audioLastSeq = seg.sequenceNumber;
+                                }
+                                else
+                                {
+                                    audioLastSeq = seg.sequenceNumber;
+                                }
+                            }
                         }
                     }
                 }
@@ -2770,33 +3117,34 @@ namespace sm
         feeder.config = &config_;
         PlaylistDecoder feederDecoder = nullptr;
         std::string feederUa;
-        std::string inputUrl = hlsUrl; // default: use remote URL directly
+        std::string videoUrl = hlsUrl;  // mutable copy (may strip tab suffix)
+        std::string inputUrl = videoUrl; // default: use remote URL directly
         bool useFeeder = false;
 
-        // ── Split audio/video master playlists (CB LLHLS) ───────
-        // When selectResolution() detects split audio (EXT-X-MEDIA),
-        // it writes a filtered master m3u8 to a local temp file and
-        // returns the file path.  The SegmentFeeder can only handle
-        // a SINGLE media playlist — it cannot demux a master with
-        // separate audio+video renditions.  FFmpeg's native HLS
-        // demuxer handles multi-rendition masters perfectly, so for
-        // local file paths we skip the SegmentFeeder entirely.
-        bool isLocalFile = !hlsUrl.empty() &&
-                           hlsUrl.find("://") == std::string::npos;
-        if (isLocalFile)
+        // ── Split audio/video (CB LLHLS) ────────────────────────
+        // selectResolution() encodes split audio as "videoUrl\taudioUrl".
+        // Extract the audio URL and pass it to SegmentFeeder, which
+        // will download both playlists and merge the fMP4 streams.
+        std::string splitAudioUrl;
         {
-            log_->info("Split audio/video master detected (local file) — "
-                       "using FFmpeg native HLS demuxer: {}", hlsUrl);
-            inputUrl = hlsUrl;
-            // useFeeder stays false — FFmpeg handles it directly
+            auto tabPos = videoUrl.find('\t');
+            if (tabPos != std::string::npos)
+            {
+                splitAudioUrl = videoUrl.substr(tabPos + 1);
+                videoUrl = videoUrl.substr(0, tabPos);
+                inputUrl = videoUrl;
+                log_->info("Split audio detected — video: {}", videoUrl);
+                log_->info("Split audio detected — audio: {}", splitAudioUrl);
+            }
         }
-        else if (hlsUrl.find(".m3u8") != std::string::npos ||
-                 hlsUrl.find(".m3u") != std::string::npos)
+
+        if (videoUrl.find(".m3u8") != std::string::npos ||
+            videoUrl.find(".m3u") != std::string::npos)
         {
             feederUa = userAgent.empty() ? config_.userAgent : userAgent;
 
             // If this is a StripChat/doppiocdn URL, attach mouflon decoder
-            if (hlsUrl.find("doppiocdn") != std::string::npos)
+            if (videoUrl.find("doppiocdn") != std::string::npos)
             {
                 auto parseQParam = [](const std::string &url, const std::string &param) -> std::string
                 {
@@ -2810,9 +3158,9 @@ namespace sm
                 };
 
                 MouflonKeys::MouflonInfo fallback;
-                fallback.psch = parseQParam(hlsUrl, "psch");
-                fallback.pkey = parseQParam(hlsUrl, "pkey");
-                fallback.pdkey = parseQParam(hlsUrl, "pdkey");
+                fallback.psch = parseQParam(videoUrl, "psch");
+                fallback.pkey = parseQParam(videoUrl, "pkey");
+                fallback.pdkey = parseQParam(videoUrl, "pdkey");
 
                 log_->debug("Mouflon fallback from URL: psch={}, pkey={}, pdkey={}",
                             fallback.psch, fallback.pkey,
@@ -2840,7 +3188,9 @@ namespace sm
                 log_->info("Master playlist monitoring enabled: {}", masterUrl);
             }
 
-            if (feeder.start(hlsUrl, feederUa, cancel, feederDecoder))
+            feeder.audioPlaylistUrl = splitAudioUrl;
+
+            if (feeder.start(videoUrl, feederUa, cancel, feederDecoder))
             {
                 useFeeder = true;
                 log_->info("Using SegmentFeeder (in-memory segment download)");
@@ -2930,13 +3280,13 @@ namespace sm
                             // Probe the original remote URL — if stream is dead, stop immediately
                             // (Python logic: bot layer checks getStatus() and won't re-enter download
                             //  if the model isn't PUBLIC. We mirror that here for the inner loop.)
-                            if (!hlsUrl.empty() && !isLocalFile)
+                            if (!videoUrl.empty())
                             {
                                 HttpClient probe;
                                 std::string ua = userAgent.empty() ? config_.userAgent : userAgent;
                                 probe.setDefaultUserAgent(ua);
                                 applyProxyConfig(probe, config_);
-                                auto probeResp = probe.get(hlsUrl, 8);
+                                auto probeResp = probe.get(videoUrl, 8);
                                 if (!probeResp.ok() || probeResp.body.find("#EXTM3U") == std::string::npos)
                                 {
                                     log_->info("Stream no longer available (HTTP {}), stopping",
@@ -3232,7 +3582,7 @@ namespace sm
                                                              : userAgent;
                                         probe.setDefaultUserAgent(ua);
                                         applyProxyConfig(probe, config_);
-                                        auto probeResp = probe.get(hlsUrl, 8);
+                                        auto probeResp = probe.get(videoUrl, 8);
                                         if (probeResp.ok() && !probeResp.body.empty() &&
                                             probeResp.body.find("#EXTM3U") != std::string::npos)
                                         {
@@ -3262,7 +3612,7 @@ namespace sm
                                 std::string ua = userAgent.empty() ? config_.userAgent : userAgent;
                                 probe.setDefaultUserAgent(ua);
                                 applyProxyConfig(probe, config_);
-                                auto probeResp = probe.get(hlsUrl, 8);
+                                auto probeResp = probe.get(videoUrl, 8);
                                 if (probeResp.ok() && !probeResp.body.empty() &&
                                     probeResp.body.find("#EXTM3U") != std::string::npos)
                                 {
@@ -3463,21 +3813,13 @@ namespace sm
                                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
                                 feeder.statusCheckCb = statusCheckCb_;
-                                if (!feeder.start(hlsUrl, feederUa, cancel, feederDecoder))
+                                if (!feeder.start(videoUrl, feederUa, cancel, feederDecoder))
                                 {
                                     log_->error("SegmentFeeder restart failed");
                                     break;
                                 }
                                 log_->debug("SegmentFeeder restarted for attempt {}/{}",
                                             restartCount, maxRestarts);
-                            }
-                            else if (isLocalFile)
-                            {
-                                // Split audio master: brief wait, then FFmpeg
-                                // re-opens the same temp file (URLs inside
-                                // are absolute CDN paths, still valid).
-                                for (int i = 0; i < 20 && !cancel.isCancelled(); i++)
-                                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                             }
 
                             // Delay before restart (stall cooldown)
@@ -3546,6 +3888,22 @@ namespace sm
                         if (pr.action == PauseAction::Resume && !pr.newUrl.empty())
                         {
                             inputUrl = pr.newUrl;
+
+                            // Extract split audio URL if present (CB LLHLS)
+                            {
+                                auto tp = inputUrl.find('\t');
+                                if (tp != std::string::npos)
+                                {
+                                    splitAudioUrl = inputUrl.substr(tp + 1);
+                                    inputUrl = inputUrl.substr(0, tp);
+                                    feeder.audioPlaylistUrl = splitAudioUrl;
+                                }
+                                else
+                                {
+                                    splitAudioUrl.clear();
+                                    feeder.audioPlaylistUrl.clear();
+                                }
+                            }
 
                             // Rebuild mouflon decoder for new URL if needed
                             if (inputUrl.find("doppiocdn") != std::string::npos)

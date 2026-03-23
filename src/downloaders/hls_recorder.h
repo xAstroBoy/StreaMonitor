@@ -425,6 +425,12 @@ namespace sm
             // ── Status check (early abort on private/offline) ──
             StatusCheckCallback statusCheckCb;
 
+            // ── Split audio (CB LLHLS): audio chunklist URL ──
+            // When set, the feeder downloads both video and audio
+            // segments, merges their fMP4 init segments into a single
+            // init with two tracks, and patches audio moof track_ids.
+            std::string audioPlaylistUrl;
+
             // ── Master playlist monitoring (orientation detection) ──
             // When masterUrl is set, the feeder periodically re-fetches
             // the master m3u8 and parses RESOLUTION= tags from all

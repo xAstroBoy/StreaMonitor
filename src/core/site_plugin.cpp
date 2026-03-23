@@ -642,27 +642,23 @@ namespace sm
         // audio and video chunklists and sync them via EXT-X-PROGRAM-DATE-TIME.
         if (master.hasSplitAudio() && !selected->audioGroupId.empty())
         {
-            std::string filteredContent = M3U8Parser::buildFilteredMaster(master, *selected, masterUrl);
-            logger_->debug("Built filtered master playlist for split audio:\n{}", filteredContent);
-
-            // Write to a temp file that ffmpeg can read
-            auto tempDir = std::filesystem::temp_directory_path() / "streamonitor";
-            std::filesystem::create_directories(tempDir);
-            auto tempFile = tempDir / (username() + "_" + siteSlug() + "_master.m3u8");
+            // Split audio (CB LLHLS): return "videoUrl\taudioUrl" so the
+            // SegmentFeeder can download both playlists and merge the
+            // fMP4 init segments into a single byte stream with two tracks.
+            std::string videoUrl = M3U8Parser::resolveUrl(masterUrl, selected->url);
+            for (const auto &audio : master.audioRenditions)
             {
-                std::ofstream ofs(tempFile, std::ios::trunc);
-                if (ofs.good())
+                if (audio.groupId == selected->audioGroupId && !audio.uri.empty())
                 {
-                    ofs << filteredContent;
-                    ofs.close();
-                    logger_->info("Wrote filtered master playlist to {}", tempFile.string());
-                    return tempFile.string();
-                }
-                else
-                {
-                    logger_->warn("Failed to write filtered master, falling back to variant URL");
+                    logger_->info("Split audio/video detected — merging via SegmentFeeder");
+                    logger_->debug("  video: {}", videoUrl);
+                    logger_->debug("  audio: {}", audio.uri);
+                    return videoUrl + "\t" + audio.uri;
                 }
             }
+            // No matching audio rendition found — fall through to video-only
+            logger_->warn("Split audio group '{}' not found, using video-only",
+                          selected->audioGroupId);
         }
 
         // Normal case: return the selected variant's URL directly
