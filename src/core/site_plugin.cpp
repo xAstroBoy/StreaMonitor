@@ -203,8 +203,8 @@ namespace sm
             }
         }
 
-        thread_ = std::make_unique<std::jthread>([this, &config](std::stop_token)
-                                                 { threadFunc(config); });
+        thread_ = std::make_unique<std::jthread>([this](std::stop_token)
+                                                 { threadFunc(*config_); });
 
         logger_->info("Started monitoring");
     }
@@ -775,7 +775,8 @@ namespace sm
             std::string expandedBase = expandFormatTokens(nameFormat, username_, siteSlug_);
 
             int n = 1;
-            while (true)
+            constexpr int kMaxFileNumber = 999999; // prevent infinite loop
+            while (n <= kMaxFileNumber)
             {
                 std::string filename = replaceAll(expandedBase, "{n}", std::to_string(n));
                 auto candidate = dir / (filename + ext);
@@ -839,6 +840,15 @@ namespace sm
 
                 n++;
             }
+            // Exhausted all file numbers — use the max as fallback
+            logger_->error("generateOutputPath: exhausted {} slots", kMaxFileNumber);
+            auto fallback = dir / (replaceAll(expandedBase, "{n}", std::to_string(kMaxFileNumber)) + ext);
+            {
+                std::lock_guard slock(stateMutex_);
+                state_.currentFile = fallback.string();
+                state_.fileCount = kMaxFileNumber;
+                return fallback.string();
+            }
         }
         else
         {
@@ -852,7 +862,8 @@ namespace sm
             if (fs::exists(candidate, ec))
             {
                 int suffix = 1;
-                while (true)
+                constexpr int kMaxSuffix = 999999;
+                while (suffix <= kMaxSuffix)
                 {
                     auto suffixed = dir / (filename + "_" + std::to_string(suffix) + ext);
                     if (!fs::exists(suffixed, ec))

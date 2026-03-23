@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   # ═══════════════════════════════════════════
-  # Windows — vcpkg + MSVC (static, standalone)
+  # Windows — vcpkg + MSVC + Ninja (static, standalone)
   # ═══════════════════════════════════════════
   build-windows:
     runs-on: windows-latest
@@ -28,6 +28,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # ── sccache: caches compiled .obj files across runs ──
+      # Cuts rebuild time from ~15 min to ~2 min on cache hit.
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        with:
+          version: "v0.9.1"
 
       # Enable GitHub Actions cache for vcpkg binary caching
       - name: Export GitHub Actions cache environment
@@ -48,25 +55,33 @@ jobs:
         with:
           path: |
             ${{ github.workspace }}/build/vcpkg_installed
-          key: vcpkg-win-x64-static-md-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('.github/workflows/build.yml') }}
+          key: vcpkg-win-x64-static-md-${{ hashFiles('vcpkg.json') }}-v2
           restore-keys: |
             vcpkg-win-x64-static-md-${{ hashFiles('vcpkg.json') }}-
             vcpkg-win-x64-static-md-
 
-      - name: Configure
+      # ── Use Developer Command Prompt so Ninja can find cl.exe ──
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (Ninja + sccache)
         run: |
-          cmake -S . -B build `
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
             -DSM_STATIC_LINK=ON `
             "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
             -DVCPKG_HOST_TRIPLET=x64-windows-static-md `
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`$<`$<CONFIG:Debug>:Debug>DLL"
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL" `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       - name: Build
-        run: cmake --build build --config Release --parallel $env:NUMBER_OF_PROCESSORS
+        run: cmake --build build --parallel $env:NUMBER_OF_PROCESSORS
 
       - name: Package
-        run: python build.py --package-only --no-bump --no-deploy
+        run: python build.py --package-only --no-deploy
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -82,13 +97,18 @@ jobs:
           path: 'StreaMonitor-Windows*.zip'
 
   # ═══════════════════════════════════════════
-  # Linux — system libraries + GCC
+  # Linux — system libraries + GCC + sccache
   # ═══════════════════════════════════════════
   build-linux:
     runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        with:
+          version: "v0.9.1"
 
       - name: Install dependencies
         run: |
@@ -110,13 +130,15 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DSM_USE_SYSTEM_LIBS=ON \
-            -DSM_USE_SYSTEM_FFMPEG=ON
+            -DSM_USE_SYSTEM_FFMPEG=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       - name: Build
         run: cmake --build build --parallel $(nproc)
 
       - name: Package
-        run: python3 build.py --package-only --system-libs --no-bump --no-deploy
+        run: python3 build.py --package-only --system-libs --no-deploy
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

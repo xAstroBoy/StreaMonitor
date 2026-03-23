@@ -17,12 +17,17 @@ if(NOT nlohmann_json_FOUND)
     FetchContent_MakeAvailable(json)
 endif()
 
-# ImGui — fetch imgui + DX11 backend (Windows only)
-include(FetchContent)
-FetchContent_Declare(imgui_sh
-    GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.91.8-docking)
-FetchContent_MakeAvailable(imgui_sh)
+# ImGui — reuse parent's FetchContent download if available, else fetch
+if(DEFINED SM_IMGUI_SOURCE_DIR AND EXISTS "${SM_IMGUI_SOURCE_DIR}/imgui.cpp")
+    set(imgui_sh_SOURCE_DIR ${SM_IMGUI_SOURCE_DIR})
+    message(STATUS "StripHelper: reusing parent ImGui from ${SM_IMGUI_SOURCE_DIR}")
+else()
+    include(FetchContent)
+    FetchContent_Declare(imgui_sh
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        v1.91.8-docking)
+    FetchContent_MakeAvailable(imgui_sh)
+endif()
 
 # Build ImGui as a static library with Win32+DX11 backend
 add_library(imgui_sh_lib STATIC
@@ -53,7 +58,6 @@ else()
     find_library(SWRESAMPLE_LIBRARY swresample)
     set(SH_FFMPEG_LIBS ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${AVUTIL_LIBRARY}
         ${SWSCALE_LIBRARY} ${SWRESAMPLE_LIBRARY})
-
     # x264/x265 for static builds
     if(VCPKG_TARGET_TRIPLET AND MSVC)
         set(_VCPKG_LIB "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}")

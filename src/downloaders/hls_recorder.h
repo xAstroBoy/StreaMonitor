@@ -399,6 +399,12 @@ namespace sm
             bool finished = false; // no more data coming (stream ended)
             bool hasError = false; // fatal error occurred
 
+            // ── Backpressure: cap ring buffer at 32 MB ──
+            // If FFmpeg stalls, feedBytes() blocks until buffer drains
+            // below the high-water mark instead of growing unbounded.
+            static constexpr size_t kMaxRingBufSize = 32 * 1024 * 1024; // 32 MB
+            std::condition_variable drainCv;                            // notified when readCallback drains bytes
+
             // ── Thread state ──
             std::thread thread;
             std::atomic<bool> running{false};

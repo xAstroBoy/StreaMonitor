@@ -420,18 +420,18 @@ namespace sm
                 if (wasRunning)
                     it->plugin->requestQuit();
 
-                // Remove old config entry
+                // Create new bot FIRST — if creation fails, old config is preserved
+                std::string finalUser = usernameChanged ? newUsername : oldUsername;
+                auto plugin = SiteRegistry::instance().create(newSite, finalUser);
+                if (!plugin)
+                    return false;
+
+                // New plugin created successfully — NOW safe to remove old config
                 configStore_.remove(oldUsername, oldSlug);
 
                 // Take old plugin out, erase from vector
                 oldPluginToDestroy = std::move(it->plugin);
                 bots_.erase(it);
-
-                // Create new bot with new site
-                std::string finalUser = usernameChanged ? newUsername : oldUsername;
-                auto plugin = SiteRegistry::instance().create(newSite, finalUser);
-                if (!plugin)
-                    return false;
 
                 plugin->setStateCallback([this](const BotState &state)
                                          { emitEvent(ManagerEvent::BotStatusChanged, state.username + "_" + state.siteSlug); });
@@ -456,12 +456,13 @@ namespace sm
                 if (wasRunning)
                     it->plugin->requestQuit();
 
-                configStore_.remove(oldUsername, oldSlug);
-
-                // Create new plugin with new username (simpler than trying to rename in-place)
+                // Create new plugin FIRST — if creation fails, old config is preserved
                 auto plugin = SiteRegistry::instance().create(it->plugin->siteName(), newUsername);
                 if (!plugin)
                     return false;
+
+                // New plugin created successfully — NOW safe to remove old config
+                configStore_.remove(oldUsername, oldSlug);
 
                 plugin->setStateCallback([this](const BotState &state)
                                          { emitEvent(ManagerEvent::BotStatusChanged, state.username + "_" + state.siteSlug); });

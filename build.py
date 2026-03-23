@@ -653,8 +653,10 @@ def main():
                         help="Override output directory (default: ./dist)")
     parser.add_argument("--system-libs", action="store_true",
                         help="Use system libraries instead of vcpkg (Linux)")
+    parser.add_argument("--bump", action="store_true",
+                        help="Auto-increment version before building (default: no bump)")
     parser.add_argument("--no-bump", action="store_true",
-                        help="Don't auto-increment version before building")
+                        help="Don't auto-increment version before building (default)")
     parser.add_argument("--no-deploy", action="store_true",
                         help="Don't deploy to runtime directory after build")
     parser.add_argument("--deploy-only", action="store_true",
@@ -714,16 +716,16 @@ def main():
             cache.unlink()
             print("Removed CMakeCache.txt")
 
-    # Auto-increment version before configure (unless --no-bump)
-    if not args.no_bump:
+    # Auto-increment version ONLY if --bump is explicitly passed
+    if args.bump:
         version = bump_version()
     else:
         version = get_current_version()
         print(f"\n[i] Current version: {version} (bump skipped)")
 
-    # Configure (always if no cache)
+    # Configure (only if no cache or forced)
     cache = BUILD_DIR / "CMakeCache.txt"
-    if not cache.exists() or args.reconfigure or not args.shared:
+    if not cache.exists() or args.reconfigure:
         configure(args, vcpkg)
 
     if args.configure_only:

@@ -354,6 +354,12 @@ namespace sh
 
     double ffprobeStreamDuration(const fs::path &fp, const fs::path &cwd, const std::string &sel)
     {
+        // Native fast-path
+        fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
+        double d = nativeStreamDuration(full, sel);
+        if (d > 0)
+            return d;
+        // Fall back to subprocess
         return ffprobeNum(fp, cwd, {"-select_streams", sel, "-show_entries", "stream=duration", "-of", "default=nw=1:nk=1"});
     }
 
@@ -373,6 +379,12 @@ namespace sh
 
     double ffprobeLastPacketPts(const fs::path &fp, const fs::path &cwd)
     {
+        // Native fast-path — reads all packets via libavformat
+        fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
+        double d = nativeLastPacketPts(full);
+        if (d > 0)
+            return d;
+        // Fall back to subprocess
         try
         {
             auto fname = fp.filename().string();
@@ -413,6 +425,12 @@ namespace sh
 
     double ffprobeFramesDuration(const fs::path &fp, const fs::path &cwd)
     {
+        // Native fast-path — counts packets via libavformat (no subprocess)
+        fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
+        double d = nativeFrameCount(full);
+        if (d > 0)
+            return d;
+        // Fall back to subprocess
         auto fname = fp.filename().string();
         // avg_frame_rate
         auto r1 = runProcess({g_ffprobe, "-v", "error", "-select_streams", "v:0",

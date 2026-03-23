@@ -293,32 +293,53 @@ namespace sm
     bool HttpClient::downloadToFile(const std::string &url, const std::string &filePath,
                                     int timeoutSec)
     {
-        std::lock_guard lock(impl_->mutex);
-        if (!impl_->curl)
+        // Use a DEDICATED curl handle so we don't block all other HTTP
+        // requests on this client for the entire download duration.
+        CURL *dlCurl = curl_easy_init();
+        if (!dlCurl)
             return false;
 
-        curl_easy_reset(impl_->curl);
-        curl_easy_setopt(impl_->curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(impl_->curl, CURLOPT_TIMEOUT, (long)timeoutSec);
-        curl_easy_setopt(impl_->curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(dlCurl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(dlCurl, CURLOPT_TIMEOUT, (long)timeoutSec);
+        curl_easy_setopt(dlCurl, CURLOPT_CONNECTTIMEOUT, (long)std::min(timeoutSec, 15));
+        curl_easy_setopt(dlCurl, CURLOPT_FOLLOWLOCATION, 1L);
 
         if (!impl_->defaultUA.empty())
-            curl_easy_setopt(impl_->curl, CURLOPT_USERAGENT, impl_->defaultUA.c_str());
+            curl_easy_setopt(dlCurl, CURLOPT_USERAGENT, impl_->defaultUA.c_str());
 
-        curl_easy_setopt(impl_->curl, CURLOPT_SSL_VERIFYPEER, impl_->verifySsl ? 1L : 0L);
+        bool ssl = impl_->verifySsl;
+        curl_easy_setopt(dlCurl, CURLOPT_SSL_VERIFYPEER, ssl ? 1L : 0L);
+        curl_easy_setopt(dlCurl, CURLOPT_SSL_VERIFYHOST, ssl ? 2L : 0L);
+#ifdef _WIN32
+        curl_easy_setopt(dlCurl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
 
-        // Proxy
-        impl_->applyProxy(impl_->curl);
+        // Proxy — read under lock, apply without lock
+        {
+            std::lock_guard lock(impl_->mutex);
+            if (!impl_->proxyUrl.empty())
+            {
+                curl_easy_setopt(dlCurl, CURLOPT_PROXY, impl_->proxyUrl.c_str());
+                curl_easy_setopt(dlCurl, CURLOPT_PROXYTYPE, impl_->proxyType);
+                if ((impl_->proxyType == CURLPROXY_HTTP || impl_->proxyType == CURLPROXY_HTTPS) &&
+                    impl_->proxyUrl.find("socks") == std::string::npos)
+                    curl_easy_setopt(dlCurl, CURLOPT_HTTPPROXYTUNNEL, 1L);
+            }
+        }
 
         std::ofstream file(filePath, std::ios::binary);
         if (!file)
+        {
+            curl_easy_cleanup(dlCurl);
             return false;
+        }
 
-        curl_easy_setopt(impl_->curl, CURLOPT_WRITEFUNCTION, writeFileCallback);
-        curl_easy_setopt(impl_->curl, CURLOPT_WRITEDATA, &file);
+        curl_easy_setopt(dlCurl, CURLOPT_WRITEFUNCTION, writeFileCallback);
+        curl_easy_setopt(dlCurl, CURLOPT_WRITEDATA, &file);
 
-        CURLcode res = curl_easy_perform(impl_->curl);
+        CURLcode res = curl_easy_perform(dlCurl);
         file.close();
+        curl_easy_cleanup(dlCurl);
 
         if (res != CURLE_OK)
         {

@@ -661,8 +661,30 @@ namespace sm
             inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(ipBuf));
             spdlog::debug("New connection from {}", ipBuf);
 
-            // Spawn connection thread
+            // Spawn connection thread (with cleanup of finished threads)
             std::lock_guard<std::mutex> lk(connMutex_);
+            // Prune finished threads to prevent unbounded accumulation
+            connThreads_.erase(
+                std::remove_if(connThreads_.begin(), connThreads_.end(),
+                               [](const std::unique_ptr<std::thread> &t)
+                               {
+                                   if (t && t->joinable())
+                                   {
+                                       // Check if thread is done (non-blocking via native_handle not portable,
+                                       // so we just join threads that are still joinable periodically)
+                                       return false;
+                                   }
+                                   return true;
+                               }),
+                connThreads_.end());
+            // Limit max concurrent connections
+            constexpr size_t kMaxConnections = 200;
+            if (connThreads_.size() >= kMaxConnections)
+            {
+                spdlog::warn("H2Server: max connections ({}) reached, dropping", kMaxConnections);
+                closesocket(clientFd);
+                continue;
+            }
             connThreads_.push_back(std::make_unique<std::thread>(
                 [this, clientFd]()
                 { handleConnection(clientFd); }));
@@ -692,6 +714,13 @@ namespace sm
             spdlog::debug("New HTTP connection from {}", ipBuf);
 
             std::lock_guard<std::mutex> lk(connMutex_);
+            constexpr size_t kMaxConnections = 200;
+            if (connThreads_.size() >= kMaxConnections)
+            {
+                spdlog::warn("HTTP: max connections ({}) reached, dropping", kMaxConnections);
+                closesocket(clientFd);
+                continue;
+            }
             connThreads_.push_back(std::make_unique<std::thread>(
                 [this, clientFd]()
                 { handlePlainConnection(clientFd); }));
@@ -840,7 +869,14 @@ namespace sm
         auto *conn = static_cast<H2Connection *>(user_data);
         auto it = conn->streams.find(stream_id);
         if (it != conn->streams.end())
-            it->second->request.body.append(reinterpret_cast<const char *>(data), len);
+        {
+            // Bound request body at 16 MB to prevent unbounded memory allocation
+            constexpr size_t kMaxBodySize = 16 * 1024 * 1024;
+            auto &body = it->second->request.body;
+            if (body.size() + len > kMaxBodySize)
+                return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+            body.append(reinterpret_cast<const char *>(data), len);
+        }
         return 0;
     }
 

@@ -1146,6 +1146,8 @@ namespace sm
 
     std::string MouflonKeys::xorDecrypt(const std::string &data, const std::string &hashBytes)
     {
+        if (hashBytes.empty())
+            return data; // nothing to decrypt with — return as-is
         std::string result;
         result.reserve(data.size());
         for (size_t i = 0; i < data.size(); i++)

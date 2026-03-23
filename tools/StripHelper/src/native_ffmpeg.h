@@ -65,4 +65,18 @@ namespace sh
     // Detect the maximum PTS jump/discontinuity in a file.
     double nativeDetectMaxPtsJump(const fs::path &filePath);
 
+    // ── Stream-level duration (replaces ffprobeStreamDuration) ──────
+    // Returns duration of the specified stream type ("v:0" or "a:0").
+    double nativeStreamDuration(const fs::path &filePath, const std::string &sel);
+
+    // ── Last packet PTS (replaces ffprobeLastPacketPts) ─────────────
+    // Reads ALL packets to find the latest PTS across video + audio.
+    // Slower than container duration, but accurate for truncated files.
+    double nativeLastPacketPts(const fs::path &filePath);
+
+    // ── Frame count → duration (replaces ffprobeFramesDuration) ─────
+    // Decodes the video stream, counts frames, divides by FPS.
+    // Most expensive but most accurate for damaged containers.
+    double nativeFrameCount(const fs::path &filePath);
+
 } // namespace sh

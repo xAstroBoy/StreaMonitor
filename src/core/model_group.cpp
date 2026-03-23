@@ -154,8 +154,8 @@ namespace sm
             state_.running = true;
         }
 
-        thread_ = std::make_unique<std::jthread>([this, &config](std::stop_token)
-                                                 { threadFunc(config); });
+        thread_ = std::make_unique<std::jthread>([this](std::stop_token)
+                                                 { threadFunc(*lastConfig_); });
 
         spdlog::info("[Group:{}] Started with {} pairings", groupName_, pairings_.size());
     }

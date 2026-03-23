@@ -278,7 +278,7 @@ namespace sm
         std::deque<PreviewFrame> previewQueue_; // buffered frames for smooth playback
         uint64_t previewVersion_ = 0;
         std::chrono::steady_clock::time_point lastPreviewPumpTime_{};
-        static constexpr size_t kMaxPreviewQueue = 90; // ~3 s at 30 fps
+        static constexpr size_t kMaxPreviewQueue = 30; // ~1 s at 30 fps (saves ~50 MB/bot vs 90)
         void pumpPreviewQueue_();                      // caller must hold previewMutex_
 
         // Audio forwarding callback (set by GUI, called by recorder thread)

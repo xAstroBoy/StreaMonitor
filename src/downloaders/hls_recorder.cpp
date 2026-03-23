@@ -358,7 +358,15 @@ namespace sm
         if (len == 0)
             return;
         {
-            std::lock_guard lock(bufMutex);
+            std::unique_lock lock(bufMutex);
+            // Backpressure: wait until buffer is below the high-water mark.
+            // If FFmpeg stalls, we block here instead of growing unbounded.
+            drainCv.wait(lock, [this]
+                         { return ringBuf.size() < kMaxRingBufSize ||
+                                  finished || hasError ||
+                                  (cancel && cancel->isCancelled()); });
+            if (finished || hasError || (cancel && cancel->isCancelled()))
+                return;
             ringBuf.insert(ringBuf.end(), data, data + len);
         }
         bufCv.notify_one();
@@ -402,6 +410,11 @@ namespace sm
             std::min(static_cast<size_t>(bufSize), self->ringBuf.size()));
         std::copy(self->ringBuf.begin(), self->ringBuf.begin() + n, buf);
         self->ringBuf.erase(self->ringBuf.begin(), self->ringBuf.begin() + n);
+
+        // Notify feedBytes() that buffer space is available (backpressure relief)
+        lock.unlock();
+        self->drainCv.notify_one();
+
         return n;
     }
 
@@ -763,6 +776,7 @@ namespace sm
             finished = true;
         }
         bufCv.notify_one();
+        drainCv.notify_all(); // unblock feedBytes() if waiting on backpressure
 
         if (thread.joinable())
             thread.join();

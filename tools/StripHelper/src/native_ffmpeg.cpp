@@ -533,4 +533,157 @@ namespace sh
         return maxJump;
     }
 
+    // ── Stream-level duration ────────────────────────────────────────
+    // Replaces ffprobeStreamDuration() — returns the duration of a
+    // specific stream ("v:0" for first video, "a:0" for first audio).
+
+    double nativeStreamDuration(const fs::path &filePath, const std::string &sel)
+    {
+        FmtCtxIn fmt;
+        std::string path = filePath.string();
+        if (avformat_open_input(&fmt.ctx, path.c_str(), nullptr, nullptr) < 0)
+            return 0;
+        if (avformat_find_stream_info(fmt.ctx, nullptr) < 0)
+            return 0;
+
+        // Parse selector: "v:0" → video, "a:0" → audio
+        AVMediaType targetType = AVMEDIA_TYPE_UNKNOWN;
+        int targetIdx = 0;
+        if (!sel.empty())
+        {
+            char typeChar = sel[0];
+            if (typeChar == 'v' || typeChar == 'V')
+                targetType = AVMEDIA_TYPE_VIDEO;
+            else if (typeChar == 'a' || typeChar == 'A')
+                targetType = AVMEDIA_TYPE_AUDIO;
+
+            auto colonPos = sel.find(':');
+            if (colonPos != std::string::npos && colonPos + 1 < sel.size())
+            {
+                try
+                {
+                    targetIdx = std::stoi(sel.substr(colonPos + 1));
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+
+        int matchCount = 0;
+        for (unsigned i = 0; i < fmt.ctx->nb_streams; ++i)
+        {
+            auto *st = fmt.ctx->streams[i];
+            if (st->codecpar->codec_type == targetType)
+            {
+                if (matchCount == targetIdx)
+                {
+                    if (st->duration > 0 && st->time_base.den > 0)
+                        return st->duration * av_q2d(st->time_base);
+                    // Fallback to container duration
+                    if (fmt.ctx->duration > 0)
+                        return fmt.ctx->duration / (double)AV_TIME_BASE;
+                    return 0;
+                }
+                ++matchCount;
+            }
+        }
+        return 0;
+    }
+
+    // ── Last packet PTS ──────────────────────────────────────────────
+    // Replaces ffprobeLastPacketPts() — reads all packets to find
+    // the maximum PTS across video and audio streams.
+
+    double nativeLastPacketPts(const fs::path &filePath)
+    {
+        FmtCtxIn fmt;
+        std::string path = filePath.string();
+
+        AVDictionary *opts = nullptr;
+        av_dict_set(&opts, "fflags", "+discardcorrupt", 0);
+
+        if (avformat_open_input(&fmt.ctx, path.c_str(), nullptr, &opts) < 0)
+        {
+            av_dict_free(&opts);
+            return 0;
+        }
+        av_dict_free(&opts);
+
+        if (avformat_find_stream_info(fmt.ctx, nullptr) < 0)
+            return 0;
+
+        // Find video and audio stream indices
+        int videoIdx = av_find_best_stream(fmt.ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        int audioIdx = av_find_best_stream(fmt.ctx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+
+        double maxPts = 0;
+        AVPacket *pkt = av_packet_alloc();
+
+        while (av_read_frame(fmt.ctx, pkt) >= 0)
+        {
+            if (pkt->pts != AV_NOPTS_VALUE)
+            {
+                int idx = pkt->stream_index;
+                if (idx == videoIdx || idx == audioIdx)
+                {
+                    double pts = pkt->pts * av_q2d(fmt.ctx->streams[idx]->time_base);
+                    if (pts > maxPts)
+                        maxPts = pts;
+                }
+            }
+            av_packet_unref(pkt);
+        }
+
+        av_packet_free(&pkt);
+        return maxPts;
+    }
+
+    // ── Frame count → duration ───────────────────────────────────────
+    // Replaces ffprobeFramesDuration() — counts all video packets
+    // (no decode needed, just demux) and divides by FPS.
+
+    double nativeFrameCount(const fs::path &filePath)
+    {
+        FmtCtxIn fmt;
+        std::string path = filePath.string();
+        if (avformat_open_input(&fmt.ctx, path.c_str(), nullptr, nullptr) < 0)
+            return 0;
+        if (avformat_find_stream_info(fmt.ctx, nullptr) < 0)
+            return 0;
+
+        int videoIdx = av_find_best_stream(fmt.ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (videoIdx < 0)
+            return 0;
+
+        // Get FPS
+        auto *st = fmt.ctx->streams[videoIdx];
+        double fps = 0;
+        if (st->avg_frame_rate.num > 0 && st->avg_frame_rate.den > 0)
+            fps = av_q2d(st->avg_frame_rate);
+        else if (st->r_frame_rate.num > 0 && st->r_frame_rate.den > 0)
+            fps = av_q2d(st->r_frame_rate);
+
+        if (fps <= 0)
+            return 0;
+
+        // Count video packets (frames)
+        int64_t frameCount = 0;
+        AVPacket *pkt = av_packet_alloc();
+
+        while (av_read_frame(fmt.ctx, pkt) >= 0)
+        {
+            if (pkt->stream_index == videoIdx)
+                ++frameCount;
+            av_packet_unref(pkt);
+        }
+
+        av_packet_free(&pkt);
+
+        if (frameCount <= 0)
+            return 0;
+
+        return static_cast<double>(frameCount) / fps;
+    }
+
 } // namespace sh
