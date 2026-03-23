@@ -1573,17 +1573,47 @@ namespace sm
         av_dict_set(&muxOpts, "avoid_negative_ts", "make_zero", 0);
 
         // For Matroska: reserve space for the Cues (seek index) at the
-        // beginning of the file. This way the trailer can write Cues and
-        // Duration into the reserved space via a single seek, making the
-        // file properly seekable even if the write is interrupted.
+        // beginning of the file so the trailer can write Cues and Duration
+        // via a single seek, making the file properly seekable.
+        //
+        // IMPORTANT: Set directly on priv_data via av_opt_set_int to
+        // guarantee the muxer receives the option. Passing through the
+        // AVDictionary can silently fail to route to the muxer's priv_data,
+        // leaving reserve_cues_space=0 → no Cues → Duration: N/A.
         const char *containerFmtName = state.outputCtx->oformat ? state.outputCtx->oformat->name : "";
-        if (std::string_view(containerFmtName).find("matroska") != std::string_view::npos ||
-            std::string_view(containerFmtName).find("webm") != std::string_view::npos)
+        bool isMkv = std::string_view(containerFmtName).find("matroska") != std::string_view::npos ||
+                     std::string_view(containerFmtName).find("webm") != std::string_view::npos;
+        if (isMkv && state.outputCtx->priv_data)
         {
-            av_dict_set(&muxOpts, "reserve_index_space", "262144", 0); // 256KB for Cues
+            // Set reserve_index_space directly on the Matroska muxer's priv_data
+            int optRet = av_opt_set_int(state.outputCtx->priv_data, "reserve_index_space", 262144, 0);
+            if (optRet < 0)
+                log_->warn("Failed to set reserve_index_space on MKV muxer: {}", ffError(optRet));
+            else
+                log_->debug("Set MKV reserve_index_space=262144 (256KB for Cues)");
+
+            // Also enable cues_to_front as a safety net: if the reserved space
+            // is insufficient for very long recordings, FFmpeg will shift data
+            // forward and write Cues at the front instead of dropping them.
+            av_opt_set_int(state.outputCtx->priv_data, "cues_to_front", 1, 0);
+        }
+
+        // Log seekability for diagnostics
+        if (state.outputCtx->pb)
+        {
+            bool seekable = (state.outputCtx->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0;
+            log_->debug("Output seekable={}, isMKV={}", seekable, isMkv);
+            if (isMkv && !seekable)
+                log_->warn("Output is NOT seekable — MKV Cues/Duration will be missing!");
         }
 
         ret = avformat_write_header(state.outputCtx, &muxOpts);
+        // Log any unconsumed muxer options (helps debug option routing issues)
+        {
+            AVDictionaryEntry *t = nullptr;
+            while ((t = av_dict_get(muxOpts, "", t, AV_DICT_IGNORE_SUFFIX)))
+                log_->debug("Unconsumed muxer option: {}={}", t->key, t->value);
+        }
         av_dict_free(&muxOpts);
 
         if (ret < 0)
@@ -1794,9 +1824,20 @@ namespace sm
             if (state.headerWritten)
             {
                 populateOutputDurations(state);
+
+                // Log seekability before trailer — if not seekable, MKV
+                // Duration/Cues will NOT be written into the file.
+                if (state.outputCtx->pb)
+                {
+                    bool seekable = (state.outputCtx->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0;
+                    log_->debug("closeAll: pb->seekable={} before av_write_trailer", seekable);
+                }
+
                 int ret = av_write_trailer(state.outputCtx);
                 if (ret < 0)
                     log_->warn("Error writing trailer: {}", ffError(ret));
+                else
+                    log_->debug("av_write_trailer succeeded (ret={})", ret);
             }
 
             if (!(state.outputCtx->oformat->flags & AVFMT_NOFILE) && state.outputCtx->pb)
@@ -2948,10 +2989,13 @@ namespace sm
                                     }
                                     state.headerWritten = false;
 
-                                    // Delete the empty PC file
+                                    // Delete the empty PC file.
+                                    // Threshold accounts for MKV header + 256KB Cues reservation
+                                    // (reserve_index_space=262144) which produces ~270KB even for
+                                    // an otherwise-empty container.
                                     std::error_code fsEc;
                                     if (std::filesystem::exists(currentOutputPath, fsEc) &&
-                                        std::filesystem::file_size(currentOutputPath, fsEc) <= 4096)
+                                        std::filesystem::file_size(currentOutputPath, fsEc) <= 300000)
                                         std::filesystem::remove(currentOutputPath, fsEc);
 
                                     currentOutputPath = newPath;
