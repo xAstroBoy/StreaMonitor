@@ -129,6 +129,7 @@ namespace sm
 
         logger_->info("Selected quality: {}x{}", selected->width, selected->height);
         setRecordingResolution(selected->width, selected->height);
+        setMasterPortrait(isPortraitStream(selected->width, selected->height));
         return selected->url;
     }
 

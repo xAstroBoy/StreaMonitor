@@ -418,6 +418,20 @@ namespace sm
                 return "";
             }
 
+            // Check if any variant is portrait — store for ModelGroup probing
+            {
+                bool anyPortrait = false;
+                for (const auto &v : master.variants)
+                {
+                    if (v.width > 0 && v.height > 0 && isPortraitStream(v.width, v.height))
+                    {
+                        anyPortrait = true;
+                        break;
+                    }
+                }
+                setMasterPortrait(anyPortrait);
+            }
+
             // Select best resolution
             int wantedRes = config_ ? config_->wantedResolution : 99999;
             ResolutionPref pref = config_ ? config_->resolutionPref : ResolutionPref::Closest;

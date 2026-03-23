@@ -319,8 +319,8 @@ namespace sm
                     {
                         std::lock_guard pLock(pairingsMutex_);
                         pairing.lastStatus = status;
-                        // Use API mobile hint for dual-recording trigger.
-                        // Actual mobile detection is from stream resolution.
+                        // API mobile hint — NOT used for dual-recording trigger.
+                        // Real mobile detection happens in probeStreamMobile().
                         pairing.lastMobile = pairing.plugin->apiMobileHint();
                     }
 
@@ -346,30 +346,56 @@ namespace sm
                     {
                         anyLive = true;
 
+                        // ── Probe actual stream resolution ──────────────
+                        // Call getVideoUrl() which internally parses the
+                        // master m3u8 and stores RESOLUTION= portrait flag.
+                        // We use this REAL resolution to decide dual-recording,
+                        // NEVER the site API's isMobile hint.
+                        std::string prefetchedUrl;
+                        bool probeOk = probeStreamMobile(pairing, prefetchedUrl);
+
+                        // Read the resolution-based portrait flag
+                        bool streamPortrait = pairing.plugin->lastMasterPortrait();
+
+                        // Update lastMobile from actual stream resolution
+                        {
+                            std::lock_guard pLock(pairingsMutex_);
+                            pairing.lastMobile = streamPortrait;
+                        }
+                        {
+                            std::lock_guard lock(stateMutex_);
+                            state_.activeMobile = streamPortrait;
+                            if (i < state_.pairings.size())
+                                state_.pairings[i].mobile = streamPortrait;
+                        }
+                        emitStateChange();
+
+                        if (!probeOk || prefetchedUrl.empty())
+                        {
+                            spdlog::warn("[Group:{}] {} [{}] getVideoUrl failed, skipping",
+                                         groupName_, pairing.username, pairing.site);
+                            sleepInterruptible(sleepAfterDownload_.load());
+                            break; // restart cycle
+                        }
+
                         // ── Mobile dual-recording ───────────────────────
-                        // If this pairing's API reports mobile AND non-VR,
-                        // check all other non-VR pairings — if any are also
-                        // PUBLIC, download from them in parallel to capture
-                        // both camera views (mobile + desktop).
-                        // VR pairings are ALWAYS left alone — never
-                        // participate in dual-recording.
-                        // NOTE: We use apiMobileHint() (from the site API)
-                        // to TRIGGER dual-recording because we need to know
-                        // before the stream opens.  The actual output FOLDER
-                        // (PC vs Mobile/) is determined by stream resolution
-                        // in the recorder's first-open detection.
-                        bool mobileMulti = pairing.lastMobile && !isVrSlug(pairing.site);
+                        // If the actual stream resolution is PORTRAIT (mobile
+                        // camera) and this is NOT a VR pairing, then check all
+                        // other non-VR pairings — if any are also PUBLIC,
+                        // download from them in parallel to capture both camera
+                        // views (phone = different camera = worth recording).
+                        // VR pairings are ALWAYS left alone.
+                        bool mobileMulti = streamPortrait && !isVrSlug(pairing.site);
                         std::vector<std::unique_ptr<std::jthread>> parallelThreads;
                         std::vector<std::unique_ptr<CancellationToken>> parallelTokens;
-                        bool startedAsMobile = pairing.lastMobile; // API hint at launch time
+                        bool startedAsMobile = streamPortrait;
 
                         if (mobileMulti)
                         {
-                            spdlog::info("[Group:{}] {} [{}] is MOBILE — checking other pairings for dual recording",
+                            spdlog::info("[Group:{}] {} [{}] is MOBILE (portrait stream) — checking other pairings for dual recording",
                                          groupName_, pairing.username, pairing.site);
 
-                            // Snapshot pairing count under lock (same pattern as outer loop)
-                            const size_t dualCount = numPairings; // already snapshotted above
+                            const size_t dualCount = numPairings;
                             for (size_t j = 0; j < dualCount && running_.load() && !quitting_.load(); j++)
                             {
                                 if (j == i)
@@ -423,7 +449,7 @@ namespace sm
 
                         spdlog::info("[Group:{}] {} [{}] is LIVE{} — downloading",
                                      groupName_, pairing.username, pairing.site,
-                                     mobileMulti ? " (MOBILE, dual-recording)" : "");
+                                     mobileMulti ? " (MOBILE portrait, dual-recording)" : "");
 
                         {
                             std::lock_guard lock(stateMutex_);
@@ -431,8 +457,65 @@ namespace sm
                         }
                         emitStateChange();
 
-                        // Download from this pairing (blocks until stream ends or error)
-                        downloadFrom(pairing, config);
+                        // ── Primary-source watcher ──────────────────────
+                        // When recording from a NON-PRIMARY pairing (i > 0),
+                        // periodically check if the primary (index 0) came
+                        // back online. If so, cancel this download so the
+                        // cycle restarts and picks up the primary.
+                        std::unique_ptr<std::jthread> primaryWatcher;
+                        if (i > 0 && !mobileMulti)
+                        {
+                            primaryWatcher = std::make_unique<std::jthread>(
+                                [this, &config](std::stop_token st)
+                                {
+                                    spdlog::info("[Group:{}] Primary-source watcher started",
+                                                 groupName_);
+                                    while (!st.stop_requested() && running_.load() && !quitting_.load())
+                                    {
+                                        // Check every ~10 seconds
+                                        for (int s = 0; s < 10 && !st.stop_requested() &&
+                                                        running_.load() && !quitting_.load();
+                                             s++)
+                                        {
+                                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                                        }
+                                        if (st.stop_requested() || !running_.load() || quitting_.load())
+                                            break;
+
+                                        try
+                                        {
+                                            Status primarySt = pairings_[0].plugin->checkStatus();
+                                            if (primarySt == Status::Public)
+                                            {
+                                                spdlog::info("[Group:{}] Primary {} [{}] is back ONLINE — "
+                                                             "switching back from alternative",
+                                                             groupName_, pairings_[0].username,
+                                                             pairings_[0].site);
+                                                cancelToken_.cancel(); // cancel alt download
+                                                break;
+                                            }
+                                        }
+                                        catch (const std::exception &e)
+                                        {
+                                            spdlog::debug("[Group:{}] Primary watcher checkStatus error: {}",
+                                                          groupName_, e.what());
+                                        }
+                                    }
+                                    spdlog::debug("[Group:{}] Primary-source watcher exiting",
+                                                  groupName_);
+                                });
+                        }
+
+                        // Download from this pairing (blocks until stream ends or cancel)
+                        downloadFrom(pairing, config, prefetchedUrl);
+
+                        // Stop primary watcher
+                        if (primaryWatcher)
+                        {
+                            primaryWatcher->request_stop();
+                            primaryWatcher->join();
+                            primaryWatcher.reset();
+                        }
 
                         {
                             std::lock_guard lock(stateMutex_);
@@ -556,28 +639,65 @@ namespace sm
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Download from a specific pairing
+    // Probe a pairing's stream to determine if it's mobile (portrait).
+    // Calls getVideoUrl() which internally parses the master m3u8 and
+    // stores RESOLUTION= portrait flag on the plugin.  The video URL
+    // is stored in videoUrlOut for later download (avoids double fetch).
+    // Returns true if the probe succeeded (even if not mobile).
     // ─────────────────────────────────────────────────────────────────
-    bool ModelGroup::downloadFrom(GroupPairing &pairing, const AppConfig &config)
+    bool ModelGroup::probeStreamMobile(GroupPairing &pairing, std::string &videoUrlOut)
     {
-        cancelToken_.reset();
-        return downloadFromWithToken(pairing, config, cancelToken_);
-    }
-
-    bool ModelGroup::downloadFromWithToken(GroupPairing &pairing, const AppConfig &config,
-                                           CancellationToken &token)
-    {
-        // Get video URL
-        std::string videoUrl;
         try
         {
-            videoUrl = pairing.plugin->getVideoUrl();
+            videoUrlOut = pairing.plugin->getVideoUrl();
         }
         catch (const std::exception &e)
         {
-            spdlog::error("[Group:{}] {} [{}] getVideoUrl failed: {}",
+            spdlog::error("[Group:{}] {} [{}] probeStreamMobile getVideoUrl failed: {}",
                           groupName_, pairing.username, pairing.site, e.what());
+            videoUrlOut.clear();
             return false;
+        }
+        if (videoUrlOut.empty())
+            return false;
+
+        // lastMasterPortrait() is now set by getVideoUrl()'s internal
+        // selectResolution() / master playlist parsing.
+        bool portrait = pairing.plugin->lastMasterPortrait();
+        spdlog::debug("[Group:{}] {} [{}] stream probe: portrait={} (url={}...)",
+                      groupName_, pairing.username, pairing.site, portrait,
+                      videoUrlOut.substr(0, std::min<size_t>(60, videoUrlOut.size())));
+        return true;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Download from a specific pairing
+    // ─────────────────────────────────────────────────────────────────
+    bool ModelGroup::downloadFrom(GroupPairing &pairing, const AppConfig &config,
+                                  const std::string &prefetchedUrl)
+    {
+        cancelToken_.reset();
+        return downloadFromWithToken(pairing, config, cancelToken_, prefetchedUrl);
+    }
+
+    bool ModelGroup::downloadFromWithToken(GroupPairing &pairing, const AppConfig &config,
+                                           CancellationToken &token,
+                                           const std::string &prefetchedUrl)
+    {
+        // Get video URL — use pre-fetched if available (from probeStreamMobile)
+        std::string videoUrl = prefetchedUrl;
+        if (videoUrl.empty())
+        {
+            try
+            {
+                videoUrl = pairing.plugin->getVideoUrl();
+            }
+            catch (const std::exception &e)
+            {
+                spdlog::error("[Group:{}] {} [{}] getVideoUrl failed: {}",
+                              groupName_, pairing.username, pairing.site, e.what());
+                return false;
+            }
         }
 
         if (videoUrl.empty())

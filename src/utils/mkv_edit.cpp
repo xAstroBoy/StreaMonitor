@@ -597,7 +597,7 @@ namespace
                 {
                     if (seek.id != ID_SEEK)
                         continue;
-                    auto *idNode  = seek.find(ID_SEEK_ID);
+                    auto *idNode = seek.find(ID_SEEK_ID);
                     auto *posNode = seek.find(ID_SEEK_POS);
                     if (!idNode || !posNode)
                         continue;
@@ -726,8 +726,9 @@ namespace
 
         // Replace an existing L1 element with new serialized bytes.
         // Strategy: in-place if fits, else reuse a Void, else append at end.
-        // Returns true on success.
-        bool replaceL1(L1Element *old, const std::vector<uint8_t> &newBytes)
+        // Returns the absolute file position where the element was written,
+        // or -1 on failure.
+        int64_t replaceL1(L1Element *old, const std::vector<uint8_t> &newBytes)
         {
             int64_t oldTotal = old->totalSize();
             int64_t newTotal = (int64_t)newBytes.size();
@@ -747,7 +748,7 @@ namespace
                     fwrite(&zero, 1, 1, f);
                 }
                 fflush(f);
-                return true;
+                return old->pos; // same position (in-place)
             }
 
             // Doesn't fit in-place.
@@ -767,11 +768,12 @@ namespace
                     continue;
 
                 // Found a suitable Void — overwrite it
-                FSEEK64(f, e.pos, SEEK_SET);
+                int64_t writePos = e.pos;
+                FSEEK64(f, writePos, SEEK_SET);
                 fwrite(newBytes.data(), 1, newBytes.size(), f);
                 int64_t remaining = voidTotal - newTotal;
                 if (remaining >= 2)
-                    writeVoid(e.pos + newTotal, remaining);
+                    writeVoid(writePos + newTotal, remaining);
                 else if (remaining == 1)
                 {
                     uint8_t zero = 0;
@@ -780,7 +782,7 @@ namespace
                 // Mark this void as consumed (set ID to 0 so it won't be reused)
                 e.id = 0;
                 fflush(f);
-                return true;
+                return writePos; // new position (moved to void slot)
             }
 
             // No suitable Void found — append at end of file
@@ -789,7 +791,8 @@ namespace
 
         // Append serialized bytes at the end of the file.
         // Updates Segment size if it was finite.
-        bool appendAtEnd(const std::vector<uint8_t> &bytes)
+        // Returns the absolute file position where data was written, or -1 on failure.
+        int64_t appendAtEnd(const std::vector<uint8_t> &bytes)
         {
             FSEEK64(f, 0, SEEK_END);
             int64_t writePos = FTELL64(f);
@@ -819,7 +822,195 @@ namespace
                     // Just leave the size stale — most players handle it.
                 }
             }
-            return true;
+            return writePos;
+        }
+
+        // ── SeekHead maintenance ────────────────────────────────────
+        // After writing/moving an L1 element, update the SeekHead so
+        // media players can find it.  Without this, appended or
+        // relocated Tags/Attachments are invisible to FFmpeg/VLC/etc.
+        //
+        // Strategy:
+        //   1. Read existing SeekHead into an EbmlNode tree.
+        //   2. Find/add the Seek entry for the target element ID.
+        //   3. Set SeekPosition = newAbsPos - segDataStart.
+        //   4. Serialize and write back in-place (with Void padding).
+        //   5. If the new SeekHead doesn't fit in the old space,
+        //      leave SeekHead unchanged (fallback: sequential scan).
+        //
+        // This is safe because the SeekHead is typically in the pre-
+        // Cluster header area with generous Void padding that FFmpeg's
+        // muxer reserves.  Growing by one Seek entry (~16 bytes) almost
+        // always fits.
+        bool updateSeekHead(uint32_t elementId, int64_t newAbsPos)
+        {
+            auto *sh = findL1(ID_SEEKHEAD);
+            if (!sh || sh->dataSize <= 0)
+                return false; // no SeekHead to update
+
+            int64_t shOldTotal = sh->totalSize();
+
+            // Read existing SeekHead
+            auto shData = readL1Data(*sh);
+            auto shTree = parseEbml(ID_SEEKHEAD, shData.data(), shData.size());
+
+            // Encode the target ID as raw bytes (big-endian, minimal length)
+            int targetIdLen = idEncodedLen(elementId);
+            std::vector<uint8_t> targetIdBytes(targetIdLen);
+            {
+                uint32_t tmp = elementId;
+                for (int i = targetIdLen - 1; i >= 0; --i)
+                {
+                    targetIdBytes[i] = tmp & 0xFF;
+                    tmp >>= 8;
+                }
+            }
+
+            // Encode the new relative position (from segment data start)
+            int64_t relPos = newAbsPos - segDataStart;
+            // Minimal big-endian encoding
+            std::vector<uint8_t> posBytes;
+            {
+                int64_t tmp = relPos;
+                // Determine byte length needed
+                int posLen = 1;
+                if (tmp > 0x00FFFFFFFFFFFFFFLL)
+                    posLen = 8;
+                else if (tmp > 0x0000FFFFFFFFFFFFLL)
+                    posLen = 7;
+                else if (tmp > 0x000000FFFFFFFFFFLL)
+                    posLen = 6;
+                else if (tmp > 0x00000000FFFFFFFFLL)
+                    posLen = 5;
+                else if (tmp > 0x0000000000FFFFFFLL)
+                    posLen = 4;
+                else if (tmp > 0x000000000000FFFFLL)
+                    posLen = 3;
+                else if (tmp > 0x00000000000000FFLL)
+                    posLen = 2;
+                posBytes.resize(posLen);
+                for (int i = posLen - 1; i >= 0; --i)
+                {
+                    posBytes[i] = tmp & 0xFF;
+                    tmp >>= 8;
+                }
+            }
+
+            // Find existing Seek entry for this element ID, or add one
+            bool found = false;
+            for (auto &seek : shTree.children)
+            {
+                if (seek.id != ID_SEEK)
+                    continue;
+                auto *idNode = seek.find(ID_SEEK_ID);
+                if (!idNode)
+                    continue;
+
+                // Compare ID bytes
+                if (idNode->data.size() == targetIdBytes.size() &&
+                    std::equal(idNode->data.begin(), idNode->data.end(),
+                               targetIdBytes.begin()))
+                {
+                    // Found — update the position
+                    auto *posNode = seek.find(ID_SEEK_POS);
+                    if (posNode)
+                    {
+                        posNode->data = posBytes;
+                    }
+                    else
+                    {
+                        EbmlNode pn;
+                        pn.id = ID_SEEK_POS;
+                        pn.data = posBytes;
+                        seek.children.push_back(std::move(pn));
+                    }
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+            {
+                // Add a new Seek entry
+                EbmlNode seekIdNode;
+                seekIdNode.id = ID_SEEK_ID;
+                seekIdNode.data = targetIdBytes;
+
+                EbmlNode seekPosNode;
+                seekPosNode.id = ID_SEEK_POS;
+                seekPosNode.data = posBytes;
+
+                auto seekEntry = EbmlNode::Master(ID_SEEK, {
+                                                               std::move(seekIdNode),
+                                                               std::move(seekPosNode),
+                                                           });
+                shTree.children.push_back(std::move(seekEntry));
+            }
+
+            // Serialize and try to write in-place
+            // First try padded to exact original size
+            auto newShBytes = shTree.serializePadded(shOldTotal);
+            if (!newShBytes.empty())
+            {
+                FSEEK64(f, sh->pos, SEEK_SET);
+                fwrite(newShBytes.data(), 1, newShBytes.size(), f);
+                fflush(f);
+                return true;
+            }
+
+            // Try normal serialize — may be smaller or slightly larger
+            newShBytes = shTree.serialize();
+            int64_t newTotal = (int64_t)newShBytes.size();
+
+            if (newTotal <= shOldTotal)
+            {
+                // Fits in old space
+                FSEEK64(f, sh->pos, SEEK_SET);
+                fwrite(newShBytes.data(), 1, newShBytes.size(), f);
+                int64_t remaining = shOldTotal - newTotal;
+                if (remaining >= 2)
+                    writeVoid(sh->pos + newTotal, remaining);
+                else if (remaining == 1)
+                {
+                    FSEEK64(f, sh->pos + newTotal, SEEK_SET);
+                    uint8_t zero = 0;
+                    fwrite(&zero, 1, 1, f);
+                }
+                fflush(f);
+                return true;
+            }
+
+            // New SeekHead is larger than old. Check if there's a Void
+            // element immediately after that we can absorb.
+            int64_t shEnd = sh->pos + shOldTotal;
+            for (auto &e : elts)
+            {
+                if (e.id == ID_VOID && e.pos == shEnd)
+                {
+                    int64_t combined = shOldTotal + e.totalSize();
+                    if (combined >= newTotal)
+                    {
+                        FSEEK64(f, sh->pos, SEEK_SET);
+                        fwrite(newShBytes.data(), 1, newShBytes.size(), f);
+                        int64_t remaining = combined - newTotal;
+                        if (remaining >= 2)
+                            writeVoid(sh->pos + newTotal, remaining);
+                        else if (remaining == 1)
+                        {
+                            FSEEK64(f, sh->pos + newTotal, SEEK_SET);
+                            uint8_t zero = 0;
+                            fwrite(&zero, 1, 1, f);
+                        }
+                        e.id = 0; // consumed
+                        fflush(f);
+                        return true;
+                    }
+                }
+            }
+
+            // Can't fit — leave SeekHead unchanged
+            // Players will fall back to sequential scanning
+            return false;
         }
     };
 
@@ -932,22 +1123,28 @@ bool mkv::writeTag(const std::string &mkvPath,
     // Write back
     if (oldTags)
     {
-        L("mkv-tag: updating Tags element in-place (" +
+        L("mkv-tag: updating Tags element (" +
           std::to_string(oldTags->totalSize()) + " → " +
           std::to_string(newBytes.size()) + " bytes)");
-        bool ok = ctx.replaceL1(oldTags, newBytes);
-        if (ok)
+        int64_t pos = ctx.replaceL1(oldTags, newBytes);
+        if (pos >= 0)
+        {
+            ctx.updateSeekHead(ID_TAGS, pos);
             L("mkv-tag: wrote " + key + "=" + value);
-        return ok;
+        }
+        return pos >= 0;
     }
     else
     {
         L("mkv-tag: appending new Tags element (" +
           std::to_string(newBytes.size()) + " bytes)");
-        bool ok = ctx.appendAtEnd(newBytes);
-        if (ok)
+        int64_t pos = ctx.appendAtEnd(newBytes);
+        if (pos >= 0)
+        {
+            ctx.updateSeekHead(ID_TAGS, pos);
             L("mkv-tag: wrote " + key + "=" + value);
-        return ok;
+        }
+        return pos >= 0;
     }
 }
 
@@ -1037,17 +1234,23 @@ bool mkv::setCoverArt(const std::string &mkvPath,
 
     if (oldAttach)
     {
-        bool ok = ctx.replaceL1(oldAttach, newBytes);
-        if (ok)
+        int64_t pos = ctx.replaceL1(oldAttach, newBytes);
+        if (pos >= 0)
+        {
+            ctx.updateSeekHead(ID_ATTACHMENTS, pos);
             L("mkv-cover: cover art embedded");
-        return ok;
+        }
+        return pos >= 0;
     }
     else
     {
-        bool ok = ctx.appendAtEnd(newBytes);
-        if (ok)
+        int64_t pos = ctx.appendAtEnd(newBytes);
+        if (pos >= 0)
+        {
+            ctx.updateSeekHead(ID_ATTACHMENTS, pos);
             L("mkv-cover: cover art appended");
-        return ok;
+        }
+        return pos >= 0;
     }
 }
 
@@ -1130,7 +1333,10 @@ bool mkv::fixCoverMeta(const std::string &mkvPath, LogCb log)
     L("mkv-fixcover: patching Attachments (" +
       std::to_string(oldAttach->totalSize()) + " → " +
       std::to_string(newBytes.size()) + " bytes)");
-    return ctx.replaceL1(oldAttach, newBytes);
+    int64_t pos = ctx.replaceL1(oldAttach, newBytes);
+    if (pos >= 0)
+        ctx.updateSeekHead(ID_ATTACHMENTS, pos);
+    return pos >= 0;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1214,5 +1420,8 @@ bool mkv::setVR180SBS(const std::string &mkvPath, LogCb log)
     L("mkv-vr: patching Tracks (" +
       std::to_string(oldTracks->totalSize()) + " → " +
       std::to_string(newBytes.size()) + " bytes)");
-    return ctx.replaceL1(oldTracks, newBytes);
+    int64_t pos = ctx.replaceL1(oldTracks, newBytes);
+    if (pos >= 0)
+        ctx.updateSeekHead(ID_TRACKS, pos);
+    return pos >= 0;
 }

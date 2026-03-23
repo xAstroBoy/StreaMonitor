@@ -10,14 +10,21 @@
 //   ...
 //   if ALL offline → sleep → restart cycle
 //
-// Mobile dual-recording: when the API reports a mobile broadcaster,
-// ALL non-VR public pairings are recorded in parallel to capture
-// both camera views (mobile portrait + desktop landscape).
-// The API hint (apiMobileHint) TRIGGERS dual-recording, but the
-// actual output FOLDER (PC vs Mobile/) is determined exclusively
-// by stream resolution (isPortraitStream: h > w, ratio < 0.85).
-// The site API is NEVER trusted for folder decisions.
+// Mobile dual-recording: when the actual stream resolution shows a
+// portrait (mobile) orientation, ALL non-VR public pairings are
+// recorded in parallel to capture both camera views (mobile phone
+// = different camera = worth downloading from every public site).
+// Mobile detection uses the REAL stream resolution (h > w from the
+// master m3u8 RESOLUTION= tags parsed during getVideoUrl), NEVER
+// the site API's isMobile hint.
 // VR pairings are ALWAYS independent — never mobile, never parallel.
+//
+// Primary-source preference: pairing[0] is the preferred source.
+// If the primary is offline/private but an alternative is public,
+// we record from the alternative. While recording from any alt,
+// a watcher checks every ~10s if the primary came back online.
+// When it does, the alt download is cancelled and the cycle
+// restarts from the primary.
 // ─────────────────────────────────────────────────────────────────
 
 #include "core/site_plugin.h"
@@ -117,9 +124,12 @@ namespace sm
 
     private:
         void threadFunc(const AppConfig &config);
-        bool downloadFrom(GroupPairing &pairing, const AppConfig &config);
+        bool downloadFrom(GroupPairing &pairing, const AppConfig &config,
+                          const std::string &prefetchedUrl = "");
         bool downloadFromWithToken(GroupPairing &pairing, const AppConfig &config,
-                                   CancellationToken &token);
+                                   CancellationToken &token,
+                                   const std::string &prefetchedUrl = "");
+        bool probeStreamMobile(GroupPairing &pairing, std::string &videoUrlOut);
         void sleepInterruptible(int seconds);
         void updateGroupState();
         void emitStateChange(); // thread-safe: copies callback+state under lock, invokes outside

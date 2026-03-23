@@ -196,6 +196,13 @@ namespace sm
         // output folder decisions.  Default: false.
         virtual bool apiMobileHint() const { return false; }
 
+        // Last master playlist portrait detection.  Set during getVideoUrl()
+        // / selectResolution() after parsing the master m3u8 RESOLUTION=
+        // tags.  True = at least one variant is portrait (h > w, ratio <
+        // 0.85).  Used by ModelGroup for resolution-based dual-recording
+        // trigger — the REAL mobile signal, not the API hint.
+        bool lastMasterPortrait() const { return lastMasterPortrait_.load(); }
+
         // ── Master playlist URL (for SegmentFeeder monitoring) ───────
         // Stored by selectResolution() or site-specific getVideoUrl().
         // Used by the recorder to periodically re-fetch the master m3u8
@@ -219,6 +226,7 @@ namespace sm
         void setState(Status status);
         void setRecording(bool rec);
         void setMobile(bool mobile);
+        void setMasterPortrait(bool v) { lastMasterPortrait_.store(v); }
         void setLastError(const std::string &err, int httpCode = 0);
         void setLastApiResponse(const std::string &json);
         void setRecordingResolution(int width, int height);
@@ -254,9 +262,10 @@ namespace sm
         std::unique_ptr<std::jthread> thread_;
         std::atomic<bool> running_{false};
         std::atomic<bool> quitting_{false};
-        std::atomic<bool> resyncPending_{false}; // Force immediate status check
-        std::atomic<bool> streamMobile_{false};  // Stream-detected portrait (h > w)
-        std::atomic<bool> chunkReached_{false};  // Chunk boundary hit — restart recording
+        std::atomic<bool> resyncPending_{false};      // Force immediate status check
+        std::atomic<bool> streamMobile_{false};       // Stream-detected portrait (h > w)
+        std::atomic<bool> lastMasterPortrait_{false}; // Portrait variants in last parsed master m3u8
+        std::atomic<bool> chunkReached_{false};       // Chunk boundary hit — restart recording
         CancellationToken cancelToken_;
         std::string lastMasterUrl_; // Master playlist URL for feeder monitoring
         mutable std::mutex masterUrlMutex_;

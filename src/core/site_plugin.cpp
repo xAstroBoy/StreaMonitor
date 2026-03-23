@@ -540,6 +540,20 @@ namespace sm
             return masterUrl;
         }
 
+        // Check if any variant is portrait — store for ModelGroup probing
+        {
+            bool anyPortrait = false;
+            for (const auto &v : master.variants)
+            {
+                if (v.width > 0 && v.height > 0 && isPortraitStream(v.width, v.height))
+                {
+                    anyPortrait = true;
+                    break;
+                }
+            }
+            setMasterPortrait(anyPortrait);
+        }
+
         for (const auto &v : master.variants)
         {
             std::string audioInfo = v.audioGroupId.empty() ? "" : " audio=" + v.audioGroupId;
