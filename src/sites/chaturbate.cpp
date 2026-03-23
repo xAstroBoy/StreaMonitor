@@ -81,7 +81,7 @@ namespace sm
                 // Exponential backoff with jitter
                 if (attempt > 0)
                 {
-                    static std::mt19937 rng(std::random_device{}());
+                    thread_local std::mt19937 rng(std::random_device{}());
                     std::uniform_real_distribution<> jitter(0.1, 0.5);
                     double delay = baseDelay * std::pow(2, attempt - 1) + jitter(rng);
                     std::this_thread::sleep_for(

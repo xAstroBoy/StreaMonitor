@@ -333,7 +333,7 @@ namespace sm
         // CDN hosts to try (Python shuffles these)
         std::vector<std::string> cdnHosts = {"doppiocdn.org", "doppiocdn.com", "doppiocdn.net", "doppiocdn.live"};
         {
-            static std::mt19937 rng(std::random_device{}());
+            thread_local std::mt19937 rng(std::random_device{}());
             std::shuffle(cdnHosts.begin(), cdnHosts.end(), rng);
         }
 

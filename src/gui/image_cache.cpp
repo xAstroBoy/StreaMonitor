@@ -23,21 +23,20 @@ namespace sm
 
     ImageCache::~ImageCache()
     {
-        // Signal all detached download threads to stop touching our members.
+        // Signal all download threads to stop touching our members.
         shuttingDown_.store(true);
 
-        // Wait for in-flight download threads to finish (they check shuttingDown_
-        // and bail before locking any mutex). WinHTTP has a built-in timeout so
-        // this won't block forever — typically < 10 seconds worst case.
-        int waitMs = 0;
-        while (activeDownloads_.load() > 0 && waitMs < 10000)
+        // Join ALL tracked download threads. No timeout — WinHTTP's own
+        // 10s-per-phase timeouts (resolve/connect/send/receive) guarantee
+        // each thread will finish within ~40s. This eliminates the
+        // use-after-free that occurred when the old 10s timeout expired
+        // and members were destroyed while threads were still running.
+        for (auto &t : downloadThreads_)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            waitMs += 10;
+            if (t.joinable())
+                t.join();
         }
-        if (activeDownloads_.load() > 0)
-            spdlog::warn("[ImageCache] {} downloads still in-flight at destruction",
-                         activeDownloads_.load());
+        downloadThreads_.clear();
 
         // clear() queues textures for deletion; process them now.
         // Destructor runs on the main (GL) thread during app teardown.
@@ -117,12 +116,30 @@ namespace sm
             }
         }
 
+        // Reap finished download threads (runs once per frame, vector has ≤4 entries)
+        downloadThreads_.erase(
+            std::remove_if(downloadThreads_.begin(), downloadThreads_.end(),
+                           [](std::thread &t)
+                           {
+                               if (!t.joinable())
+                                   return true;
+#ifdef _WIN32
+                               if (WaitForSingleObject(t.native_handle(), 0) == WAIT_OBJECT_0)
+                               {
+                                   t.join();
+                                   return true;
+                               }
+#endif
+                               return false;
+                           }),
+            downloadThreads_.end());
+
         // Start async download (limit concurrent threads)
         if (activeDownloads_.load() < 4)
         {
             cache_[url] = Entry{State::Loading, 0, 0, 0, std::chrono::steady_clock::now()};
             activeDownloads_.fetch_add(1);
-            std::thread([this, url]()
+            downloadThreads_.emplace_back([this, url]()
                         {
                             try {
                                 downloadAndDecode(url);
@@ -138,8 +155,7 @@ namespace sm
                                 if (!shuttingDown_.load())
                                     spdlog::error("[ImageCache] unknown download exception");
                             }
-                            activeDownloads_.fetch_sub(1); })
-                .detach();
+                            activeDownloads_.fetch_sub(1); });
         }
         else
         {
