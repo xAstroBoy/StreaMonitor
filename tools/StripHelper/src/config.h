@@ -20,7 +20,6 @@ namespace sh
     // ── FFmpeg / FFprobe / MKVToolNix paths ─────────────────────────────────────
     inline std::string g_ffmpeg = "ffmpeg";
     inline std::string g_ffprobe = "ffprobe";
-    inline std::string g_mkvpropedit = "mkvpropedit";
 
     // ── Validation thresholds ───────────────────────────────────────────────────
     // NOTE: For MKV concat output, be more lenient - container duration metadata
@@ -75,39 +74,6 @@ namespace sh
             g_ffmpeg = p;
         if (auto *p = std::getenv("FFPROBE"))
             g_ffprobe = p;
-        if (auto *p = std::getenv("MKVPROPEDIT"))
-            g_mkvpropedit = p;
-
-        // Auto-detect mkvpropedit if not in PATH
-        // Check common install locations on Windows
-#ifdef _WIN32
-        if (g_mkvpropedit == "mkvpropedit")
-        {
-            // Test if bare command works (in PATH)
-            DWORD attr = GetFileAttributesA("mkvpropedit.exe");
-            bool inPath = false;
-            {
-                char buf[MAX_PATH];
-                inPath = SearchPathA(nullptr, "mkvpropedit.exe", nullptr, MAX_PATH, buf, nullptr) > 0;
-            }
-            if (!inPath)
-            {
-                // Check common install locations
-                const char *candidates[] = {
-                    R"(C:\Program Files\MKVToolNix\mkvpropedit.exe)",
-                    R"(C:\Program Files (x86)\MKVToolNix\mkvpropedit.exe)",
-                };
-                for (auto *c : candidates)
-                {
-                    if (GetFileAttributesA(c) != INVALID_FILE_ATTRIBUTES)
-                    {
-                        g_mkvpropedit = c;
-                        break;
-                    }
-                }
-            }
-        }
-#endif
 
         // Settings file lives next to the exe
         SETTINGS_PATH = getExeDir() / "settings.json";

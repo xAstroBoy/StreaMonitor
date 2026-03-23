@@ -2074,7 +2074,7 @@ namespace tt
             }
 
             ImGui::Spacing();
-            if (ImGui::Checkbox("Embed thumbnail in MKV (requires mkvpropedit)", &embed))
+            if (ImGui::Checkbox("Embed thumbnail in MKV (native)", &embed))
                 embedInVideo.store(embed);
 
             // Section: Shell Integration

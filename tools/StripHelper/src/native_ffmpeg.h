@@ -79,4 +79,16 @@ namespace sh
     // Most expensive but most accurate for damaged containers.
     double nativeFrameCount(const fs::path &filePath);
 
+    // ── Encoder availability (replaces subprocess ffmpeg -encoders) ──
+    // Uses avcodec_find_encoder_by_name() — no subprocess needed.
+    bool nativeEncoderAvailable(const std::string &name);
+
+    // ── CUDA hardware acceleration check ─────────────────────────────
+    // Tries to create a CUDA device context via av_hwdevice_ctx_create().
+    bool nativeCudaAvailable();
+
+    // ── Full probe as JSON-like struct (replaces ffprobeJsonFull) ─────
+    // Returns full stream info; caller can inspect all fields.
+    // (NativeProbeResult already covers this — use nativeProbe)
+
 } // namespace sh

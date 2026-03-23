@@ -300,283 +300,70 @@ namespace sh
             note(stage + " OK");
     }
 
-    // ── FFprobe helpers ─────────────────────────────────────────────────────────
-
-    static double ffprobeNum(const fs::path &fp, const fs::path &cwd, const std::vector<std::string> &extra)
-    {
-        std::vector<std::string> args = {g_ffprobe, "-v", "error"};
-        args.insert(args.end(), extra.begin(), extra.end());
-        args.push_back(fp.filename().string());
-        auto r = runProcess(args, cwd, true);
-        if (r.exitCode != 0)
-            return 0.0;
-        auto s = r.output;
-        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
-            s.pop_back();
-        // Take first line
-        auto nl = s.find('\n');
-        if (nl != std::string::npos)
-            s = s.substr(0, nl);
-        while (!s.empty() && (s.back() == '\r'))
-            s.pop_back();
-        if (s.empty() || s == "N/A")
-            return 0.0;
-        try
-        {
-            return std::stod(s);
-        }
-        catch (...)
-        {
-            return 0.0;
-        }
-    }
+    // ── FFprobe helpers — fully native (no subprocess fallback) ────────────────
 
     bool ffprobeOk(const fs::path &fp, const fs::path &cwd)
     {
-        // Native fast-path: ~10ms vs ~200ms subprocess
         fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
-        if (nativeProbeOk(full))
-            return true;
-        // Fall back to subprocess
-        auto r = runProcess({g_ffprobe, "-v", "error", "-i", fp.filename().string()}, cwd, false);
-        return r.exitCode == 0;
+        return nativeProbeOk(full);
     }
 
     double ffprobeFormatDuration(const fs::path &fp, const fs::path &cwd)
     {
-        // Native fast-path
         fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
-        double d = nativeProbeDuration(full);
-        if (d > 0)
-            return d;
-        return ffprobeNum(fp, cwd, {"-show_entries", "format=duration", "-of", "default=nw=1:nk=1"});
+        return nativeProbeDuration(full);
     }
 
     double ffprobeStreamDuration(const fs::path &fp, const fs::path &cwd, const std::string &sel)
     {
-        // Native fast-path
         fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
-        double d = nativeStreamDuration(full, sel);
-        if (d > 0)
-            return d;
-        // Fall back to subprocess
-        return ffprobeNum(fp, cwd, {"-select_streams", sel, "-show_entries", "stream=duration", "-of", "default=nw=1:nk=1"});
+        return nativeStreamDuration(full, sel);
     }
 
     double ffprobeBestDuration(const fs::path &fp, const fs::path &cwd)
     {
-        // Native fast-path: single avformat_open_input vs 3 subprocess calls
         fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
         double d = nativeProbeDuration(full);
         if (d > 0)
             return d;
-        // Fall back to subprocess multi-query
-        double fmt = ffprobeFormatDuration(fp, cwd);
-        double vd = ffprobeStreamDuration(fp, cwd, "v:0");
-        double ad = ffprobeStreamDuration(fp, cwd, "a:0");
-        return std::max({fmt, vd, ad});
+        // Also check individual streams
+        double vd = nativeStreamDuration(full, "v:0");
+        double ad = nativeStreamDuration(full, "a:0");
+        return std::max({d, vd, ad});
     }
 
     double ffprobeLastPacketPts(const fs::path &fp, const fs::path &cwd)
     {
-        // Native fast-path — reads all packets via libavformat
         fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
-        double d = nativeLastPacketPts(full);
-        if (d > 0)
-            return d;
-        // Fall back to subprocess
-        try
-        {
-            auto fname = fp.filename().string();
-            auto vr = runProcess({g_ffprobe, "-v", "error", "-select_streams", "v:0",
-                                  "-show_packets", "-show_entries", "packet=pts_time",
-                                  "-of", "csv=p=0", "-read_intervals", "%+#9999999", fname},
-                                 cwd, true);
-            auto ar = runProcess({g_ffprobe, "-v", "error", "-select_streams", "a:0",
-                                  "-show_packets", "-show_entries", "packet=pts_time",
-                                  "-of", "csv=p=0", "-read_intervals", "%+#9999999", fname},
-                                 cwd, true);
-
-            auto lastLine = [](const std::string &text) -> double
-            {
-                auto lines = text;
-                while (!lines.empty() && (lines.back() == '\n' || lines.back() == '\r'))
-                    lines.pop_back();
-                auto pos = lines.rfind('\n');
-                std::string last = (pos != std::string::npos) ? lines.substr(pos + 1) : lines;
-                while (!last.empty() && last.back() == '\r')
-                    last.pop_back();
-                try
-                {
-                    return std::stod(last);
-                }
-                catch (...)
-                {
-                    return 0.0;
-                }
-            };
-            return std::max(lastLine(vr.output), lastLine(ar.output));
-        }
-        catch (...)
-        {
-            return 0.0;
-        }
+        return nativeLastPacketPts(full);
     }
 
     double ffprobeFramesDuration(const fs::path &fp, const fs::path &cwd)
     {
-        // Native fast-path — counts packets via libavformat (no subprocess)
         fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
-        double d = nativeFrameCount(full);
-        if (d > 0)
-            return d;
-        // Fall back to subprocess
-        auto fname = fp.filename().string();
-        // avg_frame_rate
-        auto r1 = runProcess({g_ffprobe, "-v", "error", "-select_streams", "v:0",
-                              "-show_entries", "stream=avg_frame_rate", "-of", "default=nw=1:nk=1", fname},
-                             cwd, true);
-        std::string afr = r1.output;
-        while (!afr.empty() && (afr.back() == '\n' || afr.back() == '\r'))
-            afr.pop_back();
-        double fps = 0.0;
-        auto sl = afr.find('/');
-        if (sl != std::string::npos)
-        {
-            try
-            {
-                double num = std::stod(afr.substr(0, sl));
-                double den = std::stod(afr.substr(sl + 1));
-                fps = (den > 0) ? num / den : 0.0;
-            }
-            catch (...)
-            {
-            }
-        }
-
-        // nb_read_frames (slow — decodes)
-        auto r2 = runProcess({g_ffprobe, "-v", "error", "-count_frames", "1",
-                              "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames",
-                              "-of", "default=nw=1:nk=1", fname},
-                             cwd, true);
-        std::string nb = r2.output;
-        while (!nb.empty() && (nb.back() == '\n' || nb.back() == '\r'))
-            nb.pop_back();
-        int frames = 0;
-        try
-        {
-            frames = std::stoi(nb);
-        }
-        catch (...)
-        {
-        }
-
-        if (fps > 0.0 && frames > 0)
-            return static_cast<double>(frames) / fps;
-        return 0.0;
-    }
-
-    nlohmann::json ffprobeJsonFull(const fs::path &fp, const fs::path &cwd)
-    {
-        auto r = runProcess({g_ffprobe, "-v", "error", "-show_streams", "-show_format",
-                             "-print_format", "json", fp.filename().string()},
-                            cwd, true);
-        if (r.exitCode != 0 || r.output.empty())
-            return {};
-        try
-        {
-            return nlohmann::json::parse(r.output);
-        }
-        catch (...)
-        {
-            return {};
-        }
-    }
-
-    static double parseFpsRatio(const std::string &s)
-    {
-        if (s.empty() || s == "0/0")
-            return 0.0;
-        auto sl = s.find('/');
-        if (sl != std::string::npos)
-        {
-            try
-            {
-                double a = std::stod(s.substr(0, sl));
-                double b = std::stod(s.substr(sl + 1));
-                return (b > 0) ? a / b : 0.0;
-            }
-            catch (...)
-            {
-                return 0.0;
-            }
-        }
-        try
-        {
-            return std::stod(s);
-        }
-        catch (...)
-        {
-            return 0.0;
-        }
+        return nativeFrameCount(full);
     }
 
     ProbeSig probeSignature(const fs::path &fp, const fs::path &cwd)
     {
-        // Native fast-path: direct libavformat probe
         ProbeSig sig;
         fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
         auto np = nativeProbe(full);
-        if (np.hasVideo || np.hasAudio)
-        {
-            sig.hasV = np.hasVideo;
-            sig.hasA = np.hasAudio;
-            sig.vCodec = np.videoCodec;
-            sig.vW = np.width;
-            sig.vH = np.height;
-            sig.vPix = np.pixFmt;
-            sig.vFps = np.fps;
-            sig.aCodec = np.audioCodec;
-            sig.aSr = np.sampleRate;
-            sig.aCh = np.channels;
-            return sig;
-        }
 
-        // Fall back to subprocess ffprobe JSON
-        auto j = ffprobeJsonFull(fp, cwd);
-        for (auto &s : j.value("streams", nlohmann::json::array()))
-        {
-            auto ct = s.value("codec_type", "");
-            if (ct == "video" && !sig.hasV)
-            {
-                sig.hasV = true;
-                sig.vCodec = s.value("codec_name", "");
-                sig.vW = s.value("width", 0);
-                sig.vH = s.value("height", 0);
-                sig.vPix = s.value("pix_fmt", "");
-                std::string fpsStr = s.value("avg_frame_rate", s.value("r_frame_rate", ""));
-                sig.vFps = parseFpsRatio(fpsStr);
-            }
-            else if (ct == "audio" && !sig.hasA)
-            {
-                sig.hasA = true;
-                sig.aCodec = s.value("codec_name", "");
-                auto srStr = s.value("sample_rate", "0");
-                try
-                {
-                    sig.aSr = std::stoi(srStr);
-                }
-                catch (...)
-                {
-                }
-                sig.aCh = s.value("channels", 0);
-                sig.aLayout = s.value("channel_layout", "");
-            }
-        }
+        sig.hasV = np.hasVideo;
+        sig.hasA = np.hasAudio;
+        sig.vCodec = np.videoCodec;
+        sig.vW = np.width;
+        sig.vH = np.height;
+        sig.vPix = np.pixFmt;
+        sig.vFps = np.fps;
+        sig.aCodec = np.audioCodec;
+        sig.aSr = np.sampleRate;
+        sig.aCh = np.channels;
         return sig;
     }
 
-    // ── Encoder detection ───────────────────────────────────────────────────────
+    // ── Encoder detection — fully native (avcodec_find_encoder_by_name) ────────
 
     static std::mutex g_encoderMtx;
     static std::map<std::string, bool> g_encoderCache;
@@ -588,35 +375,22 @@ namespace sh
         if (!g_encoderCache.empty())
             return g_encoderCache;
 
-        // CRITICAL: -encoders outputs to STDOUT, so captureStdout must be TRUE
-        auto r = runProcess({g_ffmpeg, "-hide_banner", "-encoders"}, fs::current_path(), true);
-        std::string text = r.output;
+        // Direct codec registry lookup — no subprocess needed
+        const char *names[] = {
+            "h264_nvenc", "hevc_nvenc", "av1_nvenc",
+            "h264_qsv", "hevc_qsv", "av1_qsv",
+            "h264_amf", "hevc_amf", "av1_amf",
+            "libx264", "libx265"};
+        for (auto *n : names)
+            g_encoderCache[n] = nativeEncoderAvailable(n);
 
-        auto has = [&](const std::string &name) -> bool
-        {
-            // look for e.g. " h264_nvenc " in the encoders list
-            return text.find(name) != std::string::npos;
-        };
-
-        g_encoderCache["h264_nvenc"] = has("h264_nvenc");
-        g_encoderCache["hevc_nvenc"] = has("hevc_nvenc");
-        g_encoderCache["av1_nvenc"] = has("av1_nvenc");
-        g_encoderCache["h264_qsv"] = has("h264_qsv");
-        g_encoderCache["hevc_qsv"] = has("hevc_qsv");
-        g_encoderCache["av1_qsv"] = has("av1_qsv");
-        g_encoderCache["h264_amf"] = has("h264_amf");
-        g_encoderCache["hevc_amf"] = has("hevc_amf");
-        g_encoderCache["av1_amf"] = has("av1_amf");
-        g_encoderCache["libx264"] = has("libx264");
-        g_encoderCache["libx265"] = has("libx265");
-        g_aacMf = has("aac_mf") ? 1 : 0;
+        g_aacMf = nativeEncoderAvailable("aac_mf") ? 1 : 0;
 
         return g_encoderCache;
     }
 
     bool hasAacMf()
     {
-        // detectEncoders() already guards g_aacMf under g_encoderMtx
         detectEncoders();
         std::lock_guard lk(g_encoderMtx);
         return g_aacMf == 1;
@@ -627,98 +401,19 @@ namespace sh
         return hasAacMf() ? "aac_mf" : "aac";
     }
 
-    // ── Hardware acceleration detection ─────────────────────────────────────────
+    // ── Hardware acceleration detection — native ────────────────────────────────
 
-    static std::mutex g_cudaMtx;
     bool hasCudaHwaccel()
     {
-        static std::atomic<int> cached{-1};
-        int val = cached.load(std::memory_order_acquire);
-        if (val >= 0)
-            return val == 1;
-        std::lock_guard lk(g_cudaMtx);
-        val = cached.load(std::memory_order_relaxed); // re-check under lock
-        if (val >= 0)
-            return val == 1;
-        auto r = runProcess({g_ffmpeg, "-hide_banner", "-hwaccels"}, fs::current_path(), false);
-        val = (r.output.find("cuda") != std::string::npos) ? 1 : 0;
-        cached.store(val, std::memory_order_release);
-        return val == 1;
+        return nativeCudaAvailable();
     }
 
-    // ── PTS continuity analysis ─────────────────────────────────────────────────
+    // ── PTS continuity analysis — fully native ────────────────────────────────
 
     double detectMaxPtsJump(const fs::path &fp, const fs::path &cwd)
     {
-        // Native fast-path: direct packet reading, no subprocess
         fs::path full = fp.is_absolute() ? fp : cwd / fp.filename();
-        double nativeResult = nativeDetectMaxPtsJump(full);
-        if (nativeResult > 0)
-            return nativeResult;
-
-        // Fall back to subprocess-based analysis
-        double duration = ffprobeBestDuration(fp, cwd);
-        if (duration <= 0.0)
-            duration = 600.0; // fallback assumption
-
-        // Build -read_intervals string: "0%+3,30%+3,60%+3,..."
-        // Sample a 3-second window every 30 seconds, plus the last 10 seconds.
-        constexpr double windowSec = 3.0;
-        constexpr double stepSec = 30.0;
-        std::string intervals;
-        for (double t = 0.0; t < duration; t += stepSec)
-        {
-            if (!intervals.empty())
-                intervals += ',';
-            // Format: start%+duration  (% prefix = seconds from start)
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%.1f%%+%.1f", t, windowSec);
-            intervals += buf;
-        }
-        // Always sample the tail (last 10 seconds)
-        if (duration > 15.0)
-        {
-            if (!intervals.empty())
-                intervals += ',';
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%.1f%%+10", std::max(0.0, duration - 10.0));
-            intervals += buf;
-        }
-
-        auto r = runProcess({g_ffprobe, "-v", "error", "-select_streams", "v:0",
-                             "-show_entries", "packet=pts_time", "-of", "csv=p=0",
-                             "-read_intervals", intervals,
-                             fp.filename().string()},
-                            cwd, true);
-        if (r.exitCode != 0)
-            return 0.0;
-
-        double maxJump = 0.0;
-        double prev = -1.0;
-        std::istringstream ss(r.output);
-        std::string line;
-        while (std::getline(ss, line))
-        {
-            while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
-                line.pop_back();
-            if (line.empty() || line == "N/A")
-                continue;
-            try
-            {
-                double pts = std::stod(line);
-                if (prev >= 0.0)
-                {
-                    double delta = pts - prev;
-                    if (delta > maxJump)
-                        maxJump = delta;
-                }
-                prev = pts;
-            }
-            catch (...)
-            {
-            }
-        }
-        return maxJump;
+        return nativeDetectMaxPtsJump(full);
     }
 
 } // namespace sh

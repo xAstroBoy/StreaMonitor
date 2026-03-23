@@ -797,10 +797,6 @@ namespace sh
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "FFprobe:");
         ImGui::SameLine();
         ImGui::TextWrapped("%s", g_ffprobe.c_str());
-
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "mkvpropedit:");
-        ImGui::SameLine();
-        ImGui::TextWrapped("%s", g_mkvpropedit.c_str());
     }
 
     void App::renderSettingsThumbnails()
@@ -1476,7 +1472,7 @@ namespace sh
                     if (sm::isVRFromPath(folder.string()))
                     {
                         noteCb("injecting VR 180° SBS metadata...");
-                        sm::injectVRSpatialMetadata(merged.string(), logCb, g_mkvpropedit);
+                        sm::injectVRSpatialMetadata(merged.string(), logCb);
                     }
                 }
                 catch (const std::exception &e)
@@ -1520,7 +1516,7 @@ namespace sh
                         // Embed thumbnail as cover art inside the MKV
                         if (fs::exists(thumbPath))
                         {
-                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), logCb, g_mkvpropedit, true);
+                            sm::embedThumbnailInMKV(merged.string(), thumbPath.string(), logCb, "", true);
 
                             // Delete .thumb.jpg after successful embed
                             std::error_code ec;
@@ -1532,7 +1528,7 @@ namespace sh
                         }
 
                         // Fix DLNA cover attachment metadata
-                        sm::fixCoverAttachmentMetadata(merged.string(), logCb, g_mkvpropedit);
+                        sm::fixCoverAttachmentMetadata(merged.string(), logCb);
                     }
                     catch (const std::exception &e)
                     {
@@ -1543,7 +1539,7 @@ namespace sh
                 // 3. Write THUMBNAILED=done tag (marks file as fully processed)
                 try
                 {
-                    sm::writeProcessedTag(merged.string(), logCb, g_mkvpropedit);
+                    sm::writeProcessedTag(merged.string(), logCb);
                 }
                 catch (const std::exception &e)
                 {

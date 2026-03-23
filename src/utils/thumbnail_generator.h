@@ -60,22 +60,20 @@ namespace sm
     // Check if a video path indicates VR content (folder contains [SCVR], [DCVR], etc.)
     bool isVRFromPath(const std::string &videoPath);
 
-    // Inject VR 180° SBS spatial metadata into a Matroska file via mkvpropedit.
-    // Sets native Matroska track elements:
+    // Inject VR 180° SBS spatial metadata into a Matroska file (native remux).
+    // Sets Matroska track elements via FFmpeg side-data during stream-copy remux:
     //   StereoMode=1 (side-by-side, left eye first)
-    //   ProjectionType=1 (equirectangular)
-    //   ProjectionPose yaw/pitch/roll = 0
+    //   ProjectionType=equirectangular (180° hemisphere via tile bounds)
     // Idempotent — safe to call multiple times on the same file.
     bool injectVRSpatialMetadata(
         const std::string &mkvPath,
         std::function<void(const std::string &)> logCb = nullptr,
         const std::string &mkvpropeditPath = "");
 
-    // Embed a JPEG thumbnail as cover art + inject VR spatial metadata.
-    // Handles all video formats: remuxes to MKV first, embeds cover via mkvpropedit,
-    // then injects VR180 SBS metadata for VR content (auto-detected from folder path).
-    // Skips cover embed if already has cover art (unless forceRegenerate=true).
-    // VR metadata is always injected for VR paths.
+    // Embed a JPEG thumbnail as cover art + inject VR spatial metadata (native remux).
+    // Handles all video formats: remuxes to MKV first, embeds cover via native
+    // FFmpeg attached_pic stream, then injects VR180 SBS metadata for VR content
+    // (auto-detected from folder path). All done in a single remux pass.
     // Returns true on success; on failure the .jpg file is kept alongside.
     bool embedThumbnailInMKV(
         const std::string &videoPath,
@@ -85,7 +83,7 @@ namespace sm
         bool forceRegenerate = false);
 
     // Fix existing cover art attachment to have proper description for DLNA compatibility.
-    // Uses mkvpropedit to update attachment metadata (name + description).
+    // Uses native remux to update attachment metadata (name + description).
     // Idempotent — safe to call on files that already have correct metadata.
     bool fixCoverAttachmentMetadata(
         const std::string &mkvPath,
@@ -110,7 +108,7 @@ namespace sm
     // Reads MKV global tags looking for THUMBNAILED=done.
     bool hasProcessedTag(const std::string &videoPath);
 
-    // Write a "processed" tag into MKV metadata via mkvpropedit.
+    // Write a "processed" tag into MKV metadata (native remux).
     // Sets global tag THUMBNAILED=done. Idempotent.
     bool writeProcessedTag(
         const std::string &mkvPath,

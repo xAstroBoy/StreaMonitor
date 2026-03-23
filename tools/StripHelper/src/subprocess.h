@@ -74,7 +74,6 @@ namespace sh
     double ffprobeStreamDuration(const fs::path &fp, const fs::path &cwd, const std::string &sel);
     double ffprobeLastPacketPts(const fs::path &fp, const fs::path &cwd);
     double ffprobeFramesDuration(const fs::path &fp, const fs::path &cwd);
-    nlohmann::json ffprobeJsonFull(const fs::path &fp, const fs::path &cwd);
     ProbeSig probeSignature(const fs::path &fp, const fs::path &cwd);
 
     // ── Encoder detection ───────────────────────────────────────────────────────

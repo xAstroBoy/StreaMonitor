@@ -5,6 +5,7 @@
 
 #include "native_ffmpeg.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <unordered_map>
 
@@ -17,6 +18,7 @@ extern "C"
 #include <libavutil/opt.h>
 #include <libavutil/dict.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/hwcontext.h>
 }
 
 namespace sh
@@ -684,6 +686,37 @@ namespace sh
             return 0;
 
         return static_cast<double>(frameCount) / fps;
+    }
+
+    // ── Encoder availability ─────────────────────────────────────────
+    // Direct avcodec lookup — no subprocess needed.
+
+    bool nativeEncoderAvailable(const std::string &name)
+    {
+        const AVCodec *codec = avcodec_find_encoder_by_name(name.c_str());
+        return codec != nullptr;
+    }
+
+    // ── CUDA hardware acceleration ───────────────────────────────────
+    // Try to create a CUDA device context. If the driver/GPU is missing
+    // this returns false instantly (no subprocess, no console flash).
+
+    bool nativeCudaAvailable()
+    {
+        static std::atomic<int> cached{-1};
+        int val = cached.load(std::memory_order_acquire);
+        if (val >= 0)
+            return val == 1;
+
+        AVBufferRef *hwCtx = nullptr;
+        int ret = av_hwdevice_ctx_create(&hwCtx, AV_HWDEVICE_TYPE_CUDA,
+                                         nullptr, nullptr, 0);
+        bool ok = (ret >= 0);
+        if (hwCtx)
+            av_buffer_unref(&hwCtx);
+
+        cached.store(ok ? 1 : 0, std::memory_order_release);
+        return ok;
     }
 
 } // namespace sh
