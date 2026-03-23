@@ -216,11 +216,13 @@ namespace sm
 
     size_t ModelGroup::pairingCount() const
     {
+        std::lock_guard lock(pairingsMutex_);
         return pairings_.size();
     }
 
     std::vector<std::pair<std::string, std::string>> ModelGroup::getPairings() const
     {
+        std::lock_guard lock(pairingsMutex_);
         std::vector<std::pair<std::string, std::string>> result;
         result.reserve(pairings_.size());
         for (const auto &p : pairings_)
@@ -230,7 +232,8 @@ namespace sm
 
     void ModelGroup::updateGroupState()
     {
-        std::lock_guard lock(stateMutex_);
+        std::lock_guard pLock(pairingsMutex_);
+        std::lock_guard sLock(stateMutex_);
         state_.pairings.clear();
         for (const auto &p : pairings_)
         {
@@ -280,7 +283,12 @@ namespace sm
             {
                 bool anyLive = false;
 
-                for (size_t i = 0; i < pairings_.size() && running_.load() && !quitting_.load(); i++)
+                size_t numPairings;
+                {
+                    std::lock_guard pLock(pairingsMutex_);
+                    numPairings = pairings_.size();
+                }
+                for (size_t i = 0; i < numPairings && running_.load() && !quitting_.load(); i++)
                 {
                     auto &pairing = pairings_[i];
 
@@ -305,10 +313,13 @@ namespace sm
                         status = Status::RateLimit;
                     }
 
-                    pairing.lastStatus = status;
-                    // Use API mobile hint for dual-recording trigger.
-                    // Actual mobile detection is from stream resolution.
-                    pairing.lastMobile = pairing.plugin->apiMobileHint();
+                    {
+                        std::lock_guard pLock(pairingsMutex_);
+                        pairing.lastStatus = status;
+                        // Use API mobile hint for dual-recording trigger.
+                        // Actual mobile detection is from stream resolution.
+                        pairing.lastMobile = pairing.plugin->apiMobileHint();
+                    }
 
                     // Update state for GUI
                     {
@@ -371,8 +382,11 @@ namespace sm
                                 {
                                     continue;
                                 }
-                                other.lastStatus = otherStatus;
-                                other.lastMobile = other.plugin->apiMobileHint();
+                                {
+                                    std::lock_guard pLock(pairingsMutex_);
+                                    other.lastStatus = otherStatus;
+                                    other.lastMobile = other.plugin->apiMobileHint();
+                                }
 
                                 // Update GUI state for this pairing
                                 {

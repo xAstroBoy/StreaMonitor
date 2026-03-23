@@ -343,7 +343,8 @@ namespace sm
         template <typename Fn>
         void safeDetach(Fn &&fn, const char *ctx = "background")
         {
-            auto task = [f = std::forward<Fn>(fn), ctx, this]() {
+            auto task = [f = std::forward<Fn>(fn), ctx, this]()
+            {
                 if (shuttingDown_.load())
                     return;
                 try

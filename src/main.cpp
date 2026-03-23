@@ -88,7 +88,7 @@ static bool acquireSingleInstance()
 
     PROCESSENTRY32W pe{};
     pe.dwSize = sizeof(pe);
-    
+
     int processCount = 0;
     const int MAX_PROCESS_CHECK = 1000; // Prevent infinite loops
 
@@ -96,11 +96,12 @@ static bool acquireSingleInstance()
     {
         do
         {
-            if (++processCount > MAX_PROCESS_CHECK) {
+            if (++processCount > MAX_PROCESS_CHECK)
+            {
                 CloseHandle(snap);
                 return true; // Too many processes, allow running to be safe
             }
-            
+
             if (pe.th32ProcessID == myPid)
                 continue;
 
@@ -244,13 +245,31 @@ int main(int argc, char **argv)
     // Writes detailed stack traces to crashes/ on any unhandled crash.
     sm::installCrashHandler("crashes");
 
-    // Check for --no-duplicate-check flag
+    // Check for --no-duplicate-check or --crash-restart flags
     bool checkDuplicates = true;
-    for (int i = 1; i < argc; i++) {
-        if (std::strcmp(argv[i], "--no-duplicate-check") == 0) {
+    bool crashRestart = false;
+    for (int i = 1; i < argc; i++)
+    {
+        if (std::strcmp(argv[i], "--no-duplicate-check") == 0)
+        {
             checkDuplicates = false;
-            break;
         }
+        if (std::strcmp(argv[i], "--crash-restart") == 0)
+        {
+            checkDuplicates = false; // Skip duplicate check on crash restart
+            crashRestart = true;
+        }
+    }
+
+    if (crashRestart)
+    {
+        // Brief delay after crash to let the old process fully exit
+        // and release all resources (files, sockets, GPU contexts)
+#ifdef _WIN32
+        Sleep(2000);
+#else
+        usleep(2000000);
+#endif
     }
 
     // ── Anti-duplicate: prevent running two copies at once ──────

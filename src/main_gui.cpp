@@ -81,6 +81,7 @@ static std::shared_ptr<sm::ImGuiLogSink> initLogging()
 }
 
 int guiMain(int argc, char **argv)
+try
 {
     // Signal handlers
     std::signal(SIGINT, signalHandler);
@@ -184,4 +185,14 @@ int guiMain(int argc, char **argv)
 
     spdlog::info("Goodbye!");
     return exitCode;
+}
+catch (const std::exception &e)
+{
+    spdlog::error("FATAL exception in guiMain: {}", e.what());
+    return 1;
+}
+catch (...)
+{
+    spdlog::error("FATAL unknown exception in guiMain");
+    return 1;
 }

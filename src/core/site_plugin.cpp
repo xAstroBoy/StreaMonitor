@@ -156,8 +156,11 @@ namespace sm
             }
         }
 
+        // getWebsiteUrl() is virtual and calls username() which locks stateMutex_
+        // — compute it BEFORE taking the lock to avoid deadlock.
+        std::string url = getWebsiteUrl();
         std::lock_guard lock(stateMutex_);
-        state_.websiteUrl = getWebsiteUrl();
+        state_.websiteUrl = url;
     }
 
     void SitePlugin::start(const AppConfig &config)
@@ -170,12 +173,15 @@ namespace sm
         quitting_.store(false);
         cancelToken_.reset();
 
+        // getWebsiteUrl() is virtual and calls username() which locks stateMutex_
+        // — compute it BEFORE taking the lock to avoid deadlock.
+        std::string wsUrl = getWebsiteUrl();
         {
             std::lock_guard lock(stateMutex_);
             state_.running = true;
             state_.quitting = false;
             state_.consecutiveErrors = 0;
-            state_.websiteUrl = getWebsiteUrl();
+            state_.websiteUrl = wsUrl;
         }
 
         http_.setDefaultUserAgent(config.userAgent);
@@ -351,11 +357,13 @@ namespace sm
 
     void SitePlugin::setUsername(const std::string &newUsername)
     {
-        if (newUsername.empty() || newUsername == username_)
+        if (newUsername.empty())
+            return;
+        std::lock_guard lock(stateMutex_);
+        if (newUsername == username_)
             return;
         logger_->info("Username updated: {} -> {}", username_, newUsername);
         username_ = newUsername;
-        std::lock_guard lock(stateMutex_);
         state_.username = newUsername;
     }
 

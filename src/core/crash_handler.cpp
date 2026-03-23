@@ -48,9 +48,13 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <climits>    // PATH_MAX
 #include <execinfo.h> // backtrace, backtrace_symbols
 #include <cxxabi.h>   // __cxa_demangle
 #include <filesystem>
+#ifdef __APPLE__
+#include <libproc.h> // proc_pidpath (for self-restart)
+#endif
 #endif
 
 namespace sm
@@ -118,6 +122,83 @@ namespace sm
             off += (size_t)n;
         return off;
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  SELF-RESTART (Common to all platforms)
+    //
+    //  After writing the crash report, re-launch the executable
+    //  with --crash-restart so it skips the duplicate-instance
+    //  check and comes back within seconds.  Zero user intervention.
+    //
+    //  Uses only OS-level APIs (CreateProcess / execv) — no heap.
+    // ═══════════════════════════════════════════════════════════
+
+    // Track whether we already attempted restart (prevent infinite loop)
+    static volatile long g_restartAttempted = 0;
+
+#ifdef _WIN32
+    static void selfRestartWin32()
+    {
+        // Only attempt restart once — if the restarted process also crashes,
+        // we don't want an infinite crash→restart→crash loop.
+        if (InterlockedCompareExchange(&g_restartAttempted, 1, 0) != 0)
+            return;
+
+        // Get our own exe path (static buffers — no heap)
+        static wchar_t exePath[MAX_PATH];
+        DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        if (len == 0 || len >= MAX_PATH)
+            return;
+
+        // Build command line: "exe" --crash-restart
+        static wchar_t cmdLine[MAX_PATH + 64];
+        _snwprintf_s(cmdLine, _countof(cmdLine), _TRUNCATE,
+                     L"\"%s\" --crash-restart", exePath);
+
+        STARTUPINFOW si = {};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_SHOWNORMAL;
+        PROCESS_INFORMATION pi = {};
+
+        // CreateProcess — no heap, no CRT, just kernel32
+        if (CreateProcessW(exePath, cmdLine, nullptr, nullptr, FALSE,
+                           CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
+                           nullptr, nullptr, &si, &pi))
+        {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+    }
+#else
+    static void selfRestartUnix()
+    {
+        if (__sync_val_compare_and_swap(&g_restartAttempted, 0, 1) != 0)
+            return;
+
+        static char exePath[PATH_MAX];
+#ifdef __APPLE__
+        if (proc_pidpath(getpid(), exePath, sizeof(exePath)) <= 0)
+            return;
+#else
+        ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+        if (n <= 0)
+            return;
+        exePath[n] = '\0';
+#endif
+        // Fork + exec to restart. Can't use exec() alone because we
+        // need the crash handler to finish writing the dump file first.
+        pid_t pid = fork();
+        if (pid == 0)
+        {
+            // Child: wait 2 seconds for parent to fully exit, then exec
+            sleep(2);
+            execl(exePath, exePath, "--crash-restart", (char *)nullptr);
+            _exit(127); // execl failed
+        }
+        // Parent continues to _exit() below
+    }
+#endif
 
     // ═══════════════════════════════════════════════════════════
     //  WINDOWS IMPLEMENTATION
@@ -497,7 +578,8 @@ namespace sm
             static char stderrBuf[512];
             int n = snprintf(stderrBuf, sizeof(stderrBuf),
                              "\n[FATAL] StreaMonitor crashed: %s (0x%08lX) at %p\n"
-                             "[FATAL] Crash report: %s\n",
+                             "[FATAL] Crash report: %s\n"
+                             "[FATAL] Attempting automatic restart...\n",
                              exceptionCodeToString(code), code, addr, crashPath);
             if (n > 0)
             {
@@ -506,6 +588,10 @@ namespace sm
                     writeRaw(hErr, stderrBuf, (size_t)n);
             }
         }
+
+        // ── SELF-RESTART: re-launch the executable automatically ────
+        // This is the LAST thing we do — crash report + dump are on disk.
+        selfRestartWin32();
 
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -533,6 +619,7 @@ namespace sm
                 writeRaw(h, msg, (size_t)n);
             CloseHandle(h);
         }
+        selfRestartWin32();
         _exit(3);
     }
 
@@ -563,6 +650,7 @@ namespace sm
             writeRaw(h, buf, off);
             CloseHandle(h);
         }
+        selfRestartWin32();
         _exit(3);
     }
 
@@ -691,6 +779,7 @@ namespace sm
                     writeRaw(hErr, msg, (size_t)n);
             }
         }
+        selfRestartWin32();
         _exit(3);
     }
 
@@ -729,6 +818,7 @@ namespace sm
                     if (n > 0) writeRaw(h, msg, (size_t)n);
                     CloseHandle(h);
                 }
+                selfRestartWin32();
                 _exit(3);
             }); });
     }
@@ -888,11 +978,15 @@ namespace sm
             static char stderrMsg[512];
             int n = snprintf(stderrMsg, sizeof(stderrMsg),
                              "\n[FATAL] StreaMonitor crashed: signal %d (%s)\n"
-                             "[FATAL] Crash report: %s\n",
+                             "[FATAL] Crash report: %s\n"
+                             "[FATAL] Attempting automatic restart...\n",
                              sig, signalName(sig), crashPath);
             if (n > 0)
                 writeAllFd(STDERR_FILENO, stderrMsg, (size_t)n);
         }
+
+        // ── SELF-RESTART before re-raising ──────────────────────────
+        selfRestartUnix();
 
         // Re-raise with default handler
         struct sigaction sa{};
@@ -948,6 +1042,7 @@ namespace sm
                     writeAllFd(fd, buf, off);
                     close(fd);
                 }
+                selfRestartUnix();
                 std::abort();
             }); });
     }

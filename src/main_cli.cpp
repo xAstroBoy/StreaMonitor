@@ -237,6 +237,7 @@ static void printHelp()
 // Main
 // ─────────────────────────────────────────────────────────────────
 int cliMain(int argc, char **argv)
+try
 {
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
@@ -1038,4 +1039,14 @@ int cliMain(int argc, char **argv)
     std::cout << ansi::green << "Goodbye!\n"
               << ansi::reset;
     return 0;
+}
+catch (const std::exception &e)
+{
+    spdlog::error("FATAL exception in cliMain: {}", e.what());
+    return 1;
+}
+catch (...)
+{
+    spdlog::error("FATAL unknown exception in cliMain");
+    return 1;
 }

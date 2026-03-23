@@ -131,10 +131,20 @@ namespace sm
         void setStateCallback(StateChangeCallback cb);
 
         // ── Identity ────────────────────────────────────────────────
-        const std::string &username() const { return username_; }
+        // username() returns a copy — setUsername() mutates username_
+        // from the bot thread, while BotManager reads it from GUI thread.
+        std::string username() const
+        {
+            std::lock_guard lock(stateMutex_);
+            return username_;
+        }
         const std::string &siteName() const { return siteName_; }
         const std::string &siteSlug() const { return siteSlug_; }
-        std::string id() const { return username_ + "_" + siteSlug_; }
+        std::string id() const
+        {
+            std::lock_guard lock(stateMutex_);
+            return username_ + "_" + siteSlug_;
+        }
 
         // ── Config ──────────────────────────────────────────────────
         void setGender(Gender g);

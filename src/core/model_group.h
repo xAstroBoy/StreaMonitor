@@ -125,6 +125,7 @@ namespace sm
         void emitStateChange(); // thread-safe: copies callback+state under lock, invokes outside
 
         std::string groupName_;
+        mutable std::mutex pairingsMutex_; // protects pairings_ from GUI vs cycling-thread races
         std::vector<GroupPairing> pairings_;
         const AppConfig *lastConfig_ = nullptr; // remembered for restart after pairing changes
 

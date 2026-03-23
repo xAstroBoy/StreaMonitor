@@ -46,22 +46,30 @@ static sm::GuiApp *g_guiAppForSubclass = nullptr;
 
 static LRESULT CALLBACK minimizeSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == WM_SYSCOMMAND && (wp & 0xFFF0) == SC_MINIMIZE)
+    __try
     {
-        auto *self = g_guiAppForSubclass;
-        if (self && self->shouldMinimizeToTray())
+        if (msg == WM_SYSCOMMAND && (wp & 0xFFF0) == SC_MINIMIZE)
         {
-            // Disable multi-viewport BEFORE hiding so ImGui pulls
-            // all secondary OS windows back into the main viewport.
-            // Then hide the main window — nothing remains on screen.
-            ImGuiIO &io = ImGui::GetIO();
-            io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
-            ShowWindow(hwnd, SW_HIDE);
-            self->setMinimizedToTray(true);
-            return 0; // Swallow the message
+            auto *self = g_guiAppForSubclass;
+            if (self && self->shouldMinimizeToTray())
+            {
+                // Disable multi-viewport BEFORE hiding so ImGui pulls
+                // all secondary OS windows back into the main viewport.
+                // Then hide the main window — nothing remains on screen.
+                ImGuiIO &io = ImGui::GetIO();
+                io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+                ShowWindow(hwnd, SW_HIDE);
+                self->setMinimizedToTray(true);
+                return 0; // Swallow the message
+            }
         }
+        return CallWindowProcW(g_origWndProc, hwnd, msg, wp, lp);
     }
-    return CallWindowProcW(g_origWndProc, hwnd, msg, wp, lp);
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        // WndProc exception — pass through to default handler
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
 }
 
 #else
@@ -789,6 +797,12 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     // Window initialization
     // ─────────────────────────────────────────────────────────────────
+    // ── GLFW error callback — log errors instead of crashing ────────
+    static void glfwErrorCallback(int error, const char *description)
+    {
+        spdlog::error("GLFW error {}: {}", error, description ? description : "(null)");
+    }
+
     bool GuiApp::initWindow()
     {
 #ifdef _WIN32
@@ -796,6 +810,9 @@ namespace sm
         // and doesn't bitmap-stretch our framebuffer.
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 #endif
+
+        // Install error callback BEFORE glfwInit() — it can fire during init
+        glfwSetErrorCallback(glfwErrorCallback);
 
         if (!glfwInit())
         {
@@ -1179,10 +1196,35 @@ namespace sm
         buildTrayMenu(); // initial build
 #endif
 
+        // Periodic auto-save timer — saves config every 5 minutes
+        // so crashes don't lose model state changes
+        auto lastAutoSave = Clock::now();
+        constexpr int kAutoSaveIntervalSec = 300; // 5 minutes
+
+        // Consecutive render failures — if too many, skip rendering
+        int consecutiveRenderFailures = 0;
+        constexpr int kMaxRenderFailures = 10;
+
         while (!glfwWindowShouldClose(window_))
         {
             try
             {
+                // ── Periodic auto-save ──────────────────────────────
+                auto now2 = Clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now2 - lastAutoSave).count() >= kAutoSaveIntervalSec)
+                {
+                    lastAutoSave = now2;
+                    try
+                    {
+                        manager_.saveConfig();
+                        spdlog::debug("Auto-saved config (periodic)");
+                    }
+                    catch (const std::exception &e)
+                    {
+                        spdlog::warn("Auto-save failed: {}", e.what());
+                    }
+                }
+
                 // Determine frame rate tier
                 double glfwNow = glfwGetTime();
                 bool isActive = (glfwNow - lastInputTime_) < kIdleTimeout || guiDirty_.exchange(false);
@@ -1336,7 +1378,31 @@ namespace sm
                 ImGui_ImplGlfw_NewFrame();
                 ImGui::NewFrame();
 
-                renderFrame();
+                // Wrap renderFrame in its own try/catch — if a rendering
+                // exception occurs, end the frame cleanly and continue.
+                // This prevents a bad frame from killing the entire app.
+                try
+                {
+                    renderFrame();
+                    consecutiveRenderFailures = 0;
+                }
+                catch (const std::exception &e)
+                {
+                    spdlog::error("renderFrame exception: {} — skipping frame", e.what());
+                    consecutiveRenderFailures++;
+                }
+                catch (...)
+                {
+                    spdlog::error("renderFrame unknown exception — skipping frame");
+                    consecutiveRenderFailures++;
+                }
+
+                // If rendering keeps failing, log it but don't abandon the loop
+                if (consecutiveRenderFailures > kMaxRenderFailures)
+                {
+                    spdlog::error("{} consecutive render failures — UI may be degraded",
+                                  consecutiveRenderFailures);
+                }
 
                 ImGui::Render();
                 glViewport(0, 0, displayW, displayH);
