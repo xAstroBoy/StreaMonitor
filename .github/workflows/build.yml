@@ -74,6 +74,7 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
             -DVCPKG_HOST_TRIPLET=x64-windows-static-md `
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL" `
+            "-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded" `
             -DCMAKE_C_COMPILER_LAUNCHER=sccache `
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
