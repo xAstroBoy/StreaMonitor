@@ -389,6 +389,8 @@ namespace sm
                 segmentTimeSec = j["segment_time"];
             if (j.contains("filename_format"))
                 filenameFormat = j["filename_format"].get<std::string>();
+            if (j.contains("folder_format"))
+                folderFormat = j["folder_format"].get<std::string>();
             if (j.contains("recording_mode"))
                 recordingMode = std::clamp(j["recording_mode"].get<int>(), 0, 2);
             if (j.contains("chunk_size_mb"))
@@ -464,6 +466,22 @@ namespace sm
                 if (j.contains("proxy_type"))
                 {
                     entry.type = parseProxyType(j["proxy_type"].get<std::string>());
+                }
+                else
+                {
+                    // Auto-detect type from URL scheme (Issue #3 — same logic as env-var path)
+                    if (entry.url.find("socks5h://") == 0)
+                        entry.type = ProxyType::SOCKS5H;
+                    else if (entry.url.find("socks5://") == 0)
+                        entry.type = ProxyType::SOCKS5;
+                    else if (entry.url.find("socks4a://") == 0)
+                        entry.type = ProxyType::SOCKS4A;
+                    else if (entry.url.find("socks4://") == 0)
+                        entry.type = ProxyType::SOCKS4;
+                    else if (entry.url.find("https://") == 0)
+                        entry.type = ProxyType::HTTPS;
+                    else
+                        entry.type = ProxyType::HTTP;
                 }
                 proxies.push_back(entry);
             }
@@ -543,6 +561,7 @@ namespace sm
             j["stripchat_cookies"] = stripchatCookies;
         j["segment_time"] = segmentTimeSec;
         j["filename_format"] = filenameFormat;
+        j["folder_format"] = folderFormat;
         j["recording_mode"] = recordingMode;
         j["chunk_size_mb"] = chunkSizeMB;
         j["chunk_duration_min"] = chunkDurationMin;
@@ -616,6 +635,28 @@ namespace sm
 
         std::ofstream f(path);
         f << j.dump(2);
+    }
+
+    // Build folder name from format string (Issue #2)
+    std::string buildFolderName(const std::string &format, const std::string &username,
+                                const std::string &siteSlug)
+    {
+        std::string result = format;
+        // Replace {model} token
+        size_t pos = 0;
+        while ((pos = result.find("{model}", pos)) != std::string::npos)
+        {
+            result.replace(pos, 7, username);
+            pos += username.length();
+        }
+        // Replace {site} token
+        pos = 0;
+        while ((pos = result.find("{site}", pos)) != std::string::npos)
+        {
+            result.replace(pos, 6, siteSlug);
+            pos += siteSlug.length();
+        }
+        return result;
     }
 
 } // namespace sm

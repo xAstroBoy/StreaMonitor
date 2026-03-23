@@ -660,7 +660,7 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     std::filesystem::path SitePlugin::getOutputFolder(const AppConfig &config) const
     {
-        return config.downloadsDir / (username_ + " [" + siteSlug_ + "]");
+        return config.downloadsDir / buildFolderName(config.folderFormat, username_, siteSlug_);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -714,7 +714,7 @@ namespace sm
     {
         std::lock_guard lock(fileNumberMutex_);
 
-        auto dir = config.downloadsDir / (username_ + " [" + siteSlug_ + "]");
+        auto dir = config.downloadsDir / buildFolderName(config.folderFormat, username_, siteSlug_);
 
         // Mobile subfolder (Python: outputFolder property)
         if (isMobile())

@@ -618,7 +618,7 @@ namespace sm
         auto unprocessedDir = config_.downloadsDir.parent_path() / "unprocessed";
         fs::create_directories(unprocessedDir, ec);
 
-        std::string folderName = username + " [" + slug + "]";
+        std::string folderName = buildFolderName(config_.folderFormat, username, slug);
         auto destFolder = unprocessedDir / folderName;
 
         // Helper: find next available {n}.ext in destDir (never overwrite)
@@ -774,7 +774,7 @@ namespace sm
                 details += fmt::format("  [{}] {}: {}\n", st.siteSlug, st.username, result.message);
             }
             // Track this folder name so we don't process it again below
-            handledFolders.insert(st.username + " [" + st.siteSlug + "]");
+            handledFolders.insert(buildFolderName(config_.folderFormat, st.username, st.siteSlug));
         }
 
         // Second: move ALL remaining subfolders in downloads/ that aren't active bots

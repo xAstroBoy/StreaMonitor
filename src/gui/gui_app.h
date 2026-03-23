@@ -247,6 +247,7 @@ namespace sm
         int editPort_ = 5000;
         char editFfmpegPath_[512] = {};
         char editFilenameFormat_[256] = "{model}_{site}_{datetime}";
+        char editFolderFormat_[256] = "{model} [{site}]";
         bool editAutoRemoveNonExistent_ = false;
         int editLogLevel_ = 1; // 0=debug, 1=info, 2=warn, 3=error
         bool editDirtyFlag_ = false;

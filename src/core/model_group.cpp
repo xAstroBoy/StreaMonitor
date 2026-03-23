@@ -596,7 +596,7 @@ namespace sm
         auto generateNextPath = [&](bool mobile) -> std::string
         {
             auto baseDir = config.downloadsDir /
-                           (pairing.username + " [" + slug + "]");
+                           buildFolderName(config.folderFormat, pairing.username, slug);
             if (mobile)
                 baseDir /= "Mobile";
             std::filesystem::create_directories(baseDir);

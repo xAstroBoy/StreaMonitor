@@ -618,6 +618,7 @@ namespace sm
         if (!config.ffmpegPath.empty())
             std::strncpy(editFfmpegPath_, config.ffmpegPath.string().c_str(), sizeof(editFfmpegPath_) - 1);
         std::strncpy(editFilenameFormat_, config.filenameFormat.c_str(), sizeof(editFilenameFormat_) - 1);
+        std::strncpy(editFolderFormat_, config.folderFormat.c_str(), sizeof(editFolderFormat_) - 1);
         editAutoRemoveNonExistent_ = config.autoRemoveNonExistent;
 
         // Recording mode
@@ -2645,7 +2646,7 @@ namespace sm
                 if (ImGui::MenuItem("Open Downloads Folder"))
                 {
                     auto &b = cachedStates_[grp.primaryIdx];
-                    auto folder = config_.downloadsDir / (b.username + " [" + b.siteSlug + "]");
+                    auto folder = config_.downloadsDir / buildFolderName(config_.folderFormat, b.username, b.siteSlug);
                     if (std::filesystem::exists(folder))
                         openFolderInExplorer(folder);
                     else
@@ -3528,6 +3529,7 @@ namespace sm
             config_.webPort = editPort_;
             config_.ffmpegPath = editFfmpegPath_;
             config_.filenameFormat = editFilenameFormat_;
+            config_.folderFormat = editFolderFormat_;
             config_.autoRemoveNonExistent = editAutoRemoveNonExistent_;
 
             // Recording mode & chunking
@@ -3789,6 +3791,15 @@ namespace sm
         ImGui::TextColored(COL_TEXT_DIM, "Tokens: {n} = sequential number, {model} = username");
         ImGui::TextColored(COL_TEXT_DIM, "{site} = site slug, {date} = YYYYMMDD, {time} = HHMMSS");
         ImGui::TextColored(COL_TEXT_DIM, "{datetime} = YYYYMMDD_HHMMSS");
+
+        ImGui::Spacing();
+
+        ImGui::Text("Folder Name Format");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##FolderFormat", editFolderFormat_, sizeof(editFolderFormat_)))
+            editDirtyFlag_ = true;
+        ImGui::TextColored(COL_TEXT_DIM, "Tokens: {model} = username, {site} = site slug");
+        ImGui::TextColored(COL_TEXT_DIM, "Default: \"{model} [{site}]\" e.g. \"username [SC]\"");
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -5693,7 +5704,7 @@ namespace sm
             ImGui::SameLine();
             if (ImGui::Button("Open Folder", {btnW, 0}))
             {
-                auto folder = config_.downloadsDir / (bot.username + " [" + bot.siteSlug + "]");
+                auto folder = config_.downloadsDir / buildFolderName(config_.folderFormat, bot.username, bot.siteSlug);
                 if (std::filesystem::exists(folder))
                     openFolderInExplorer(folder);
                 else

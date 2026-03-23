@@ -39,6 +39,13 @@ namespace sm
         // Example: "{model}-{datetime}" → "username-20250710-143022.mkv"
         std::string filenameFormat = "{model}_{site}_{datetime}";
 
+        // Output folder name format (Issue #2) — supported tokens:
+        //   {model} = model username
+        //   {site}  = site slug (SC, CB, BC, etc.)
+        // Example: "{model} [{site}]" → "username [SC]" (default)
+        //          "{model}" → "username" (no site suffix)
+        std::string folderFormat = "{model} [{site}]";
+
         // Recording mode: Continuous (single file), ChunkedBySize, ChunkedByDuration
         // 0 = Continuous (default), 1 = Chunked by file size, 2 = Chunked by duration
         int recordingMode = 0;
@@ -177,5 +184,10 @@ namespace sm
     // JSON serialization
     void to_json(nlohmann::json &j, const ModelConfig &m);
     void from_json(const nlohmann::json &j, ModelConfig &m);
+
+    // Build folder name from format string (Issue #2)
+    // Tokens: {model} = username, {site} = site slug
+    std::string buildFolderName(const std::string &format, const std::string &username,
+                                const std::string &siteSlug);
 
 } // namespace sm

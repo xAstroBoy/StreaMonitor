@@ -952,6 +952,20 @@ namespace sm
                 av_dict_set(&opts, "headers", headerStr.c_str(), 0);
             }
 
+            // Pass proxy to FFmpeg for segment fetching (Issue #1 / #3)
+            // This is critical for:
+            //   1. Local playlists (split audio) — FFmpeg fetches remote segments
+            //   2. Remote URLs through proxy
+            if (config_.proxyEnabled && !config_.proxies.empty())
+            {
+                const auto &proxy = config_.proxies[0];
+                if (!proxy.url.empty())
+                {
+                    av_dict_set(&opts, "http_proxy", proxy.url.c_str(), 0);
+                    log_->debug("Set FFmpeg http_proxy: {}", proxy.url);
+                }
+            }
+
             if (isLocalFile)
             {
                 // ── Local playlist (rolling refresh) ────────────────────

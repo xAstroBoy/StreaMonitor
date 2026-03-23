@@ -77,8 +77,11 @@ namespace sm
                 curl_easy_setopt(c, CURLOPT_PROXY, proxyUrl.c_str());
                 curl_easy_setopt(c, CURLOPT_PROXYTYPE, proxyType);
                 // If proxy URL contains user:pass@, libcurl handles it automatically.
-                // Also tunnel HTTPS through CONNECT for HTTP proxies.
-                if (proxyType == CURLPROXY_HTTP || proxyType == CURLPROXY_HTTPS)
+                // Tunnel HTTPS through CONNECT only for actual HTTP proxies.
+                // NEVER set HTTPPROXYTUNNEL for SOCKS proxies — even if proxyType
+                // was mis-detected, the URL scheme is authoritative (Issue #3).
+                if ((proxyType == CURLPROXY_HTTP || proxyType == CURLPROXY_HTTPS) &&
+                    proxyUrl.find("socks") == std::string::npos)
                     curl_easy_setopt(c, CURLOPT_HTTPPROXYTUNNEL, 1L);
             }
         }
