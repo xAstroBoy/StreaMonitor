@@ -3117,7 +3117,7 @@ namespace sm
         feeder.config = &config_;
         PlaylistDecoder feederDecoder = nullptr;
         std::string feederUa;
-        std::string videoUrl = hlsUrl;  // mutable copy (may strip tab suffix)
+        std::string videoUrl = hlsUrl;   // mutable copy (may strip tab suffix)
         std::string inputUrl = videoUrl; // default: use remote URL directly
         bool useFeeder = false;
 
@@ -3138,8 +3138,10 @@ namespace sm
             }
         }
 
-        if (videoUrl.find(".m3u8") != std::string::npos ||
-            videoUrl.find(".m3u") != std::string::npos)
+        // ── Always attempt SegmentFeeder for every site ──────────
+        // All sites use HLS playlists — feeder.start() validates the
+        // content and returns false if the URL isn't actually m3u8,
+        // so the fallback to direct URL input is still safe.
         {
             feederUa = userAgent.empty() ? config_.userAgent : userAgent;
 
