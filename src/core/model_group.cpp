@@ -276,8 +276,11 @@ namespace sm
     {
         try
         {
-            spdlog::info("[Group:{}] Cycling thread started ({} pairings)",
-                         groupName_, pairings_.size());
+            {
+                std::lock_guard pLock(pairingsMutex_);
+                spdlog::info("[Group:{}] Cycling thread started ({} pairings)",
+                             groupName_, pairings_.size());
+            }
 
             while (running_.load() && !quitting_.load())
             {
@@ -365,7 +368,9 @@ namespace sm
                             spdlog::info("[Group:{}] {} [{}] is MOBILE — checking other pairings for dual recording",
                                          groupName_, pairing.username, pairing.site);
 
-                            for (size_t j = 0; j < pairings_.size() && running_.load() && !quitting_.load(); j++)
+                            // Snapshot pairing count under lock (same pattern as outer loop)
+                            const size_t dualCount = numPairings; // already snapshotted above
+                            for (size_t j = 0; j < dualCount && running_.load() && !quitting_.load(); j++)
                             {
                                 if (j == i)
                                     continue;
@@ -478,7 +483,7 @@ namespace sm
                         }
 
                         // Brief pause after download, then continue cycling
-                        sleepInterruptible(sleepAfterDownload_);
+                        sleepInterruptible(sleepAfterDownload_.load());
                         break; // restart cycle from pairing[0]
                     }
 
@@ -511,9 +516,10 @@ namespace sm
                     }
                     emitStateChange();
 
+                    const int offlineSleep = sleepAllOffline_.load();
                     spdlog::debug("[Group:{}] All pairings offline, sleeping {}s",
-                                  groupName_, sleepAllOffline_);
-                    sleepInterruptible(sleepAllOffline_);
+                                  groupName_, offlineSleep);
+                    sleepInterruptible(offlineSleep);
                 }
             }
 

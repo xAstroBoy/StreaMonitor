@@ -140,9 +140,9 @@ namespace sm
         ModelGroupState state_;
         GroupStateCallback stateCallback_;
 
-        // Tuning
-        int sleepAllOffline_ = 10;   // seconds to sleep when all pairings are offline
-        int sleepAfterDownload_ = 2; // brief pause after a download ends before re-cycling
+        // Tuning (atomic: set from GUI thread, read from cycling thread)
+        std::atomic<int> sleepAllOffline_{10};   // seconds to sleep when all pairings are offline
+        std::atomic<int> sleepAfterDownload_{2}; // brief pause after a download ends before re-cycling
     };
 
 } // namespace sm
