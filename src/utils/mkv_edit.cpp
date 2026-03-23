@@ -516,7 +516,10 @@ namespace
             return true;
         }
 
-        // Parse the file: find Segment, scan its L1 children.
+        // Parse the file: find Segment, index its L1 metadata children.
+        // Uses SeekHead to jump past the Cluster region instead of
+        // scanning every element sequentially (huge speedup for large files:
+        // ~30 I/O ops instead of ~3000+ for a 17 GB MKV).
         bool parse()
         {
             FSEEK64(f, 0, SEEK_SET);
@@ -544,29 +547,114 @@ namespace
             segDataSize = seg.dataSize;
             segDataStart = seg.dataPos();
 
-            // Determine scan limit
             int64_t scanEnd = fileSize;
             if (segDataSize >= 0)
                 scanEnd = std::min(fileSize, segDataStart + segDataSize);
 
-            // Scan L1 children (just headers — don't read data)
+            // ── Phase 1: Scan L1 headers before first Cluster ──
+            // Picks up SeekHead, Info, Tracks, Void, and any other
+            // metadata elements that precede the A/V data.
             FSEEK64(f, segDataStart, SEEK_SET);
+            int64_t firstClusterPos = -1;
             while (FTELL64(f) < scanEnd)
             {
                 L1Element child;
-                int64_t before = FTELL64(f);
                 if (!readElementHeader(child))
                     break;
                 if (child.idLen == 0)
                     break;
+                if (child.id == ID_CLUSTER)
+                {
+                    firstClusterPos = child.pos;
+                    break; // stop — rest is A/V data
+                }
+                elts.push_back(child);
+                if (child.dataSize < 0)
+                    break;
+                int64_t nextPos = child.dataPos() + child.dataSize;
+                if (nextPos > scanEnd)
+                    break;
+                FSEEK64(f, nextPos, SEEK_SET);
+            }
 
-                // Don't store Cluster elements (huge, useless for metadata editing)
+            // No Clusters → file is entirely metadata, all scanned
+            if (firstClusterPos < 0)
+                return true;
+
+            // ── Phase 2: Use SeekHead to jump past Cluster data ──
+            // Instead of scanning thousands of Clusters (~3000+ for 17 GB),
+            // read the SeekHead to find where the tail metadata starts
+            // (Cues, Tags, Attachments), then scan only that small region.
+            L1Element *sh = findL1(ID_SEEKHEAD);
+            if (sh && sh->dataSize > 0)
+            {
+                auto shData = readL1Data(*sh);
+                auto shTree = parseEbml(ID_SEEKHEAD, shData.data(), shData.size());
+
+                // Find the earliest non-Cluster element past firstClusterPos
+                int64_t tailStart = scanEnd;
+                for (auto &seek : shTree.children)
+                {
+                    if (seek.id != ID_SEEK)
+                        continue;
+                    auto *idNode  = seek.find(ID_SEEK_ID);
+                    auto *posNode = seek.find(ID_SEEK_POS);
+                    if (!idNode || !posNode)
+                        continue;
+
+                    uint32_t seekId = 0;
+                    for (auto b : idNode->data)
+                        seekId = (seekId << 8) | b;
+                    if (seekId == ID_CLUSTER)
+                        continue; // skip Cluster entries
+
+                    int64_t relPos = 0;
+                    for (auto b : posNode->data)
+                        relPos = (relPos << 8) | b;
+                    int64_t absPos = segDataStart + relPos;
+
+                    // Only interested in elements past the Cluster region
+                    if (absPos > firstClusterPos && absPos < tailStart)
+                        tailStart = absPos;
+                }
+
+                if (tailStart < scanEnd)
+                {
+                    // Scan the small tail metadata region only
+                    FSEEK64(f, tailStart, SEEK_SET);
+                    while (FTELL64(f) < scanEnd)
+                    {
+                        L1Element child;
+                        if (!readElementHeader(child))
+                            break;
+                        if (child.idLen == 0)
+                            break;
+                        if (child.id != ID_CLUSTER)
+                            elts.push_back(child);
+                        if (child.dataSize < 0)
+                            break;
+                        int64_t nextPos = child.dataPos() + child.dataSize;
+                        if (nextPos > scanEnd)
+                            break;
+                        FSEEK64(f, nextPos, SEEK_SET);
+                    }
+                    return true;
+                }
+            }
+
+            // ── Fallback: full sequential scan (no SeekHead or no tail entries) ──
+            FSEEK64(f, firstClusterPos, SEEK_SET);
+            while (FTELL64(f) < scanEnd)
+            {
+                L1Element child;
+                if (!readElementHeader(child))
+                    break;
+                if (child.idLen == 0)
+                    break;
                 if (child.id != ID_CLUSTER)
                     elts.push_back(child);
-
-                // Skip past this element's data
                 if (child.dataSize < 0)
-                    break; // unknown-size element = rest of file
+                    break;
                 int64_t nextPos = child.dataPos() + child.dataSize;
                 if (nextPos > scanEnd)
                     break;
@@ -669,11 +757,14 @@ namespace
             // Try to find an existing Void element large enough to reuse.
             for (auto &e : elts)
             {
-                if (e.id != ID_VOID) continue;
+                if (e.id != ID_VOID)
+                    continue;
                 int64_t voidTotal = e.totalSize();
-                if (voidTotal < newTotal) continue;
+                if (voidTotal < newTotal)
+                    continue;
                 // Need at least 2 extra bytes for leftover Void, or exact fit
-                if (voidTotal != newTotal && voidTotal < newTotal + 2) continue;
+                if (voidTotal != newTotal && voidTotal < newTotal + 2)
+                    continue;
 
                 // Found a suitable Void — overwrite it
                 FSEEK64(f, e.pos, SEEK_SET);
