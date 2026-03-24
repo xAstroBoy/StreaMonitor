@@ -327,6 +327,17 @@ namespace sm
         char editWebPassword_[128] = {};
         char editWebNewPassword_[128] = {};
 
+        // ── Display change detection (virtual monitor / GPU reset protection) ──
+        static inline std::atomic<int> sDisplayChangeCount_{0}; // bumped by glfwMonitorCallback
+        int lastDisplayChangeCount_ = 0;    // local snapshot to detect changes
+        double lastDisplayChangeTime_ = 0.0; // glfwGetTime() when last change was seen
+        bool displayChangePending_ = false;  // true = skip GL ops for grace period
+        static constexpr double kDisplayChangeGraceSec = 1.5; // seconds to skip GL after display change
+
+        /// Returns false when the GL context is suspect (display change in progress).
+        /// Call this before any glTexImage/glTexSubImage/glGenTextures operation.
+        bool isGlContextSafe() const { return !displayChangePending_; }
+
         // ── Adaptive frame rate (CPU idle optimization) ─────────────
         double lastInputTime_ = 0.0;            // glfwGetTime() of last user input
         std::atomic<bool> guiDirty_{true};      // set by bot threads to wake GUI

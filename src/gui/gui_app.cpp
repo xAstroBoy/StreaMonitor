@@ -887,6 +887,16 @@ namespace sm
         glfwSetCharCallback(window_, glfwCharCallback);
         glfwSetWindowFocusCallback(window_, glfwWindowFocusCallback);
 
+        // Monitor callback fires when displays are connected/disconnected
+        // (virtual monitor switch, GPU reset, RDP).  It's a global callback
+        // so we use a static atomic counter checked in the main loop.
+        glfwSetMonitorCallback([](GLFWmonitor * /*monitor*/, int event)
+        {
+            sDisplayChangeCount_.fetch_add(1, std::memory_order_relaxed);
+            spdlog::warn("Display change detected (event={}) \u2014 pausing GL operations",
+                         event == GLFW_CONNECTED ? "connected" : "disconnected");
+        });
+
         // ── Close callback — set shutdown flag first ────────────
         glfwSetWindowCloseCallback(window_, [](GLFWwindow *w)
                                    {
@@ -1316,6 +1326,34 @@ namespace sm
                     }
                 }
 
+                // ── Display change detection (virtual monitor / GPU reset) ──
+                // When a monitor is connected or disconnected the GL context
+                // may become stale.  Skip all GL texture operations for a
+                // grace period to let the driver reinitialise.
+                {
+                    int changeCount = sDisplayChangeCount_.load(std::memory_order_relaxed);
+                    if (changeCount != lastDisplayChangeCount_)
+                    {
+                        lastDisplayChangeCount_ = changeCount;
+                        lastDisplayChangeTime_ = glfwGetTime();
+                        displayChangePending_ = true;
+                        needFontRebuild_ = true; // force font atlas rebuild
+                        spdlog::warn("Display change — suspending GL uploads for {:.1f}s",
+                                     kDisplayChangeGraceSec);
+                    }
+                    if (displayChangePending_)
+                    {
+                        double elapsed = glfwGetTime() - lastDisplayChangeTime_;
+                        if (elapsed >= kDisplayChangeGraceSec)
+                        {
+                            displayChangePending_ = false;
+                            // Re-assert the GL context on the main window
+                            glfwMakeContextCurrent(window_);
+                            spdlog::info("Display change grace period ended — GL uploads resumed");
+                        }
+                    }
+                }
+
                 // ── Rebuild font atlas on DPI change ──
                 if (needFontRebuild_)
                 {
@@ -1500,7 +1538,10 @@ namespace sm
     void GuiApp::renderFrame()
     {
         // Upload any decoded preview images to GL textures
-        imageCache_.uploadPending();
+        // Skip during display change grace period to avoid corrupting
+        // the heap via a stale GL context.
+        if (isGlContextSafe())
+            imageCache_.uploadPending();
 
         ImGuiViewport *viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -5376,7 +5417,8 @@ namespace sm
 
         // Consume latest frame from continuous preview stream
         PreviewFrame frame;
-        if (manager_.consumePreview(bot.username, bot.siteName, frame, previewVersion_))
+        if (isGlContextSafe() &&
+            manager_.consumePreview(bot.username, bot.siteName, frame, previewVersion_))
         {
             if (detailPreviewTex_ == 0)
             {
@@ -5499,7 +5541,8 @@ namespace sm
 
             // Consume latest frame from continuous preview stream
             PreviewFrame frame;
-            if (manager_.consumePreview(bot.username, bot.siteName, frame, previewVersion_))
+            if (isGlContextSafe() &&
+                manager_.consumePreview(bot.username, bot.siteName, frame, previewVersion_))
             {
                 // Upload RGBA pixels directly to a GL texture
                 if (detailPreviewTex_ == 0)

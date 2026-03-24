@@ -785,11 +785,42 @@ namespace sm
                 }
             }
 
+            // Ensure the source frame has 32-byte aligned buffers.
+            // Some decoders (especially after CUDA→CPU transfer or with
+            // packed formats like YUYV422) produce frames whose data
+            // pointers lack the alignment FFmpeg's AVX code paths need.
+            // Copy to a properly-aligned frame when necessary.
+            AVFrame *scaleFrame = srcFrame;
+            Frame alignedFrame;
+            bool needAlignment = false;
+            for (int p = 0; p < AV_NUM_DATA_POINTERS && srcFrame->data[p]; ++p)
+            {
+                if (reinterpret_cast<uintptr_t>(srcFrame->data[p]) % 32 != 0 ||
+                    (srcFrame->linesize[p] > 0 && srcFrame->linesize[p] % 32 != 0))
+                {
+                    needAlignment = true;
+                    break;
+                }
+            }
+            if (needAlignment && alignedFrame.f)
+            {
+                alignedFrame.f->format = srcFrame->format;
+                alignedFrame.f->width  = srcFrame->width;
+                alignedFrame.f->height = srcFrame->height;
+                if (av_frame_get_buffer(alignedFrame.f, 32) >= 0 &&
+                    av_frame_copy(alignedFrame.f, srcFrame) >= 0)
+                {
+                    scaleFrame = alignedFrame.f;
+                }
+                // If copy fails, fall through and use the original
+                // (sws_scale may still work with non-AVX paths)
+            }
+
             // Scale decoded frame to thumbnail size (RGB24)
             uint8_t *dstData[1] = {thumbBuf.data()};
             int dstStride[1] = {thumbW * 3};
             sws_scale(thumbSws.ctx,
-                      srcFrame->data, srcFrame->linesize, 0, srcFrame->height,
+                      scaleFrame->data, scaleFrame->linesize, 0, scaleFrame->height,
                       dstData, dstStride);
 
             // Copy thumbnail into composite image
