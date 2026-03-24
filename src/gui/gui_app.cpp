@@ -1576,6 +1576,7 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     // Lightweight frame render for WM_TIMER during drag / resize
     // ─────────────────────────────────────────────────────────────────
+#ifdef _WIN32
     void GuiApp::renderDragFrame()
     {
         if (!window_ || shuttingDown_.load() || displayChangePending_)
@@ -1620,6 +1621,7 @@ namespace sm
             glfwMakeContextCurrent(backup);
         }
     }
+#endif // _WIN32
 
     // ─────────────────────────────────────────────────────────────────
     // Frame rendering
