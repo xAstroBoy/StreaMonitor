@@ -709,8 +709,11 @@ namespace sm
             log("thumbnail: failed to allocate SW frame");
             return false;
         }
-        int thumbBufSize = thumbW * thumbH * 3;
-        std::vector<uint8_t> thumbBuf(thumbBufSize);
+        // sws_scale uses SIMD (AVX2/SSE) that writes in 16-32 byte blocks;
+        // align output linesize to 32 bytes to prevent overrun past buffer end.
+        const int thumbRawStride = thumbW * 3;
+        const int thumbAlignedStride = (thumbRawStride + 31) & ~31;
+        std::vector<uint8_t> thumbBuf(static_cast<size_t>(thumbAlignedStride) * thumbH);
         AVPixelFormat lastSwsFmt = AV_PIX_FMT_NONE; // track format changes for sws_scale safety
 
         int framesExtracted = 0;
@@ -805,7 +808,7 @@ namespace sm
             if (needAlignment && alignedFrame.f)
             {
                 alignedFrame.f->format = srcFrame->format;
-                alignedFrame.f->width  = srcFrame->width;
+                alignedFrame.f->width = srcFrame->width;
                 alignedFrame.f->height = srcFrame->height;
                 if (av_frame_get_buffer(alignedFrame.f, 32) >= 0 &&
                     av_frame_copy(alignedFrame.f, srcFrame) >= 0)
@@ -818,7 +821,7 @@ namespace sm
 
             // Scale decoded frame to thumbnail size (RGB24)
             uint8_t *dstData[1] = {thumbBuf.data()};
-            int dstStride[1] = {thumbW * 3};
+            int dstStride[1] = {thumbAlignedStride};
             sws_scale(thumbSws.ctx,
                       scaleFrame->data, scaleFrame->linesize, 0, scaleFrame->height,
                       dstData, dstStride);
@@ -835,7 +838,7 @@ namespace sm
                 if (imgY >= totalH)
                     break;
                 uint8_t *imgRow = image.data() + imgY * stride + dstX * 3;
-                uint8_t *tbRow = thumbBuf.data() + line * thumbW * 3;
+                uint8_t *tbRow = thumbBuf.data() + line * thumbAlignedStride;
                 int copyW = std::min(thumbW, totalW - dstX);
                 if (copyW > 0)
                     std::memcpy(imgRow, tbRow, copyW * 3);

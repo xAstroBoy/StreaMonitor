@@ -2736,13 +2736,30 @@ namespace sm
             previewDstH_ = h;
         }
 
-        // Allocate output buffer: 4 bytes per pixel (RGBA)
-        outRGBA.resize(static_cast<size_t>(w) * h * 4);
+        // Allocate output buffer: 4 bytes per pixel (RGBA).
+        // sws_scale SIMD (AVX2/SSE) writes in 32-byte blocks; if the
+        // linesize isn't aligned the final write on the last row
+        // overruns the buffer → heap corruption.  Use aligned linesize
+        // and tight-pack afterwards for the callback consumers.
+        const int rawLinesize = w * 4;
+        const int alignedLinesize = (rawLinesize + 31) & ~31;
+        const size_t bufSize = static_cast<size_t>(alignedLinesize) * h;
+        outRGBA.resize(bufSize);
         uint8_t *dstData[1] = {outRGBA.data()};
-        int dstLinesize[1] = {w * 4};
+        int dstLinesize[1] = {alignedLinesize};
 
         sws_scale(previewSwsCtx_, frame->data, frame->linesize, 0, frame->height,
                   dstData, dstLinesize);
+
+        // Tight-pack rows if there was linesize padding
+        if (alignedLinesize != rawLinesize)
+        {
+            for (int y = 1; y < h; ++y)
+                std::memmove(outRGBA.data() + y * rawLinesize,
+                             outRGBA.data() + y * alignedLinesize,
+                             rawLinesize);
+            outRGBA.resize(static_cast<size_t>(w) * h * 4);
+        }
 
         outW = w;
         outH = h;
@@ -2929,13 +2946,6 @@ namespace sm
             }
 
             // Feed packet to decoder
-            // Flush the decoder on keyframes to release stale reference
-            // frames.  This prevents a corrupted earlier frame from
-            // persisting in the DPB and causing out-of-bounds writes
-            // when the decoder tries to use it as a reference.
-            if (pkt->flags & AV_PKT_FLAG_KEY)
-                avcodec_flush_buffers(decCtx);
-
             int ret = avcodec_send_packet(decCtx, pkt);
             av_packet_free(&pkt);
             if (ret < 0 && ret != AVERROR(EAGAIN))
@@ -2989,12 +2999,31 @@ namespace sm
                     dstH = h;
                 }
 
-                // Convert to RGBA
-                std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+                // Convert to RGBA.
+                // sws_scale with SIMD (AVX2/SSE) writes in 16-32 byte
+                // blocks.  If the output linesize isn't aligned, the
+                // final write on the last line extends past the buffer
+                // → heap metadata corruption → c0000374 on next alloc.
+                // Fix: align linesize to 32 bytes and pad the vector.
+                const int rawLinesize = w * 4;
+                const int alignedLinesize = (rawLinesize + 31) & ~31;
+                const size_t bufSize = static_cast<size_t>(alignedLinesize) * h;
+                std::vector<uint8_t> rgba(bufSize);
                 uint8_t *dstData[1] = {rgba.data()};
-                int dstLinesize[1] = {w * 4};
+                int dstLinesize[1] = {alignedLinesize};
                 sws_scale(localSws, frame->data, frame->linesize, 0, frame->height,
                           dstData, dstLinesize);
+
+                // If linesize has padding, pack rows tightly for the
+                // callback (consumers expect w*h*4 contiguous bytes).
+                if (alignedLinesize != rawLinesize)
+                {
+                    for (int y = 1; y < h; ++y)
+                        std::memmove(rgba.data() + y * rawLinesize,
+                                     rgba.data() + y * alignedLinesize,
+                                     rawLinesize);
+                    rgba.resize(static_cast<size_t>(w) * h * 4);
+                }
 
                 // Push through callback
                 if (previewDataCb_)
