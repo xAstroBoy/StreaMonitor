@@ -140,7 +140,7 @@ namespace sm
             cache_[url] = Entry{State::Loading, 0, 0, 0, std::chrono::steady_clock::now()};
             activeDownloads_.fetch_add(1);
             downloadThreads_.emplace_back([this, url]()
-                        {
+                                          {
                             try {
                                 downloadAndDecode(url);
                             } catch (const std::exception& e) {

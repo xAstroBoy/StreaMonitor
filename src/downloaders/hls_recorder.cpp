@@ -239,6 +239,8 @@ namespace sm
         static void patchMvhdNextTrackId(uint8_t *mvhdData, uint32_t mvhdSize,
                                          uint32_t nextTrackId)
         {
+            if (mvhdSize <= 8)
+                return; // header-only, no body
             auto body = mvhdData + 8;
             uint8_t version = body[0];
             // next_track_ID is the last field of mvhd:
@@ -640,6 +642,15 @@ namespace sm
     // ── SegmentFeeder: create AVIOContext ────────────────────────────
     AVIOContext *HLSRecorder::SegmentFeeder::createAVIO()
     {
+        // Clean up any leftover from a failed previous attempt (e.g. openInput
+        // failed → loop retries → createAVIO called again without stop()).
+        if (avioCtx)
+        {
+            avio_context_free(&avioCtx);
+            avioCtx = nullptr;
+            avioBuf = nullptr; // buffer was freed by avio_context_free
+        }
+
         avioBuf = static_cast<uint8_t *>(av_malloc(AVIO_BUF_SIZE));
         if (!avioBuf)
             return nullptr;
@@ -2131,6 +2142,13 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void HLSRecorder::closeInput(FFmpegState &state)
     {
+        // Stop the preview thread FIRST — its decoder holds stale reference
+        // frames from the old stream.  If we keep it alive across a restart,
+        // packets from the new input (possibly with different SPS/PPS or no
+        // leading keyframe) are fed to the stale decoder, which writes into
+        // reference-frame buffers sized for the old stream → heap overrun.
+        stopPreviewThread_();
+
         // Shadow decoders reference the input's codec parameters and internal
         // buffers. They MUST be destroyed BEFORE closing the input context,
         // otherwise they become dangling pointers → heap corruption on next use.
@@ -2745,6 +2763,17 @@ namespace sm
         if (state.videoIdx < 0 || !state.inputCtx)
             return false;
 
+        // ── Keyframe gate ───────────────────────────────────────────
+        // Only start feeding packets after we've seen an IDR frame.
+        // Without this, after a restart the stale preview decoder
+        // receives P/B frames that reference frames it never decoded,
+        // causing the H264 decoder to write into invalid reference
+        // buffers → heap corruption.
+        if (pkt->flags & AV_PKT_FLAG_KEY)
+            previewGotKeyframe_ = true;
+        if (!previewGotKeyframe_)
+            return false;
+
         // Start preview thread on first video packet (lazy init)
         if (!previewThread_.joinable())
         {
@@ -2820,6 +2849,9 @@ namespace sm
             avcodec_parameters_free(&previewCodecPar_);
             previewCodecPar_ = nullptr;
         }
+
+        // Reset keyframe gate so next start waits for an IDR
+        previewGotKeyframe_ = false;
 
         log_->info("[Preview] Background decode thread stopped");
     }

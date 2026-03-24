@@ -226,6 +226,7 @@ namespace sm
         std::atomic<bool> previewThreadStop_{false};
         AVCodecParameters *previewCodecPar_ = nullptr;     // owned copy
         static constexpr size_t kMaxPreviewPktQueue = 300; // ~10s at 30fps
+        bool previewGotKeyframe_ = false;                  // only queue after IDR
 
         // Preview sws state (transcode mode only — used on recording thread)
         SwsContext *previewSwsCtx_ = nullptr;
@@ -396,8 +397,8 @@ namespace sm
             std::mutex bufMutex;
             std::condition_variable bufCv;
             std::deque<uint8_t> ringBuf;
-            bool finished = false; // no more data coming (stream ended)
-            bool hasError = false; // fatal error occurred
+            bool finished = false;             // no more data coming (stream ended)
+            std::atomic<bool> hasError{false}; // fatal error occurred
 
             // ── Backpressure: cap ring buffer at 32 MB ──
             // If FFmpeg stalls, feedBytes() blocks until buffer drains
