@@ -70,6 +70,17 @@ static LRESULT CALLBACK minimizeSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPA
                 return 0; // Swallow the message
             }
         }
+        // ── WM_DISPLAYCHANGE — monitor resolution / mode / connection changed ──
+        // This fires reliably for virtual-monitor, RDP, and real monitor
+        // plug/unplug events.  Bump the same atomic counter the GLFW
+        // monitor callback uses so the main loop skips all GL calls.
+        if (msg == WM_DISPLAYCHANGE)
+        {
+            sm::GuiApp::bumpDisplayChangeCount();
+            spdlog::warn("WM_DISPLAYCHANGE — display mode changed ({}x{}, {}bpp)",
+                         LOWORD(lp), HIWORD(lp), (int)wp);
+            // fall through to DefWindowProc
+        }
         // ── Render during drag / resize so the GUI stays alive ──────────
         if (msg == WM_ENTERSIZEMOVE)
         {
@@ -915,7 +926,7 @@ namespace sm
         // so we use a static atomic counter checked in the main loop.
         glfwSetMonitorCallback([](GLFWmonitor * /*monitor*/, int event)
         {
-            sDisplayChangeCount_.fetch_add(1, std::memory_order_relaxed);
+            bumpDisplayChangeCount();
             spdlog::warn("Display change detected (event={}) \u2014 pausing GL operations",
                          event == GLFW_CONNECTED ? "connected" : "disconnected");
         });
@@ -1351,8 +1362,9 @@ namespace sm
 
                 // ── Display change detection (virtual monitor / GPU reset) ──
                 // When a monitor is connected or disconnected the GL context
-                // may become stale.  Skip all GL texture operations for a
-                // grace period to let the driver reinitialise.
+                // may become invalid.  Skip ALL GL operations (not just
+                // texture uploads) for a grace period so the driver can
+                // reinitialise — glClear/glSwapBuffers can hang otherwise.
                 {
                     int changeCount = sDisplayChangeCount_.load(std::memory_order_relaxed);
                     if (changeCount != lastDisplayChangeCount_)
@@ -1360,8 +1372,7 @@ namespace sm
                         lastDisplayChangeCount_ = changeCount;
                         lastDisplayChangeTime_ = glfwGetTime();
                         displayChangePending_ = true;
-                        needFontRebuild_ = true; // force font atlas rebuild
-                        spdlog::warn("Display change — suspending GL uploads for {:.1f}s",
+                        spdlog::warn("Display change — suspending ALL GL for {:.1f}s",
                                      kDisplayChangeGraceSec);
                     }
                     if (displayChangePending_)
@@ -1372,7 +1383,14 @@ namespace sm
                             displayChangePending_ = false;
                             // Re-assert the GL context on the main window
                             glfwMakeContextCurrent(window_);
-                            spdlog::info("Display change grace period ended — GL uploads resumed");
+                            needFontRebuild_ = true; // rebuild font atlas with fresh GL state
+                            spdlog::info("Display change grace period ended — GL resumed");
+                        }
+                        else
+                        {
+                            // Skip entire frame — no GL calls at all
+                            glfwWaitEventsTimeout(0.1);
+                            continue;
                         }
                     }
                 }
@@ -1560,7 +1578,7 @@ namespace sm
     // ─────────────────────────────────────────────────────────────────
     void GuiApp::renderDragFrame()
     {
-        if (!window_ || shuttingDown_.load())
+        if (!window_ || shuttingDown_.load() || displayChangePending_)
             return;
 
         glfwMakeContextCurrent(window_);

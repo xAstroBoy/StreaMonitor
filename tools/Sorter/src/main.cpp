@@ -26,10 +26,13 @@
 // ── Render-during-drag globals ──────────────────────────────────────────────
 static GLFWwindow *g_window = nullptr;
 static sorter::App *g_appPtr = nullptr;
+static bool g_displayChangePending = false;
+static double g_displayChangeTime = 0.0;
+static constexpr double kDisplayChangeGraceSec = 3.0;
 
 static void RenderOneFrame()
 {
-    if (!g_window || !g_appPtr)
+    if (!g_window || !g_appPtr || g_displayChangePending)
         return;
 
     glfwMakeContextCurrent(g_window);
@@ -63,6 +66,10 @@ static LRESULT CALLBACK DragResizeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 {
     switch (msg)
     {
+    case WM_DISPLAYCHANGE:
+        g_displayChangePending = true;
+        g_displayChangeTime = glfwGetTime();
+        break; // fall through to original WndProc
     case WM_ENTERSIZEMOVE:
         g_inModalLoop = true;
         SetTimer(hwnd, TIMER_RENDER_DURING_DRAG, 16, nullptr); // ~60 fps
@@ -236,10 +243,10 @@ int main(int, char **)
     }
 #endif
 
-    // Re-assert GL context after display changes (virtual monitor, GPU reset)
+    // Detect display changes (virtual monitor, GPU reset) — skip GL until stable
     glfwSetMonitorCallback([](GLFWmonitor *, int) {
-        if (g_window)
-            glfwMakeContextCurrent(g_window);
+        g_displayChangePending = true;
+        g_displayChangeTime = glfwGetTime();
     });
 
     // ImGui setup
@@ -321,6 +328,20 @@ int main(int, char **)
         if (g_inModalLoop)
             continue;
 #endif
+
+        // ── Display change grace period — skip ALL GL until driver stabilises ──
+        if (g_displayChangePending)
+        {
+            double elapsed = glfwGetTime() - g_displayChangeTime;
+            if (elapsed < kDisplayChangeGraceSec)
+            {
+                glfwWaitEventsTimeout(0.1);
+                continue; // skip entire frame — no GL calls
+            }
+            g_displayChangePending = false;
+            glfwMakeContextCurrent(g_window);
+            needFontRebuild = true;
+        }
 
         // ── Handle DPI / content scale changes (monitor switch, resolution change) ──
         {

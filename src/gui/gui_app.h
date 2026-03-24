@@ -65,6 +65,9 @@ namespace sm
         void renderDragFrame(); // lightweight frame pump for WM_TIMER during drag/resize
 #endif
 
+        /// Notify that a display change has occurred (called from WndProc / GLFW callback)
+        static void bumpDisplayChangeCount() { sDisplayChangeCount_.fetch_add(1, std::memory_order_relaxed); }
+
     private:
         // ── Initialization ──────────────────────────────────────────
         bool initWindow();
@@ -333,7 +336,7 @@ namespace sm
         int lastDisplayChangeCount_ = 0;    // local snapshot to detect changes
         double lastDisplayChangeTime_ = 0.0; // glfwGetTime() when last change was seen
         bool displayChangePending_ = false;  // true = skip GL ops for grace period
-        static constexpr double kDisplayChangeGraceSec = 1.5; // seconds to skip GL after display change
+        static constexpr double kDisplayChangeGraceSec = 3.0; // seconds to skip ALL GL after display change
 
         /// Returns false when the GL context is suspect (display change in progress).
         /// Call this before any glTexImage/glTexSubImage/glGenTextures operation.
