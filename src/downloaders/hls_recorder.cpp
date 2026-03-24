@@ -2880,6 +2880,13 @@ namespace sm
         avcodec_parameters_to_context(decCtx, previewCodecPar_);
         decCtx->thread_count = 1;
 
+        // Strict error recognition: if a NAL unit references frames the
+        // decoder has never seen (e.g. after a stream discontinuity), the
+        // H264 decoder may write into invalid reference buffers → heap
+        // corruption.  AV_EF_EXPLODE makes the decoder bail immediately
+        // on such errors instead of attempting to conceal them.
+        decCtx->err_recognition = AV_EF_CRCCHECK | AV_EF_EXPLODE;
+
         if (avcodec_open2(decCtx, decoder, nullptr) < 0)
         {
             log_->warn("[Preview-Thread] Failed to open decoder");
@@ -2922,6 +2929,13 @@ namespace sm
             }
 
             // Feed packet to decoder
+            // Flush the decoder on keyframes to release stale reference
+            // frames.  This prevents a corrupted earlier frame from
+            // persisting in the DPB and causing out-of-bounds writes
+            // when the decoder tries to use it as a reference.
+            if (pkt->flags & AV_PKT_FLAG_KEY)
+                avcodec_flush_buffers(decCtx);
+
             int ret = avcodec_send_packet(decCtx, pkt);
             av_packet_free(&pkt);
             if (ret < 0 && ret != AVERROR(EAGAIN))
@@ -3499,6 +3513,16 @@ namespace sm
                                 if (state.encFrame)
                                     av_frame_free(&state.encFrame);
 
+                                // Stop the preview thread — its H264 decoder was
+                                // opened with the OLD codec parameters (old SPS/PPS,
+                                // old resolution).  If we keep it running, packets
+                                // from the new resolution are fed to the stale
+                                // decoder whose DPB is sized for the old resolution
+                                // → buffer overrun → heap corruption.
+                                // The thread will be lazily re-started by
+                                // deliverPreviewFromPacket() on the next keyframe.
+                                stopPreviewThread_();
+
                                 // Shadow decoders also reference old input codec state —
                                 // they'll be lazily re-created for the new resolution.
                                 if (state.shadowFrame)
@@ -3552,6 +3576,10 @@ namespace sm
                                 log_->info("Resolution changed but no callback — continuing same file");
                                 state.outputWidth = newW;
                                 state.outputHeight = newH;
+
+                                // Still stop preview thread — its decoder is sized
+                                // for the old resolution and would corrupt the heap.
+                                stopPreviewThread_();
                             }
                         }
                     }
