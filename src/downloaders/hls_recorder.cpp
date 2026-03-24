@@ -3818,12 +3818,22 @@ namespace sm
                             // highest timestamp + one frame/packet duration.
                             // Using max(PTS, DTS) ensures continuity for HEVC
                             // B-frame streams where PTS runs ahead of DTS.
+                            //
+                            // IMPORTANT: Align BOTH offsets to the max of the two.
+                            // Without this, stalls that affect only one stream
+                            // (e.g. video keyframe loss while audio continues)
+                            // cause the offsets to diverge.  Over many restarts
+                            // the gap accumulates → video duration ≠ audio
+                            // duration → fast/glitchy playback.
                             if (!state.transcoding)
                             {
                                 int64_t vDur = state.lastVideoDuration > 0 ? state.lastVideoDuration : 1;
                                 int64_t aDur = state.lastAudioDuration > 0 ? state.lastAudioDuration : 1;
-                                state.videoRestartOffset = std::max(state.lastVideoOutPts, state.lastVideoOutDts) + vDur;
-                                state.audioRestartOffset = std::max(state.lastAudioOutPts, state.lastAudioOutDts) + aDur;
+                                int64_t vEnd = std::max(state.lastVideoOutPts, state.lastVideoOutDts) + vDur;
+                                int64_t aEnd = std::max(state.lastAudioOutPts, state.lastAudioOutDts) + aDur;
+                                int64_t aligned = std::max(vEnd, aEnd);
+                                state.videoRestartOffset = aligned;
+                                state.audioRestartOffset = aligned;
                             }
 
                             // Reset per-input-session state
@@ -3889,12 +3899,16 @@ namespace sm
 
                     // Save restart offsets for PTS continuity when resumed.
                     // Use max(PTS, DTS) + duration for proper B-frame handling.
+                    // Align BOTH to the max so A/V can't drift apart across pauses.
                     if (!state.transcoding)
                     {
                         int64_t vDur = state.lastVideoDuration > 0 ? state.lastVideoDuration : 1;
                         int64_t aDur = state.lastAudioDuration > 0 ? state.lastAudioDuration : 1;
-                        state.videoRestartOffset = std::max(state.lastVideoOutPts, state.lastVideoOutDts) + vDur;
-                        state.audioRestartOffset = std::max(state.lastAudioOutPts, state.lastAudioOutDts) + aDur;
+                        int64_t vEnd = std::max(state.lastVideoOutPts, state.lastVideoOutDts) + vDur;
+                        int64_t aEnd = std::max(state.lastAudioOutPts, state.lastAudioOutDts) + aDur;
+                        int64_t aligned = std::max(vEnd, aEnd);
+                        state.videoRestartOffset = aligned;
+                        state.audioRestartOffset = aligned;
                     }
                     if (state.transcoding && state.videoDecCtx)
                         avcodec_flush_buffers(state.videoDecCtx);
