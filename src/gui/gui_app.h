@@ -62,6 +62,7 @@ namespace sm
         bool shouldMinimizeToTray() const { return config_.minimizeToTray; }
 #ifdef _WIN32
         void setMinimizedToTray(bool v) { minimizedToTray_ = v; }
+        void renderDragFrame(); // lightweight frame pump for WM_TIMER during drag/resize
 #endif
 
     private:

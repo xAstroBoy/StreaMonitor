@@ -23,6 +23,63 @@
 #include <filesystem>
 #include <algorithm>
 
+// ── Render-during-drag globals ──────────────────────────────────────────────
+static GLFWwindow *g_window = nullptr;
+static tt::App *g_appPtr = nullptr;
+
+static void RenderOneFrame()
+{
+    if (!g_window || !g_appPtr)
+        return;
+
+    glfwMakeContextCurrent(g_window);
+
+    int displayW, displayH;
+    glfwGetFramebufferSize(g_window, &displayW, &displayH);
+    if (displayW <= 0 || displayH <= 0)
+        return;
+
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    g_appPtr->render();
+
+    ImGui::Render();
+    glViewport(0, 0, displayW, displayH);
+    glClearColor(0.06f, 0.06f, 0.08f, 1.00f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    glfwSwapBuffers(g_window);
+}
+
+#ifdef _WIN32
+static WNDPROC g_origWndProc = nullptr;
+static bool g_inModalLoop = false;
+static constexpr UINT_PTR TIMER_RENDER_DURING_DRAG = 1;
+
+static LRESULT CALLBACK DragResizeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_ENTERSIZEMOVE:
+        g_inModalLoop = true;
+        SetTimer(hwnd, TIMER_RENDER_DURING_DRAG, 16, nullptr); // ~60 fps
+        return 0;
+    case WM_EXITSIZEMOVE:
+        g_inModalLoop = false;
+        KillTimer(hwnd, TIMER_RENDER_DURING_DRAG);
+        return 0;
+    case WM_TIMER:
+        if (wp == TIMER_RENDER_DURING_DRAG)
+            RenderOneFrame();
+        return 0;
+    }
+    return CallWindowProcW(g_origWndProc, hwnd, msg, wp, lp);
+}
+#endif
+
 // ── Custom dark theme (matches StreaMonitor exactly) ────────────────────────
 
 static void SetupStyle()
@@ -168,7 +225,22 @@ int main(int, char **)
             SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)icon);
         }
     }
+
+    // Subclass HWND — keep rendering during drag / resize
+    g_window = window;
+    {
+        HWND hwnd = glfwGetWin32Window(window);
+        g_origWndProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                              reinterpret_cast<LONG_PTR>(DragResizeProc)));
+    }
 #endif
+
+    // Re-assert GL context after display changes (virtual monitor, GPU reset)
+    glfwSetMonitorCallback([](GLFWmonitor *, int) {
+        if (g_window)
+            glfwMakeContextCurrent(g_window);
+    });
 
     // ImGui setup
     IMGUI_CHECKVERSION();
@@ -229,6 +301,7 @@ int main(int, char **)
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
     tt::App app;
+    g_appPtr = &app;
 
     // Show window after first dark frame
     {
@@ -242,6 +315,12 @@ int main(int, char **)
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
+
+#ifdef _WIN32
+        // Inside modal drag/resize loop — WM_TIMER handles rendering
+        if (g_inModalLoop)
+            continue;
+#endif
 
         // ── Handle DPI / content scale changes (monitor switch, resolution change) ──
         {

@@ -44,8 +44,12 @@
 // ── Win32 subclass to intercept minimize BEFORE GLFW processes it ────
 // GLFW's iconify callback fires AFTER the minimize animation, causing
 // a brief taskbar flash. Subclassing catches SC_MINIMIZE immediately.
+// Also handles WM_ENTERSIZEMOVE/EXITSIZEMOVE to keep rendering during
+// window drag and resize (Windows enters a modal loop that blocks GLFW).
 static WNDPROC g_origWndProc = nullptr;
 static sm::GuiApp *g_guiAppForSubclass = nullptr;
+static bool g_inModalLoop = false;
+static constexpr UINT_PTR TIMER_RENDER_DURING_DRAG = 1;
 
 static LRESULT CALLBACK minimizeSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -65,6 +69,25 @@ static LRESULT CALLBACK minimizeSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPA
                 self->setMinimizedToTray(true);
                 return 0; // Swallow the message
             }
+        }
+        // ── Render during drag / resize so the GUI stays alive ──────────
+        if (msg == WM_ENTERSIZEMOVE)
+        {
+            g_inModalLoop = true;
+            SetTimer(hwnd, TIMER_RENDER_DURING_DRAG, 16, nullptr); // ~60 fps
+            return 0;
+        }
+        if (msg == WM_EXITSIZEMOVE)
+        {
+            g_inModalLoop = false;
+            KillTimer(hwnd, TIMER_RENDER_DURING_DRAG);
+            return 0;
+        }
+        if (msg == WM_TIMER && wp == TIMER_RENDER_DURING_DRAG)
+        {
+            if (g_guiAppForSubclass)
+                g_guiAppForSubclass->renderDragFrame();
+            return 0;
         }
         return CallWindowProcW(g_origWndProc, hwnd, msg, wp, lp);
     }
@@ -1530,6 +1553,54 @@ namespace sm
 
         cleanup();
         return 0;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Lightweight frame render for WM_TIMER during drag / resize
+    // ─────────────────────────────────────────────────────────────────
+    void GuiApp::renderDragFrame()
+    {
+        if (!window_ || shuttingDown_.load())
+            return;
+
+        glfwMakeContextCurrent(window_);
+
+        int displayW, displayH;
+        glfwGetFramebufferSize(window_, &displayW, &displayH);
+        if (displayW <= 0 || displayH <= 0)
+            return;
+
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        try
+        {
+            renderFrame();
+        }
+        catch (...)
+        {
+            ImGui::EndFrame();
+            return;
+        }
+
+        ImGui::Render();
+        glViewport(0, 0, displayW, displayH);
+        glClearColor(COL_BG_DARK.x, COL_BG_DARK.y, COL_BG_DARK.z, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        glfwSwapBuffers(window_);
+
+        // Multi-viewport update
+        ImGuiIO &io = ImGui::GetIO();
+        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+        {
+            GLFWwindow *backup = glfwGetCurrentContext();
+            ImGui::UpdatePlatformWindows();
+            ImGui::RenderPlatformWindowsDefault();
+            glfwMakeContextCurrent(backup);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
