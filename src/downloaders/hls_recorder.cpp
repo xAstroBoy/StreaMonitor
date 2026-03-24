@@ -41,9 +41,27 @@ extern "C"
 #include <fstream>
 #include <sstream>
 #include <regex>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace sm
 {
+#ifdef _WIN32
+    // Separate function for SEH — __try can't coexist with C++ destructors.
+    // Returns false if the heap is corrupt or if HeapValidate itself crashes.
+    static bool safeHeapValidate() noexcept
+    {
+        __try
+        {
+            return !!HeapValidate(GetProcessHeap(), 0, nullptr);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+#endif
 
     // ─────────────────────────────────────────────────────────────────
     // FFmpeg error to string
@@ -2904,6 +2922,20 @@ namespace sm
         // on such errors instead of attempting to conceal them.
         decCtx->err_recognition = AV_EF_CRCCHECK | AV_EF_EXPLODE;
 
+        // ── Harden decoder against heap corruption ──────────────────
+        // The preview is a small thumbnail — we don't need full quality.
+        // Disabling the deblocking filter eliminates a major class of
+        // SIMD boundary writes (the loop filter processes macroblock
+        // edges and can write past frame boundaries in edge cases with
+        // malformed streams).
+        decCtx->skip_loop_filter = AVDISCARD_ALL;
+
+        // Limit the number of reference frames the decoder can hold.
+        // Fewer references = smaller DPB = less memory for the H264
+        // decoder to corrupt if it mis-handles a reference index.
+        // Most streams use ≤ 4 references; cap at 4 for safety.
+        decCtx->refs = 4;
+
         if (avcodec_open2(decCtx, decoder, nullptr) < 0)
         {
             log_->warn("[Preview-Thread] Failed to open decoder");
@@ -2918,6 +2950,24 @@ namespace sm
             return;
         }
 
+        // Allocate a reusable output frame for sws_scale.
+        // Using an AVFrame with av_frame_get_buffer gives us:
+        //  - Proper SIMD alignment on each plane (32–64 bytes)
+        //  - Extra padding lines/bytes that absorb SIMD overwrites
+        //  - No per-frame heap allocation (the frame is reused)
+        // This eliminates frequent heap alloc/free in the hot loop,
+        // so latent heap corruption from ANY source is far less
+        // likely to be detected here (and far less likely to cascade
+        // into a crash — the recording survives).
+        AVFrame *rgbaFrame = av_frame_alloc();
+        if (!rgbaFrame)
+        {
+            av_frame_free(&frame);
+            avcodec_free_context(&decCtx);
+            return;
+        }
+        int rgbaW = 0, rgbaH = 0; // track current output dimensions
+
         log_->info("[Preview-Thread] Decoder ready: {} ({}x{})",
                    decoder->name, previewCodecPar_->width, previewCodecPar_->height);
 
@@ -2926,6 +2976,10 @@ namespace sm
         int swsSrcW = 0, swsSrcH = 0, swsSrcFmt = -1;
         int dstW = 0, dstH = 0;
         int frameCounter = 0;
+
+#ifdef _WIN32
+        int heapCheckCounter = 0;
+#endif
 
         // ── Main loop: drain packet queue, decode, convert, push ────
         while (!previewThreadStop_.load())
@@ -2966,6 +3020,14 @@ namespace sm
                 if ((frameCounter % kPreviewDecimate) != 0)
                     continue;
 
+                // ── Sanity-check decoded frame dimensions ───────────
+                // Malformed streams can cause the decoder to report
+                // absurd dimensions.  Skip instead of risking overflows.
+                if (frame->width <= 0 || frame->height <= 0 ||
+                    frame->width > 7680 || frame->height > 4320 ||
+                    frame->format == AV_PIX_FMT_NONE)
+                    continue;
+
                 // Scale down for preview (max 640px wide)
                 int w = frame->width;
                 int h = frame->height;
@@ -2999,39 +3061,85 @@ namespace sm
                     dstH = h;
                 }
 
-                // Convert to RGBA.
-                // sws_scale with SIMD (AVX2/SSE) writes in 16-32 byte
-                // blocks.  If the output linesize isn't aligned, the
-                // final write on the last line extends past the buffer
-                // → heap metadata corruption → c0000374 on next alloc.
-                // Fix: align linesize to 32 bytes and pad the vector.
-                const int rawLinesize = w * 4;
-                const int alignedLinesize = (rawLinesize + 31) & ~31;
-                const size_t bufSize = static_cast<size_t>(alignedLinesize) * h;
-                std::vector<uint8_t> rgba(bufSize);
-                uint8_t *dstData[1] = {rgba.data()};
-                int dstLinesize[1] = {alignedLinesize};
-                sws_scale(localSws, frame->data, frame->linesize, 0, frame->height,
-                          dstData, dstLinesize);
-
-                // If linesize has padding, pack rows tightly for the
-                // callback (consumers expect w*h*4 contiguous bytes).
-                if (alignedLinesize != rawLinesize)
+                // ── Reallocate reusable output frame if size changed ─
+                if (w != rgbaW || h != rgbaH)
                 {
-                    for (int y = 1; y < h; ++y)
-                        std::memmove(rgba.data() + y * rawLinesize,
-                                     rgba.data() + y * alignedLinesize,
-                                     rawLinesize);
-                    rgba.resize(static_cast<size_t>(w) * h * 4);
+                    av_frame_unref(rgbaFrame);
+                    rgbaFrame->format = AV_PIX_FMT_RGBA;
+                    rgbaFrame->width = w;
+                    rgbaFrame->height = h;
+                    if (av_frame_get_buffer(rgbaFrame, 32) < 0)
+                        continue;
+                    rgbaW = w;
+                    rgbaH = h;
+                }
+                else
+                {
+                    // Same size — reuse the buffer (just ensure writable)
+                    if (av_frame_make_writable(rgbaFrame) < 0)
+                        continue;
+                }
+
+                // Convert to RGBA using the padded AVFrame buffer.
+                // av_frame_get_buffer provides:
+                //  - 32-byte aligned linesize (rgbaFrame->linesize[0])
+                //  - Extra padding bytes after the last scanline
+                // This absorbs any SIMD overshoot from sws_scale.
+                sws_scale(localSws, frame->data, frame->linesize, 0, frame->height,
+                          rgbaFrame->data, rgbaFrame->linesize);
+
+                // Copy pixel data into a tight-packed vector for the
+                // callback.  rgbaFrame->linesize[0] may include padding
+                // beyond w*4, so we copy row by row.
+                const int tightStride = w * 4;
+                const size_t tightSize = static_cast<size_t>(tightStride) * h;
+                std::vector<uint8_t> rgba(tightSize);
+
+                if (rgbaFrame->linesize[0] == tightStride)
+                {
+                    // No padding — single memcpy
+                    std::memcpy(rgba.data(), rgbaFrame->data[0], tightSize);
+                }
+                else
+                {
+                    // Row-by-row copy to strip linesize padding
+                    for (int y = 0; y < h; ++y)
+                        std::memcpy(rgba.data() + y * tightStride,
+                                    rgbaFrame->data[0] + y * rgbaFrame->linesize[0],
+                                    tightStride);
                 }
 
                 // Push through callback
                 if (previewDataCb_)
                     previewDataCb_(std::move(rgba), w, h);
+
+#ifdef _WIN32
+                // ── Periodic heap health check ──────────────────────
+                // Every ~500 decoded preview frames (~30 sec at 15fps),
+                // validate the process heap.  If corruption is detected
+                // we log it and bail — the recording thread continues
+                // unaffected, but we stop the preview to prevent a
+                // hard crash that would kill the entire process.
+                if (++heapCheckCounter >= 500)
+                {
+                    heapCheckCounter = 0;
+                    if (!safeHeapValidate())
+                    {
+                        log_->error("[Preview-Thread] *** HEAP CORRUPTION DETECTED *** "
+                                    "at frame {} — stopping preview to protect recording",
+                                    frameCounter);
+                        goto cleanup; // bail out of both loops
+                    }
+                }
+#endif
             }
         }
 
+#ifdef _WIN32
+    cleanup:
+#endif
         // ── Cleanup ─────────────────────────────────────────────────
+        av_frame_free(&rgbaFrame);
         av_frame_free(&frame);
         avcodec_free_context(&decCtx);
         if (localSws)
