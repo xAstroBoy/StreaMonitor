@@ -66,7 +66,7 @@ jobs:
           arch: x64
 
       - name: Build & Package
-        run: python build.py --no-deploy
+        run: python build.py --no-bump --no-deploy
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -111,7 +111,7 @@ jobs:
             libnghttp2-dev
 
       - name: Build & Package
-        run: python3 build.py --system-libs --no-deploy
+        run: python3 build.py --no-bump --system-libs --no-deploy
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -158,7 +158,14 @@ jobs:
           name: StreaMonitor-Linux-x64-release
           path: release/
 
-      - name: Create or update release
+      - name: Delete stale release & tag
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}

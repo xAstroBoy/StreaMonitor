@@ -660,9 +660,9 @@ def main():
     parser.add_argument("--system-libs", action="store_true",
                         help="Use system libraries instead of vcpkg (Linux)")
     parser.add_argument("--bump", action="store_true",
-                        help="Auto-increment version before building (default: no bump)")
+                        help="Auto-increment version before building (this is now the default)")
     parser.add_argument("--no-bump", action="store_true",
-                        help="Don't auto-increment version before building (default)")
+                        help="Don't auto-increment version before building")
     parser.add_argument("--no-deploy", action="store_true",
                         help="Don't deploy to runtime directory after build")
     parser.add_argument("--deploy-only", action="store_true",
@@ -722,12 +722,12 @@ def main():
             cache.unlink()
             print("Removed CMakeCache.txt")
 
-    # Auto-increment version ONLY if --bump is explicitly passed
-    if args.bump:
-        version = bump_version()
-    else:
+    # Auto-increment version by default; skip only with --no-bump
+    if args.no_bump:
         version = get_current_version()
         print(f"\n[i] Current version: {version} (bump skipped)")
+    else:
+        version = bump_version()
 
     # Configure (only if no cache or forced)
     cache = BUILD_DIR / "CMakeCache.txt"
