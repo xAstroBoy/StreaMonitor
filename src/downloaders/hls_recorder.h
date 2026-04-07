@@ -462,6 +462,14 @@ namespace sm
                        CancellationToken &cancelToken,
                        PlaylistDecoder decoder = nullptr);
             void stop();
+            
+            // Destructor ensures thread is properly cleaned up
+            ~SegmentFeeder()
+            {
+                // Ensure the thread is stopped before destroying
+                if (running.load() || thread.joinable())
+                    stop();
+            }
 
             // Create an AVIOContext for FFmpeg to read from.
             // Caller must NOT free — stop() handles cleanup.

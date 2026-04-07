@@ -772,16 +772,40 @@ namespace sm
         std::string videoInitData;
         if (!initUrl.empty())
         {
-            auto initResp = http.get(initUrl, 15);
-            if (!initResp.ok() || initResp.body.empty())
+            // Retry init segment download (transient errors like 400 can happen)
+            bool initSuccess = false;
+            for (int attempt = 1; attempt <= 3; attempt++)
             {
-                log->error("SegmentFeeder: failed to download init segment (HTTP {})",
-                           initResp.statusCode);
+                auto initResp = http.get(initUrl, 15);
+                if (initResp.ok() && !initResp.body.empty())
+                {
+                    videoInitData = std::move(initResp.body);
+                    log->debug("SegmentFeeder: video init downloaded ({} bytes)",
+                               videoInitData.size());
+                    initSuccess = true;
+                    break;
+                }
+                
+                // Log and retry on transient errors (400, 403, 500-599, etc)
+                // but fail immediately on 404 (not found)
+                if (initResp.statusCode == 404)
+                {
+                    log->error("SegmentFeeder: init segment not found (404)");
+                    return false;
+                }
+                
+                log->warn("SegmentFeeder: init segment download failed (HTTP {}) - attempt {}/3",
+                          initResp.statusCode, attempt);
+                
+                if (attempt < 3)
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            
+            if (!initSuccess)
+            {
+                log->error("SegmentFeeder: all init segment download attempts failed");
                 return false;
             }
-            videoInitData = std::move(initResp.body);
-            log->debug("SegmentFeeder: video init downloaded ({} bytes)",
-                       videoInitData.size());
         }
 
         // ── Split audio: download audio init + merge ────────────────
@@ -899,9 +923,12 @@ namespace sm
             }
         }
 
-        if (lastSeq < 0)
+        // Check if we got at least some data (init segment or media segments)
+        // If init segment failed but we have media segments, proceed anyway
+        // (FFmpeg may be able to handle it)
+        if (lastSeq < 0 && videoInitData.empty())
         {
-            log->error("SegmentFeeder: no segments could be downloaded");
+            log->error("SegmentFeeder: failed to download init segment and no media segments available");
             return false;
         }
 
@@ -1155,7 +1182,24 @@ namespace sm
         drainCv.notify_all(); // unblock feedBytes() if waiting on backpressure
 
         if (thread.joinable())
-            thread.join();
+        {
+            // Wait with timeout to prevent hangs (e.g. if thread is stuck in HTTP request)
+            // Use a 5-second timeout; if thread doesn't finish, detach and let it clean up
+            auto start = Clock::now();
+            const auto timeout = std::chrono::seconds(5);
+            
+            while (thread.joinable() && (Clock::now() - start < timeout))
+            {
+                // Brief sleep to avoid busy-waiting
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            
+            if (thread.joinable())
+            {
+                log->warn("SegmentFeeder: thread did not finish within timeout, detaching");
+                thread.detach();
+            }
+        }
 
         // Clean up AVIO
         if (avioCtx)
