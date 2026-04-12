@@ -108,19 +108,73 @@ namespace sm
             return;
         }
 
+        // Try loading from the primary config file
+        if (tryLoadFrom_(path))
+        {
+            spdlog::info("Loaded {} models from config", models_.size());
+            return;
+        }
+
+        // Primary config is corrupt — try the backup
+        auto bakPath = path;
+        bakPath += ".bak";
+        if (std::filesystem::exists(bakPath))
+        {
+            spdlog::warn("Primary config corrupt, trying backup: {}", bakPath.string());
+            if (tryLoadFrom_(bakPath))
+            {
+                spdlog::info("Recovered {} models from backup config", models_.size());
+                // Restore the backup over the corrupt primary
+                std::error_code ec;
+                std::filesystem::copy_file(bakPath, path,
+                                           std::filesystem::copy_options::overwrite_existing, ec);
+                if (!ec)
+                    spdlog::info("Restored backup config over corrupt primary");
+                return;
+            }
+        }
+
+        spdlog::error("Failed to load config from primary and backup — starting fresh");
+    }
+
+    bool ModelConfigStore::tryLoadFrom_(const std::filesystem::path &path)
+    {
         try
         {
             std::ifstream f(path);
+            if (!f.is_open())
+                return false;
+
             auto j = nlohmann::json::parse(f);
-            if (j.is_array())
+            if (!j.is_array())
             {
-                models_ = j.get<std::vector<ModelConfig>>();
+                spdlog::warn("Config is not a JSON array: {}", path.string());
+                return false;
             }
-            spdlog::info("Loaded {} models from config", models_.size());
+
+            auto loaded = j.get<std::vector<ModelConfig>>();
+            // Treat an empty array from a file that clearly should have data
+            // as potentially corrupt only if the file is suspiciously small
+            // (e.g. just "[]"). A genuinely empty config is valid for first launch.
+            if (loaded.empty())
+            {
+                auto fileSize = std::filesystem::file_size(path);
+                if (fileSize < 10)
+                {
+                    spdlog::warn("Config file appears truncated ({} bytes): {}",
+                                 fileSize, path.string());
+                    // Still valid JSON, but suspicious — try backup
+                    return false;
+                }
+            }
+
+            models_ = std::move(loaded);
+            return true;
         }
         catch (const std::exception &e)
         {
-            spdlog::error("Failed to load config: {}", e.what());
+            spdlog::error("Failed to parse config {}: {}", path.string(), e.what());
+            return false;
         }
     }
 
@@ -130,9 +184,81 @@ namespace sm
         try
         {
             nlohmann::json j = models_;
-            std::ofstream f(path);
-            f << j.dump(2);
-            spdlog::debug("Saved {} models to config", models_.size());
+            std::string data = j.dump(2);
+
+            // Validate serialized data before writing (sanity check)
+            if (data.empty() || data == "null")
+            {
+                spdlog::error("Refusing to save empty/null config — data corruption avoided");
+                return;
+            }
+
+            // Atomic save: write to temp file, then rename over the original.
+            // If we crash mid-write, only the .tmp is corrupted — original is safe.
+            auto tmpPath = path;
+            tmpPath += ".tmp";
+            auto bakPath = path;
+            bakPath += ".bak";
+
+            // Step 1: Write to .tmp
+            {
+                std::ofstream f(tmpPath, std::ios::trunc);
+                if (!f.is_open())
+                {
+                    spdlog::error("Failed to open temp config for writing: {}", tmpPath.string());
+                    return;
+                }
+                f << data;
+                f.flush();
+                if (!f.good())
+                {
+                    spdlog::error("Failed to write temp config: {}", tmpPath.string());
+                    return;
+                }
+            }
+
+            // Step 2: Verify the .tmp file is valid JSON before committing
+            try
+            {
+                std::ifstream verify(tmpPath);
+                auto verifyJson = nlohmann::json::parse(verify);
+                if (!verifyJson.is_array())
+                {
+                    spdlog::error("Temp config verification failed — not a JSON array");
+                    std::filesystem::remove(tmpPath);
+                    return;
+                }
+            }
+            catch (const std::exception &e)
+            {
+                spdlog::error("Temp config verification failed: {}", e.what());
+                std::filesystem::remove(tmpPath);
+                return;
+            }
+
+            // Step 3: Backup existing file (rotate .bak)
+            if (std::filesystem::exists(path))
+            {
+                std::error_code ec;
+                std::filesystem::copy_file(path, bakPath,
+                                           std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec)
+                    spdlog::warn("Failed to create config backup: {}", ec.message());
+            }
+
+            // Step 4: Atomic rename .tmp → config.json
+            std::error_code ec;
+            std::filesystem::rename(tmpPath, path, ec);
+            if (ec)
+            {
+                spdlog::error("Failed to rename temp config: {}", ec.message());
+                // Fallback: direct copy
+                std::filesystem::copy_file(tmpPath, path,
+                                           std::filesystem::copy_options::overwrite_existing, ec);
+                std::filesystem::remove(tmpPath);
+            }
+
+            spdlog::debug("Saved {} models to config (atomic)", models_.size());
         }
         catch (const std::exception &e)
         {
@@ -633,8 +759,45 @@ namespace sm
             {"max_height", encoding.maxHeight},
             {"threads", encoding.threads}};
 
-        std::ofstream f(path);
-        f << j.dump(2);
+        // Atomic save: write to .tmp, verify, backup existing, then rename
+        auto tmpPath = path;
+        tmpPath += ".tmp";
+        auto bakPath = path;
+        bakPath += ".bak";
+
+        {
+            std::ofstream f(tmpPath, std::ios::trunc);
+            if (!f.is_open())
+            {
+                spdlog::error("Failed to open temp app config for writing: {}", tmpPath.string());
+                return;
+            }
+            f << j.dump(2);
+            f.flush();
+            if (!f.good())
+            {
+                spdlog::error("Failed to write temp app config: {}", tmpPath.string());
+                return;
+            }
+        }
+
+        // Backup existing
+        if (std::filesystem::exists(path))
+        {
+            std::error_code ec;
+            std::filesystem::copy_file(path, bakPath,
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+        }
+
+        // Atomic rename
+        std::error_code ec;
+        std::filesystem::rename(tmpPath, path, ec);
+        if (ec)
+        {
+            std::filesystem::copy_file(tmpPath, path,
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+            std::filesystem::remove(tmpPath);
+        }
     }
 
     // Build folder name from format string (Issue #2)

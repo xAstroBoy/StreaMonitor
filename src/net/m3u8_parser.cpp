@@ -4,6 +4,7 @@
 #include <regex>
 #include <cmath>
 #include <iomanip>
+#include <set>
 #include <spdlog/spdlog.h>
 
 namespace sm
@@ -62,14 +63,49 @@ namespace sm
         if (qpos == std::string::npos)
             return targetUrl;
 
-        std::string query = sourceUrl.substr(qpos);
+        // Parse source query params into key=value pairs
+        std::string sourceQuery = sourceUrl.substr(qpos + 1);
+        std::string result = targetUrl;
+
+        // Parse existing target params into a set of keys for dedup
+        std::set<std::string> existingKeys;
         auto tqpos = targetUrl.find('?');
         if (tqpos != std::string::npos)
         {
-            // Merge: append with &
-            return targetUrl + "&" + query.substr(1);
+            std::string targetQuery = targetUrl.substr(tqpos + 1);
+            std::istringstream tss(targetQuery);
+            std::string param;
+            while (std::getline(tss, param, '&'))
+            {
+                auto eqPos = param.find('=');
+                if (eqPos != std::string::npos)
+                    existingKeys.insert(param.substr(0, eqPos));
+                else
+                    existingKeys.insert(param);
+            }
         }
-        return targetUrl + query;
+
+        // Append source params that don't already exist in target
+        std::istringstream ss(sourceQuery);
+        std::string param;
+        while (std::getline(ss, param, '&'))
+        {
+            if (param.empty())
+                continue;
+            auto eqPos = param.find('=');
+            std::string key = (eqPos != std::string::npos) ? param.substr(0, eqPos) : param;
+
+            if (existingKeys.count(key))
+                continue; // Skip duplicate
+
+            existingKeys.insert(key);
+            if (result.find('?') != std::string::npos)
+                result += "&" + param;
+            else
+                result += "?" + param;
+        }
+
+        return result;
     }
 
     // ─────────────────────────────────────────────────────────────────

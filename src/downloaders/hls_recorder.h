@@ -462,7 +462,7 @@ namespace sm
                        CancellationToken &cancelToken,
                        PlaylistDecoder decoder = nullptr);
             void stop();
-            
+
             // Destructor ensures thread is properly cleaned up
             ~SegmentFeeder()
             {

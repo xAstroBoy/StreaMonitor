@@ -650,10 +650,12 @@ namespace sm
             {
                 if (audio.groupId == selected->audioGroupId && !audio.uri.empty())
                 {
+                    // Resolve audio URI to absolute URL (may be relative!)
+                    std::string audioUrl = M3U8Parser::resolveUrl(masterUrl, audio.uri);
                     logger_->info("Split audio/video detected — merging via SegmentFeeder");
                     logger_->debug("  video: {}", videoUrl);
-                    logger_->debug("  audio: {}", audio.uri);
-                    return videoUrl + "\t" + audio.uri;
+                    logger_->debug("  audio: {}", audioUrl);
+                    return videoUrl + "\t" + audioUrl;
                 }
             }
             // No matching audio rendition found — fall through to video-only

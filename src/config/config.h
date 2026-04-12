@@ -179,6 +179,10 @@ namespace sm
         mutable std::mutex mutex_;
         std::vector<ModelConfig> models_;
         std::filesystem::path lastPath_;
+
+        // Try loading models from a file. Returns true on success.
+        // Caller must hold mutex_.
+        bool tryLoadFrom_(const std::filesystem::path &path);
     };
 
     // JSON serialization

@@ -196,8 +196,13 @@ namespace sm
         if (url.empty())
             return "";
 
-        // Use CMAF URL if available
-        if (lastInfo_.contains("_cmaf_url"))
+        // LLHLS URLs (/v1/edge/streams/.../llhls.m3u8) are already the
+        // correct master playlist — do NOT apply CMAF rewriting to them.
+        bool isLlhls = url.find("/llhls.m3u8") != std::string::npos ||
+                       url.find("/v1/edge/streams/") != std::string::npos;
+
+        // Use CMAF URL if available and this is NOT an LLHLS stream
+        if (!isLlhls && lastInfo_.contains("_cmaf_url"))
             url = lastInfo_["_cmaf_url"].get<std::string>();
 
         return selectResolution(url);

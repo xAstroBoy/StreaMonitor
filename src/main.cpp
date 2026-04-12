@@ -245,6 +245,37 @@ int main(int argc, char **argv)
     // Writes detailed stack traces to crashes/ on any unhandled crash.
     sm::installCrashHandler("crashes");
 
+    // ── Set working directory to exe's location ─────────────────────
+    // When launched from Windows Startup (HKCU\Run registry), the CWD
+    // is typically C:\Windows\System32. All config files (config.json,
+    // app_config.json) are relative to the exe — fix CWD immediately.
+#ifdef _WIN32
+    {
+        wchar_t exePath[MAX_PATH] = {};
+        DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        if (len > 0)
+        {
+            std::wstring dir(exePath, len);
+            auto pos = dir.find_last_of(L"\\/");
+            if (pos != std::wstring::npos)
+            {
+                dir = dir.substr(0, pos);
+                SetCurrentDirectoryW(dir.c_str());
+            }
+        }
+    }
+#else
+    {
+        std::string myExe = getMyExePath();
+        if (!myExe.empty())
+        {
+            std::string dir = dirOf(myExe);
+            if (!dir.empty())
+                chdir(dir.c_str());
+        }
+    }
+#endif
+
     // Check for --no-duplicate-check or --crash-restart flags
     bool checkDuplicates = true;
     bool crashRestart = false;

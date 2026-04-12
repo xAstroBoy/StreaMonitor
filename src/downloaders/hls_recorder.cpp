@@ -773,8 +773,9 @@ namespace sm
         if (!initUrl.empty())
         {
             // Retry init segment download (transient errors like 400 can happen)
+            // LLHLS sessions may be short-lived; retry with brief delays
             bool initSuccess = false;
-            for (int attempt = 1; attempt <= 3; attempt++)
+            for (int attempt = 1; attempt <= 5; attempt++)
             {
                 auto initResp = http.get(initUrl, 15);
                 if (initResp.ok() && !initResp.body.empty())
@@ -785,7 +786,7 @@ namespace sm
                     initSuccess = true;
                     break;
                 }
-                
+
                 // Log and retry on transient errors (400, 403, 500-599, etc)
                 // but fail immediately on 404 (not found)
                 if (initResp.statusCode == 404)
@@ -793,18 +794,19 @@ namespace sm
                     log->error("SegmentFeeder: init segment not found (404)");
                     return false;
                 }
-                
-                log->warn("SegmentFeeder: init segment download failed (HTTP {}) - attempt {}/3",
+
+                log->warn("SegmentFeeder: init segment download failed (HTTP {}) - attempt {}/5",
                           initResp.statusCode, attempt);
-                
-                if (attempt < 3)
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+                if (attempt < 5)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500 * attempt));
             }
-            
+
             if (!initSuccess)
             {
-                log->error("SegmentFeeder: all init segment download attempts failed");
-                return false;
+                // Don't abort — some fMP4 streams can start from media segments
+                log->warn("SegmentFeeder: all init segment download attempts failed — "
+                          "will try to proceed with media segments only");
             }
         }
 
@@ -1183,22 +1185,11 @@ namespace sm
 
         if (thread.joinable())
         {
-            // Wait with timeout to prevent hangs (e.g. if thread is stuck in HTTP request)
-            // Use a 5-second timeout; if thread doesn't finish, detach and let it clean up
-            auto start = Clock::now();
-            const auto timeout = std::chrono::seconds(5);
-            
-            while (thread.joinable() && (Clock::now() - start < timeout))
-            {
-                // Brief sleep to avoid busy-waiting
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-            
-            if (thread.joinable())
-            {
-                log->warn("SegmentFeeder: thread did not finish within timeout, detaching");
-                thread.detach();
-            }
+            // The thread loop checks running.load() and should exit promptly.
+            // Worst case it’s blocked in an HTTP request (10-15s timeout).
+            // NEVER detach — a detached thread that outlives SegmentFeeder
+            // will access destroyed members and crash (ACCESS_VIOLATION #6).
+            thread.join();
         }
 
         // Clean up AVIO
