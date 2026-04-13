@@ -270,6 +270,11 @@ namespace sm
         std::string lastMasterUrl_; // Master playlist URL for feeder monitoring
         mutable std::mutex masterUrlMutex_;
 
+        // Temp file for split-audio local master playlist (CB LLHLS)
+        // Written by selectResolution(), cleaned up after recording.
+        std::string splitAudioTempFile_;
+        void cleanupSplitAudioTempFile();
+
         // Condition variable for efficient sleeping (replaces 1-second polling)
         std::mutex sleepMutex_;
         std::condition_variable sleepCv_;

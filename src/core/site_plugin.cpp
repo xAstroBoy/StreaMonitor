@@ -640,17 +640,61 @@ namespace sm
         // If the master has split audio/video (LLHLS format), build a filtered
         // master playlist and write it to a temp file so ffmpeg can read both
         // audio and video chunklists and sync them via EXT-X-PROGRAM-DATE-TIME.
+        // This approach (from issue #342) lets FFmpeg's HLS demuxer handle A/V
+        // stream synchronization natively, avoiding the manual interleaving
+        // issues with SegmentFeeder that caused audio desync.
         if (master.hasSplitAudio() && !selected->audioGroupId.empty())
         {
-            // Split audio (CB LLHLS): return "videoUrl\taudioUrl" so the
-            // SegmentFeeder can download both playlists and merge the
-            // fMP4 init segments into a single byte stream with two tracks.
+            // Build a filtered master playlist with absolute URLs containing
+            // only the selected video variant and its matching audio group.
+            std::string filteredMaster = M3U8Parser::buildFilteredMaster(
+                master, *selected, masterUrl);
+
+            if (!filteredMaster.empty())
+            {
+                // Clean up any previous temp file
+                cleanupSplitAudioTempFile();
+
+                // Write to a temp file with a unique name
+                auto tempDir = std::filesystem::temp_directory_path();
+                auto now = std::chrono::system_clock::now();
+                auto epoch = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 now.time_since_epoch())
+                                 .count();
+                std::string tempName = "sm_master_" + username_ + "_" +
+                                       std::to_string(epoch) + ".m3u8";
+                auto tempPath = tempDir / tempName;
+
+                std::ofstream ofs(tempPath, std::ios::binary);
+                if (ofs.is_open())
+                {
+                    ofs << filteredMaster;
+                    ofs.close();
+                    splitAudioTempFile_ = tempPath.string();
+
+                    logger_->info("Split audio/video detected — using local master playlist");
+                    logger_->info("  temp file: {}", splitAudioTempFile_);
+                    logger_->debug("  video: {}", selected->url);
+                    for (const auto &audio : master.audioRenditions)
+                    {
+                        if (audio.groupId == selected->audioGroupId)
+                            logger_->debug("  audio: {}", audio.uri);
+                    }
+                    return splitAudioTempFile_;
+                }
+                else
+                {
+                    logger_->warn("Failed to write temp master playlist — "
+                                  "falling back to SegmentFeeder");
+                }
+            }
+
+            // Fallback: return videoUrl\taudioUrl for SegmentFeeder
             std::string videoUrl = M3U8Parser::resolveUrl(masterUrl, selected->url);
             for (const auto &audio : master.audioRenditions)
             {
                 if (audio.groupId == selected->audioGroupId && !audio.uri.empty())
                 {
-                    // Resolve audio URI to absolute URL (may be relative!)
                     std::string audioUrl = M3U8Parser::resolveUrl(masterUrl, audio.uri);
                     logger_->info("Split audio/video detected — merging via SegmentFeeder");
                     logger_->debug("  video: {}", videoUrl);
@@ -1612,6 +1656,9 @@ namespace sm
 
         setRecording(false);
 
+        // Clean up split-audio temp master playlist file (if any)
+        cleanupSplitAudioTempFile();
+
         bool ok = result.success;
 
         // Post-download cleanup (Python: _post_download_cleanup)
@@ -1636,6 +1683,25 @@ namespace sm
         }
 
         return ok;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Cleanup for split-audio temp master playlist file
+    // ─────────────────────────────────────────────────────────────────
+    void SitePlugin::cleanupSplitAudioTempFile()
+    {
+        if (!splitAudioTempFile_.empty())
+        {
+            std::error_code ec;
+            if (fs::exists(splitAudioTempFile_, ec))
+            {
+                fs::remove(splitAudioTempFile_, ec);
+                if (!ec)
+                    logger_->debug("Cleaned up split-audio temp file: {}",
+                                   splitAudioTempFile_);
+            }
+            splitAudioTempFile_.clear();
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────

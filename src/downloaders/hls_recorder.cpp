@@ -1396,7 +1396,7 @@ namespace sm
                 // ── Local playlist (rolling refresh) ────────────────────
                 // When reading from a local .m3u8 that references remote segments,
                 // we need protocol_whitelist to allow both file and HTTP access.
-                av_dict_set(&opts, "protocol_whitelist", "file,http,https,tcp,tls,crypto", 0);
+                av_dict_set(&opts, "protocol_whitelist", "file,http,https,tcp,tls,crypto,data", 0);
 
                 // NOTE: Do NOT pass HTTP protocol options (-reconnect*, -timeout,
                 // -rw_timeout) here.  When the primary input is a local file, these
@@ -3340,26 +3340,47 @@ namespace sm
         bool useFeeder = false;
 
         // ── Split audio/video (CB LLHLS) ────────────────────────
-        // selectResolution() encodes split audio as "videoUrl\taudioUrl".
-        // Extract the audio URL and pass it to SegmentFeeder, which
-        // will download both playlists and merge the fMP4 streams.
+        // selectResolution() now writes a local master playlist for split
+        // audio/video streams (issue #342).  Detect if the URL is a local
+        // file path — if so, FFmpeg's HLS demuxer handles both audio and
+        // video natively with proper EXT-X-PROGRAM-DATE-TIME sync.
+        //
+        // Fallback: if selectResolution() couldn't write the temp file,
+        // it returns "videoUrl\taudioUrl" for SegmentFeeder merging.
+        bool isLocalMasterPlaylist = false;
         std::string splitAudioUrl;
         {
-            auto tabPos = videoUrl.find('\t');
-            if (tabPos != std::string::npos)
+            // Check if this is a local file path (temp master playlist)
+            isLocalMasterPlaylist = !videoUrl.empty() &&
+                                    (videoUrl[0] == '/' || videoUrl[0] == '\\' ||
+                                     (videoUrl.size() > 2 && videoUrl[1] == ':'));
+
+            if (isLocalMasterPlaylist)
             {
-                splitAudioUrl = videoUrl.substr(tabPos + 1);
-                videoUrl = videoUrl.substr(0, tabPos);
                 inputUrl = videoUrl;
-                log_->info("Split audio detected — video: {}", videoUrl);
-                log_->info("Split audio detected — audio: {}", splitAudioUrl);
+                log_->info("Using local master playlist for split audio/video: {}",
+                           videoUrl);
+            }
+            else
+            {
+                // Legacy fallback: split tab-separated video\taudio URLs
+                auto tabPos = videoUrl.find('\t');
+                if (tabPos != std::string::npos)
+                {
+                    splitAudioUrl = videoUrl.substr(tabPos + 1);
+                    videoUrl = videoUrl.substr(0, tabPos);
+                    inputUrl = videoUrl;
+                    log_->info("Split audio detected (SegmentFeeder) — video: {}", videoUrl);
+                    log_->info("Split audio detected (SegmentFeeder) — audio: {}", splitAudioUrl);
+                }
             }
         }
 
-        // ── Always attempt SegmentFeeder for every site ──────────
-        // All sites use HLS playlists — feeder.start() validates the
-        // content and returns false if the URL isn't actually m3u8,
-        // so the fallback to direct URL input is still safe.
+        // ── SegmentFeeder: skip for local master playlists ───────
+        // Local master playlists are handled directly by FFmpeg's HLS
+        // demuxer (openInput detects local file and sets protocol_whitelist).
+        // Only use SegmentFeeder for remote URLs.
+        if (!isLocalMasterPlaylist)
         {
             feederUa = userAgent.empty() ? config_.userAgent : userAgent;
 
@@ -4137,19 +4158,37 @@ namespace sm
                         {
                             inputUrl = pr.newUrl;
 
-                            // Extract split audio URL if present (CB LLHLS)
+                            // Check if the new URL is a local master playlist
+                            // (split audio/video — issue #342)
+                            bool newIsLocal = !inputUrl.empty() &&
+                                              (inputUrl[0] == '/' || inputUrl[0] == '\\' ||
+                                               (inputUrl.size() > 2 && inputUrl[1] == ':'));
+
+                            if (newIsLocal)
                             {
+                                // Local master playlist — FFmpeg handles A/V directly
+                                isLocalMasterPlaylist = true;
+                                useFeeder = false;
+                                splitAudioUrl.clear();
+                                feeder.audioPlaylistUrl.clear();
+                                log_->info("Resume with local master playlist: {}", inputUrl);
+                            }
+                            else
+                            {
+                                // Extract split audio URL if present (CB LLHLS fallback)
                                 auto tp = inputUrl.find('\t');
                                 if (tp != std::string::npos)
                                 {
                                     splitAudioUrl = inputUrl.substr(tp + 1);
                                     inputUrl = inputUrl.substr(0, tp);
                                     feeder.audioPlaylistUrl = splitAudioUrl;
+                                    isLocalMasterPlaylist = false;
                                 }
                                 else
                                 {
                                     splitAudioUrl.clear();
                                     feeder.audioPlaylistUrl.clear();
+                                    isLocalMasterPlaylist = false;
                                 }
                             }
 
