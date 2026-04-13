@@ -1093,8 +1093,13 @@ namespace sm
                         if (sm::generateContactSheet(videoFile, thumbPath.string(), tcfg, logCb))
                         {
                             logger_->info("Contact sheet saved: {}", thumbPath.filename().string());
-                            // Embed as cover art inside the MKV (in-place)
-                            sm::embedThumbnailInMKV(videoFile, thumbPath.string(), logCb, "", false);
+                            // Embed as cover art only for MKV containers (in-place EBML edit).
+                            // For MP4/TS the embedThumbnailInMKV() path would remux a
+                            // duplicate .mkv next to the original, which is not desired (Issue #8).
+                            if (config_->container == ContainerFormat::MKV)
+                            {
+                                sm::embedThumbnailInMKV(videoFile, thumbPath.string(), logCb, "", false);
+                            }
                         }
                     }
                 }
