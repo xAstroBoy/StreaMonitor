@@ -239,8 +239,21 @@ static void printHelp()
 int cliMain(int argc, char **argv)
 try
 {
+#ifndef _WIN32
+    {
+        // Use sigaction without SA_RESTART so blocking std::getline can be
+        // interrupted by Ctrl+C and the CLI exits promptly.
+        struct sigaction sa{};
+        sa.sa_handler = signalHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGINT, &sa, nullptr);
+        sigaction(SIGTERM, &sa, nullptr);
+    }
+#else
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+#endif
 
     initLogging();
     spdlog::info("StreaMonitor v2.0 starting (CLI mode)");
@@ -263,12 +276,16 @@ try
     // Apply configured log level globally
     {
         spdlog::level::level_enum lvl = spdlog::level::info;
+        if (config.logLevel == "trace")
+            lvl = spdlog::level::trace;
         if (config.logLevel == "debug")
             lvl = spdlog::level::debug;
         else if (config.logLevel == "warn")
             lvl = spdlog::level::warn;
         else if (config.logLevel == "error")
             lvl = spdlog::level::err;
+        else if (config.logLevel == "quiet" || config.logLevel == "off" || config.logLevel == "none")
+            lvl = spdlog::level::off;
         spdlog::set_level(lvl);
         spdlog::apply_all([lvl](std::shared_ptr<spdlog::logger> l)
                           { l->set_level(lvl); });

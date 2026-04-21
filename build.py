@@ -48,9 +48,19 @@ IS_LINUX = SYSTEM == "linux"
 
 def find_vcpkg() -> Path | None:
     """Find vcpkg installation."""
-    candidates = [
-        os.environ.get("VCPKG_ROOT", ""),
-    ]
+    candidates = [os.environ.get("VCPKG_ROOT", "")]
+
+    # Also infer from vcpkg on PATH (brew/choco/etc)
+    vcpkg_on_path = shutil.which("vcpkg.exe" if IS_WINDOWS else "vcpkg")
+    if vcpkg_on_path:
+        vcpkg_bin = Path(vcpkg_on_path).resolve()
+        candidates.extend([
+            str(vcpkg_bin.parent),
+            str(vcpkg_bin.parent.parent),
+            str(vcpkg_bin.parent / "share" / "vcpkg"),
+            str(vcpkg_bin.parent.parent / "share" / "vcpkg"),
+            str(vcpkg_bin.parent.parent / "libexec"),
+        ])
     
     if IS_WINDOWS:
         candidates.extend([
@@ -62,13 +72,29 @@ def find_vcpkg() -> Path | None:
             "/usr/local/vcpkg",
             str(Path.home() / "vcpkg"),
             "/opt/vcpkg",
+            "/opt/homebrew/opt/vcpkg",
+            "/opt/homebrew/share/vcpkg",
+            "/opt/homebrew/Cellar/vcpkg",
         ])
     
     vcpkg_exe = "vcpkg.exe" if IS_WINDOWS else "vcpkg"
     
+    # De-duplicate while preserving order
+    seen = set()
     for candidate in candidates:
+        if not candidate:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+
         p = Path(candidate)
-        if p.is_dir() and (p / vcpkg_exe).exists():
+        if not p.is_dir():
+            continue
+
+        # Accept either classic vcpkg root (contains vcpkg executable)
+        # OR layouts that still expose the official CMake toolchain file.
+        if (p / vcpkg_exe).exists() or (p / "scripts" / "buildsystems" / "vcpkg.cmake").exists():
             return p
     return None
 

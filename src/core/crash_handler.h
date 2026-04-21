@@ -17,4 +17,8 @@ namespace sm
     /// @param crashDir  Directory for crash logs (default: "crashes")
     void installCrashHandler(const std::string &crashDir = "crashes");
 
+    /// Set extra command-line args appended during crash auto-restart.
+    /// Example: "--cli" keeps the restarted process in CLI mode.
+    void setCrashRestartExtraArgs(const std::string &args);
+
 } // namespace sm

@@ -329,6 +329,10 @@ int main(int argc, char **argv)
         }
     }
 
+    // Preserve launch mode across crash auto-restart.
+    // Without this, a CLI crash restarts into GUI default mode.
+    sm::setCrashRestartExtraArgs(cliMode ? "--cli" : "");
+
     int result = 0;
 
     if (cliMode)

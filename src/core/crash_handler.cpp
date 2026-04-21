@@ -62,6 +62,7 @@ namespace sm
     // ─── Pre-allocated static state (NO heap at crash time) ─────
     static char g_crashDir[512] = "crashes";
     static std::once_flag g_initFlag;
+    static char g_restartExtraArgs[256] = "";
 
     // 256 KB pre-allocated buffer — enough for any crash report
     static constexpr size_t CRASH_BUF_SIZE = 256 * 1024;
@@ -136,6 +137,12 @@ namespace sm
     // Track whether we already attempted restart (prevent infinite loop)
     static volatile long g_restartAttempted = 0;
 
+    void setCrashRestartExtraArgs(const std::string &args)
+    {
+        strncpy(g_restartExtraArgs, args.c_str(), sizeof(g_restartExtraArgs) - 1);
+        g_restartExtraArgs[sizeof(g_restartExtraArgs) - 1] = '\0';
+    }
+
 #ifdef _WIN32
     static void selfRestartWin32()
     {
@@ -150,10 +157,16 @@ namespace sm
         if (len == 0 || len >= MAX_PATH)
             return;
 
-        // Build command line: "exe" --crash-restart
+        // Build command line: "exe" --crash-restart [extra args]
         static wchar_t cmdLine[MAX_PATH + 64];
+        wchar_t extraWide[256] = {};
+        if (g_restartExtraArgs[0] != '\0')
+            MultiByteToWideChar(CP_UTF8, 0, g_restartExtraArgs, -1, extraWide, _countof(extraWide));
         _snwprintf_s(cmdLine, _countof(cmdLine), _TRUNCATE,
-                     L"\"%s\" --crash-restart", exePath);
+                     L"\"%s\" --crash-restart%s%s",
+                     exePath,
+                     extraWide[0] ? L" " : L"",
+                     extraWide[0] ? extraWide : L"");
 
         STARTUPINFOW si = {};
         si.cb = sizeof(si);
@@ -193,7 +206,10 @@ namespace sm
         {
             // Child: wait 2 seconds for parent to fully exit, then exec
             sleep(2);
-            execl(exePath, exePath, "--crash-restart", (char *)nullptr);
+            if (g_restartExtraArgs[0] != '\0')
+                execl(exePath, exePath, "--crash-restart", g_restartExtraArgs, (char *)nullptr);
+            else
+                execl(exePath, exePath, "--crash-restart", (char *)nullptr);
             _exit(127); // execl failed
         }
         // Parent continues to _exit() below

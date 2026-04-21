@@ -818,7 +818,20 @@ namespace sm
         HLSMediaPlaylist audioPlaylist;
         if (!audioPlaylistUrl.empty() && !videoInitData.empty())
         {
-            auto audioResp = http.get(audioPlaylistUrl, 15);
+            HttpResponse audioResp;
+            for (int attempt = 1; attempt <= 5; attempt++)
+            {
+                audioResp = http.get(audioPlaylistUrl, 15);
+                if (audioResp.ok() && !audioResp.body.empty())
+                    break;
+
+                log->warn("SegmentFeeder: audio playlist fetch failed (HTTP {}) - attempt {}/5",
+                          audioResp.statusCode, attempt);
+
+                if (attempt < 5)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(350 * attempt));
+            }
+
             if (audioResp.ok() && !audioResp.body.empty())
             {
                 audioPlaylist = M3U8Parser::parseMedia(audioResp.body, audioPlaylistUrl);
@@ -836,9 +849,21 @@ namespace sm
                 std::string audioInitData;
                 if (!audioInitUrl.empty())
                 {
-                    auto aiResp = http.get(audioInitUrl, 15);
-                    if (aiResp.ok() && !aiResp.body.empty())
-                        audioInitData = std::move(aiResp.body);
+                    for (int attempt = 1; attempt <= 5; attempt++)
+                    {
+                        auto aiResp = http.get(audioInitUrl, 15);
+                        if (aiResp.ok() && !aiResp.body.empty())
+                        {
+                            audioInitData = std::move(aiResp.body);
+                            break;
+                        }
+
+                        log->warn("SegmentFeeder: audio init download failed (HTTP {}) - attempt {}/5",
+                                  aiResp.statusCode, attempt);
+
+                        if (attempt < 5)
+                            std::this_thread::sleep_for(std::chrono::milliseconds(500 * attempt));
+                    }
                 }
 
                 if (!audioInitData.empty())
